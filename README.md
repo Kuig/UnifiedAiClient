@@ -235,9 +235,25 @@ preload_model(
 )
 ```
 
+### Text Embeddings (Ollama only)
+
+Generate text embedding vectors using local models such as `bge-m3`:
+
+```python
+from unified_ai_client import get_embedding
+
+vector = get_embedding(
+    provider="ollama",
+    model="bge-m3",
+    text="I like rusty spoons.",
+)
+print(f"Embedding vector length: {len(vector)}")
+print(f"First 5 coordinates: {vector[:5]}")
+```
+
 ### Script Provider
 
-Run any script implementing the `LLM_Behaviour_Interface.md` interface:
+Run any script implementing the [`LLM_Behaviour_Interface.md`](LLM_Behaviour_Interface.md) interface:
 
 ```python
 response = call_ai(
@@ -259,6 +275,101 @@ try:
 finally:
     cleanup()   # Deletes uploaded Google AI files
 ```
+
+---
+
+## API Reference
+
+### Functions
+
+#### `call_ai`
+The primary function to execute text generation requests across any provider.
+
+```python
+def call_ai(
+    provider: str,
+    model: str,
+    prompt: str,
+    *,
+    system_prompt: str | None = None,
+    messages: list[dict] | None = None,
+    file_path: str | list[str] | None = None,
+    temperature: float = 0.7,
+    thinking: bool = False,
+    format_json: bool = False,
+    timeout: int = 120,
+    include_reasoning: bool = False,
+    max_retries: int = 3,
+    retry_base_delay: float = 5.0,
+) -> AiResponse:
+```
+
+* **Parameters:**
+  * `provider` (`str`): The name of the AI provider (`"ollama"`, `"google"`, `"openai"`, `"anthropic"`, `"lmstudio"`, `"llamacpp"`, `"script"`).
+  * `model` (`str`): The target model identifier (or script path for `"script"` provider).
+  * `prompt` (`str`): The user prompt.
+  * `system_prompt` (`str | None`, optional): System instructions. Defaults to `None`.
+  * `messages` (`list[dict] | None`, optional): A list of previous chat messages in the format `[{"role": "user" | "assistant", "content": "..."}]`. Messages can also include an optional `"files"` key containing a list of local file paths. Defaults to `None`.
+  * `file_path` (`str | list[str] | None`, optional): Local file path(s) to attach for multimodal prompts. Supports images, audio, PDFs, and text files. Defaults to `None`.
+  * `temperature` (`float`, optional): Sampling temperature. Defaults to `0.7`.
+  * `thinking` (`bool`, optional): Enables extended reasoning/thinking mode (e.g. on supported models). Defaults to `False`.
+  * `format_json` (`bool`, optional): Forces the model to respond in valid JSON format. Defaults to `False`.
+  * `timeout` (`int`, optional): Network timeout in seconds. Defaults to `120`.
+  * `include_reasoning` (`bool`, optional): Returns the step-by-step thinking process in the response. Defaults to `False`.
+  * `max_retries` (`int`, optional): Number of retry attempts on network/rate-limit failures. Defaults to `3`.
+  * `retry_base_delay` (`float`, optional): Initial backoff delay for exponential retries in seconds. Defaults to `5.0`.
+* **Returns:** `AiResponse` dataclass containing response text, token metrics, and optional reasoning text.
+
+---
+
+#### `get_embedding`
+Generates a numerical embedding vector for the provided text.
+
+```python
+def get_embedding(
+    provider: str,
+    model: str,
+    text: str,
+) -> list[float]:
+```
+
+* **Parameters:**
+  * `provider` (`str`): The AI provider supporting embeddings (e.g., `"ollama"`).
+  * `model` (`str`): The embedding model name (e.g., `"bge-m3"`).
+  * `text` (`str`): The input text to embed.
+* **Returns:** A list of float numbers (`list[float]`) representing the high-dimensional vector.
+
+---
+
+#### `preload_model`
+Pre-loads a model into system memory (currently only supported by the `"ollama"` provider).
+
+```python
+def preload_model(
+    provider: str,
+    model: str,
+    keep_alive: str = "15m",
+) -> None:
+```
+
+* **Parameters:**
+  * `provider` (`str`): Must be `"ollama"`.
+  * `model` (`str`): The Ollama model name to preload.
+  * `keep_alive` (`str`, optional): How long to keep the model resident in memory (e.g., `"15m"`, `"1h"`, `"0"`). Defaults to `"15m"`.
+
+---
+
+### Dataclasses
+
+#### `AiResponse`
+The standard response object returned by `call_ai()`.
+
+* **Fields:**
+  * `text` (`str`): The final generated response text.
+  * `input_tokens` (`int`): The number of prompt/input tokens consumed. Defaults to `0`.
+  * `output_tokens` (`int`): The number of completion/output tokens generated. Defaults to `0`.
+  * `reasoning_tokens` (`int`): The number of tokens spent on internal reasoning/thinking. Defaults to `0`.
+  * `reasoning_text` (`str`): The full reasoning/thinking transcript if requested via `include_reasoning=True` (and supported by the provider). Defaults to `""`.
 
 ---
 
