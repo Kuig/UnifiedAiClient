@@ -1,0 +1,41 @@
+{
+    "ollama": {
+        "url": "http://localhost:11434",
+        "timeout": 120,
+        "keep_alive": "15m",
+        "context_size": 0
+    },
+	
+    "google": {
+        "sleep_time": 3,
+        "disable_safety": false,
+        "timeout": 120,
+        "upload_poll_timeout": 15
+    },
+	
+    "openai": {
+        "url": "https://api.openai.com",
+        "timeout": 120,
+        "sleep_time": 1,
+        "max_tokens": 8192
+    },
+	
+    "anthropic": {
+        "url": "https://api.anthropic.com",
+        "timeout": 120,
+        "sleep_time": 1,
+        "max_tokens": 8192
+    },
+	
+    "lmstudio": {
+        "url": "http://localhost:1234",
+        "timeout": 120,
+        "context_size": 0
+    },
+	
+    "llamacpp": {
+        "url": "http://localhost:8080",
+        "timeout": 120,
+        "context_size": 0
+    }
+}

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-ai-client"
+version = "0.1.0"
+description = "Unified AI client"
+requires-python = ">=3.10"
+dependencies = [
+    "google-genai>=1.62.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["unified_ai_client*"]
+
