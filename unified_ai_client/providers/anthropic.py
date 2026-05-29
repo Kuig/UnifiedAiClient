@@ -191,7 +191,8 @@ class AnthropicProvider(BaseProvider):
 
         resp = self._post(payload, request.timeout)
 
-        # Parse content blocks
+        # Parse content blocks — always collect both text and thinking regardless
+        # of include_reasoning: token estimation requires the raw thinking text.
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         for block in resp.get("content", []):
@@ -200,13 +201,27 @@ class AnthropicProvider(BaseProvider):
             elif block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
 
+        raw_reasoning = "".join(reasoning_parts)
+        response_text = "".join(text_parts)
+
         usage = resp.get("usage", {})
+        output_tokens = usage.get("output_tokens", 0)
+
+        # Anthropic's output_tokens aggregates thinking + response tokens.
+        # Estimate reasoning_tokens from the char-ratio of the combined output.
+        reasoning_tokens = 0
+        if raw_reasoning:
+            total_chars = len(response_text) + len(raw_reasoning)
+            if total_chars > 0 and output_tokens > 0:
+                chars_per_token = total_chars / output_tokens
+                reasoning_tokens = max(1, round(len(raw_reasoning) / chars_per_token))
+
         return AiResponse(
-            text="".join(text_parts),
+            text=response_text,
             input_tokens=usage.get("input_tokens", 0),
-            output_tokens=usage.get("output_tokens", 0),
-            reasoning_tokens=0,
-            reasoning_text="".join(reasoning_parts) if request.include_reasoning else "",
+            output_tokens=max(0, output_tokens - reasoning_tokens),
+            reasoning_tokens=reasoning_tokens,
+            reasoning_text=raw_reasoning if request.include_reasoning else "",
         )
 
     def preload_model(self, model: str, keep_alive: str = "15m") -> None:

@@ -294,19 +294,23 @@ class GoogleProvider(BaseProvider):
             reasoning_tokens = getattr(usage, "thoughts_token_count", 0) or 0
 
         # --- Extract text and reasoning ---
+        # Always collect thought parts regardless of request.thinking: a model
+        # may produce thinking output even when thinking was not explicitly
+        # requested (e.g., thinking=False only minimises thinking, not prevents
+        # it entirely).
         response_text = ""
         reasoning_text = ""
-        if request.include_reasoning and request.thinking:
-            try:
-                for part in response.candidates[0].content.parts:
-                    if getattr(part, "thought", False):
-                        reasoning_text += part.text or ""
-                    else:
-                        response_text += part.text or ""
-            except (IndexError, AttributeError):
-                response_text = getattr(response, "text", "") or ""
-        else:
+        try:
+            for part in response.candidates[0].content.parts:
+                if getattr(part, "thought", False):
+                    reasoning_text += part.text or ""
+                else:
+                    response_text += part.text or ""
+        except (IndexError, AttributeError):
             response_text = getattr(response, "text", "") or ""
+
+        if not request.include_reasoning:
+            reasoning_text = ""
 
         return AiResponse(
             text=response_text,

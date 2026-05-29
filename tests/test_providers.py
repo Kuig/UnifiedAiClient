@@ -357,6 +357,7 @@ def _first_ollama_model() -> str | None:
         return None
 
 
+
 def test_ollama_live_generate() -> None:
     import urllib.error
     if not _ollama_available():
@@ -452,10 +453,73 @@ def test_ollama_live_embedding() -> None:
     except (RuntimeError, urllib.error.HTTPError) as exc:
         raise SkipTest(f"Model '{model}' does not support embeddings ({exc})")
 
+def test_ollama_live_reasoning_tokens_thinking_true() -> None:
+    """With thinking=True, reasoning_tokens must be > 0 if the model supports thinking.
 
-# ---------------------------------------------------------------------------
-# 6. Script provider — full round-trip
-# ---------------------------------------------------------------------------
+    Uses the first available chat model.  If the model responds but produces no
+    thinking output (empty reasoning_text and zero reasoning_tokens), the test
+    is skipped — the model does not support the 'think' parameter.
+    """
+    if not _ollama_available():
+        raise SkipTest("Ollama not reachable at localhost:11434")
+    model = _first_ollama_model()
+    if not model:
+        raise SkipTest("No chat-capable Ollama models installed")
+    from unified_ai_client import call_ai
+    try:
+        response = call_ai(
+            provider="ollama",
+            model=model,
+            prompt="What is 2+2? Think step by step.",
+            thinking=True,
+            include_reasoning=True,
+            temperature=0.0,
+            timeout=120,
+        )
+    except Exception as exc:
+        if "400" in str(exc):
+            raise SkipTest(f"Model '{model}' rejected thinking request (400)")
+        raise
+    if not response.reasoning_text and response.reasoning_tokens == 0:
+        raise SkipTest(f"Model '{model}' produced no thinking output — 'think' not supported")
+    assert isinstance(response.text, str)
+    assert len(response.text) > 0
+    assert response.reasoning_tokens > 0, (
+        f"reasoning_tokens must be > 0 when thinking text is present, got {response.reasoning_tokens}"
+    )
+
+
+def test_ollama_live_reasoning_tokens_thinking_false() -> None:
+    """With thinking=False, reasoning_tokens must be a non-negative integer.
+
+    Some models produce a small thinking trace even when not asked to —
+    the result must never be negative and must never raise.
+    Uses the first available chat model.
+    """
+    if not _ollama_available():
+        raise SkipTest("Ollama not reachable at localhost:11434")
+    model = _first_ollama_model()
+    if not model:
+        raise SkipTest("No chat-capable Ollama models installed")
+    from unified_ai_client import call_ai
+    try:
+        response = call_ai(
+            provider="ollama",
+            model=model,
+            prompt="What is 2+2?",
+            thinking=False,
+            temperature=0.0,
+            timeout=60,
+        )
+    except Exception as exc:
+        if "400" in str(exc):
+            raise SkipTest(f"Model '{model}' rejected request (400)")
+        raise
+    assert isinstance(response.text, str)
+    assert response.reasoning_tokens >= 0, (
+        f"reasoning_tokens must be >= 0, got {response.reasoning_tokens}"
+    )
+
 
 _ECHO_SCRIPT = '''\
 from __future__ import annotations
@@ -623,6 +687,7 @@ def test_google_thinking_config_offline() -> None:
     assert getattr(cfg_other_on, "include_thoughts", None) is not True
 
 
+
 # ---------------------------------------------------------------------------
 # 7. Google (skip if no API key)
 # ---------------------------------------------------------------------------
@@ -769,6 +834,8 @@ _TESTS = [
     ("ollama_live/generate", test_ollama_live_generate),
     ("ollama_live/with_text_file", test_ollama_live_with_text_file),
     ("ollama_live/include_reasoning", test_ollama_live_include_reasoning),
+    ("ollama_live/reasoning_tokens_thinking_true", test_ollama_live_reasoning_tokens_thinking_true),
+    ("ollama_live/reasoning_tokens_thinking_false", test_ollama_live_reasoning_tokens_thinking_false),
     ("ollama_live/embedding", test_ollama_live_embedding),
     # Cloud live (skip if no key)
     ("google_live/generate", test_google_live_generate),

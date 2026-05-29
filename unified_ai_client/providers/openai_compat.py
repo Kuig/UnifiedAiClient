@@ -226,19 +226,22 @@ class OpenAiCompatProvider(BaseProvider):
         choice = resp["choices"][0]["message"]
         usage = resp.get("usage", {})
 
-        reasoning_text = ""
-        if request.include_reasoning:
-            reasoning_text = choice.get("reasoning_content") or ""
+        # Always read reasoning_content from the response: the model may
+        # produce reasoning output even when not explicitly requested.
+        raw_reasoning = choice.get("reasoning_content") or ""
+
+        reasoning_tokens = (
+            usage.get("completion_tokens_details", {})
+            .get("reasoning_tokens", 0)
+        )
+        total_output = usage.get("completion_tokens", 0)
 
         return AiResponse(
             text=choice.get("content") or "",
             input_tokens=usage.get("prompt_tokens", 0),
-            output_tokens=usage.get("completion_tokens", 0),
-            reasoning_tokens=(
-                usage.get("completion_tokens_details", {})
-                .get("reasoning_tokens", 0)
-            ),
-            reasoning_text=reasoning_text,
+            output_tokens=max(0, total_output - reasoning_tokens),
+            reasoning_tokens=reasoning_tokens,
+            reasoning_text=raw_reasoning if request.include_reasoning else "",
         )
 
     def preload_model(self, model: str, keep_alive: str = "15m") -> None:

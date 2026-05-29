@@ -111,6 +111,17 @@ class OllamaProvider(BaseProvider):
     def call(self, request: AiRequest) -> AiResponse:
         """Execute an AI inference call to Ollama.
 
+        Token counting notes:
+        - ``output_tokens`` maps to ``eval_count``, which Ollama reports as the
+          total generated tokens (thinking trace + final response combined).
+        - ``reasoning_tokens`` is estimated when ``message.thinking`` is present
+          in the response. The estimation uses the exact chars-per-token ratio
+          of this response (``eval_count / (len(content) + len(thinking))``),
+          which is self-consistent and avoids a fixed global ratio.
+        - Both ``reasoning_tokens`` and ``raw_thinking`` are always processed
+          regardless of ``request.include_reasoning`` — a model may produce
+          thinking output even when not explicitly requested.
+
         Args:
             request: The request containing parameters.
 
@@ -178,17 +189,29 @@ class OllamaProvider(BaseProvider):
 
         # 6. Parse output
         message = resp.get("message", {})
-        content_text = message.get("content", "")
+        content_text = message.get("content", "") or ""
+        eval_count = resp.get("eval_count", 0)
 
-        reasoning_text = ""
-        if request.include_reasoning:
-            reasoning_text = message.get("thinking", "") or ""
+        # Ollama does not expose a dedicated thinking-token counter — eval_count
+        # aggregates both thinking and response tokens.  When thinking text is
+        # present, estimate reasoning_tokens using the exact chars-per-token
+        # ratio of this response: eval_count / (len(content) + len(thinking)).
+        # This avoids a fixed global ratio and is self-consistent per response.
+        raw_thinking = message.get("thinking", "") or ""
+        reasoning_text = raw_thinking if request.include_reasoning else ""
+
+        reasoning_tokens = 0
+        if raw_thinking:
+            total_chars = len(content_text) + len(raw_thinking)
+            if total_chars > 0 and eval_count > 0:
+                chars_per_token = total_chars / eval_count
+                reasoning_tokens = max(1, round(len(raw_thinking) / chars_per_token))
 
         return AiResponse(
             text=content_text,
             input_tokens=resp.get("prompt_eval_count", 0),
-            output_tokens=resp.get("eval_count", 0),
-            reasoning_tokens=0,
+            output_tokens=max(0, eval_count - reasoning_tokens),
+            reasoning_tokens=reasoning_tokens,
             reasoning_text=reasoning_text,
         )
 
