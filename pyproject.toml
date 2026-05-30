@@ -4,12 +4,33 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unified-ai-client"
-version = "0.1.0"
-description = "Unified AI client"
+version = "0.1.1"
+description = "Unified AI provider abstraction — route all AI calls through a single readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Kuig", email = "kuig.music@gmail.com" }
+]
+call_ai() interface"
 requires-python = ">=3.10"
 dependencies = [
     "google-genai>=1.62.0",
 ]
+keywords = ["ai", "llm", "ollama", "openai", "anthropic", "gemini", "unified"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/Kuig/UnifiedAiClient"
+Repository = "https://github.com/Kuig/UnifiedAiClient"
+"Bug Tracker" = "https://github.com/Kuig/UnifiedAiClient/issues"
 
 [tool.setuptools.packages.find]
 include = ["unified_ai_client*"]
