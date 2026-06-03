@@ -241,7 +241,7 @@ class OpenAiCompatProvider(BaseProvider):
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=max(0, total_output - reasoning_tokens),
             reasoning_tokens=reasoning_tokens,
-            reasoning_text=raw_reasoning if request.include_reasoning else "",
+            reasoning_text=raw_reasoning,
         )
 
     def preload_model(self, model: str, keep_alive: str = "15m") -> None:

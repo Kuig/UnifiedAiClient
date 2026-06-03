@@ -119,8 +119,7 @@ class OllamaProvider(BaseProvider):
           of this response (``eval_count / (len(content) + len(thinking))``),
           which is self-consistent and avoids a fixed global ratio.
         - Both ``reasoning_tokens`` and ``raw_thinking`` are always processed
-          regardless of ``request.include_reasoning`` — a model may produce
-          thinking output even when not explicitly requested.
+          — a model may produce thinking output even when not explicitly requested.
 
         Args:
             request: The request containing parameters.
@@ -192,13 +191,14 @@ class OllamaProvider(BaseProvider):
         content_text = message.get("content", "") or ""
         eval_count = resp.get("eval_count", 0)
 
+        # Both reasoning_tokens and raw_thinking are always processed.
         # Ollama does not expose a dedicated thinking-token counter — eval_count
         # aggregates both thinking and response tokens.  When thinking text is
         # present, estimate reasoning_tokens using the exact chars-per-token
         # ratio of this response: eval_count / (len(content) + len(thinking)).
         # This avoids a fixed global ratio and is self-consistent per response.
         raw_thinking = message.get("thinking", "") or ""
-        reasoning_text = raw_thinking if request.include_reasoning else ""
+        reasoning_text = raw_thinking
 
         reasoning_tokens = 0
         if raw_thinking:

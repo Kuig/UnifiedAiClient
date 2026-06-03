@@ -148,19 +148,17 @@ class GoogleProvider(BaseProvider):
         self,
         thinking: bool,
         model_name: str,
-        include_reasoning: bool,
     ) -> types.ThinkingConfig | None:
         """Build thinking configuration for the model.
 
         Adapts to model architecture: Gemini 3.x uses thinking_level,
         Gemini 2.5 uses thinking_budget, others use a small budget default.
-        When include_reasoning is True, adds include_thoughts=True so the
+        When thinking is True, adds include_thoughts=True so the
         SDK returns thought parts in the response candidates.
 
         Args:
             thinking: Whether thinking mode is requested.
             model_name: The target model identifier.
-            include_reasoning: Whether to return reasoning text to the caller.
 
         Returns:
             ThinkingConfig instance, or None if thinking is disabled.
@@ -178,22 +176,20 @@ class GoogleProvider(BaseProvider):
                     kwargs["thinking_level"] = "MINIMAL"
             else:
                 kwargs["thinking_budget"] = 0
-            return types.ThinkingConfig(**kwargs)
-
-        if "gemini-3" in model_lower:
-            try:
-                kwargs["thinking_level"] = getattr(
-                    types.ThinkingLevel, "HIGH", "HIGH"
-                )
-            except AttributeError:
-                kwargs["thinking_level"] = "HIGH"
-        elif "gemini-2.5" in model_lower:
-            kwargs["thinking_budget"] = 24576
         else:
-            kwargs["thinking_budget"] = 1024
+            if "gemini-3" in model_lower:
+                try:
+                    kwargs["thinking_level"] = getattr(
+                        types.ThinkingLevel, "HIGH", "HIGH"
+                    )
+                except AttributeError:
+                    kwargs["thinking_level"] = "HIGH"
+            elif "gemini-2.5" in model_lower:
+                kwargs["thinking_budget"] = 24576
+            else:
+                kwargs["thinking_budget"] = 1024
 
-        if include_reasoning:
-            kwargs["include_thoughts"] = True
+        kwargs["include_thoughts"] = True
         return types.ThinkingConfig(**kwargs)
 
     def _build_parts_for_files(self, file_paths: list[str]) -> list[Any]:
@@ -261,7 +257,7 @@ class GoogleProvider(BaseProvider):
             system_instruction=request.system_prompt,
             safety_settings=self._build_safety_settings(self.config.disable_safety),
             thinking_config=self._build_thinking_config(
-                request.thinking, request.model, request.include_reasoning
+                request.thinking, request.model
             ),
             response_mime_type="application/json" if request.format_json else None,
         )
@@ -308,9 +304,6 @@ class GoogleProvider(BaseProvider):
                     response_text += part.text or ""
         except (IndexError, AttributeError):
             response_text = getattr(response, "text", "") or ""
-
-        if not request.include_reasoning:
-            reasoning_text = ""
 
         return AiResponse(
             text=response_text,

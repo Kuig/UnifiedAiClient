@@ -45,9 +45,6 @@ class AiRequest:
         thinking: Whether to enable extended thinking/reasoning mode.
         format_json: Whether to force JSON output format.
         timeout: Maximum seconds to wait for a response.
-        include_reasoning: Whether to return the reasoning text in
-            AiResponse.reasoning_text. Requires thinking=True on providers
-            that support it.
     """
     provider: str
     model: str
@@ -59,7 +56,6 @@ class AiRequest:
     thinking: bool = False
     format_json: bool = False
     timeout: int = 120
-    include_reasoning: bool = False
 
 
 @dataclass

@@ -191,8 +191,7 @@ class AnthropicProvider(BaseProvider):
 
         resp = self._post(payload, request.timeout)
 
-        # Parse content blocks — always collect both text and thinking regardless
-        # of include_reasoning: token estimation requires the raw thinking text.
+        # Parse content blocks — always collect both text and thinking.
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         for block in resp.get("content", []):
@@ -221,7 +220,7 @@ class AnthropicProvider(BaseProvider):
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=max(0, output_tokens - reasoning_tokens),
             reasoning_tokens=reasoning_tokens,
-            reasoning_text=raw_reasoning if request.include_reasoning else "",
+            reasoning_text=raw_reasoning,
         )
 
     def preload_model(self, model: str, keep_alive: str = "15m") -> None:

@@ -191,11 +191,7 @@ or reasoning may omit those fields entirely.
 }
 ```
 
-> **Note on `reasoning_text`**: This field is only meaningful when `thinking` was
-> `true` in the request. If the script does not implement thinking, it should omit
-> the field or return `""`. The `reasoning_text` is returned to the caller via
-> `AiResponse.reasoning_text` only if `include_reasoning=True` was passed to
-> `call_ai()`.
+> **Note on `reasoning_text`**: This field contains the model's thinking/reasoning process if produced. While thinking is explicitly requested via the `thinking` flag, some models may generate thoughts even when `thinking=false`. If reasoning is not supported or not produced, return `""` or omit the field. The thinking transcript is always returned to the caller via `AiResponse.reasoning_text` if present.
 
 ### 2.4 Input: `embed` payload (stdin) — optional
 

@@ -217,7 +217,6 @@ response = call_ai(
     model="gemini-2.5-pro",
     prompt="What is the best sorting algorithm and why?",
     thinking=True,
-    include_reasoning=True,   # Return the thinking transcript
 )
 print(response.text)          # Final answer
 print(response.reasoning_text)  # Thinking process
@@ -298,7 +297,6 @@ def call_ai(
     thinking: bool = False,
     format_json: bool = False,
     timeout: int = 120,
-    include_reasoning: bool = False,
     max_retries: int = 3,
     retry_base_delay: float = 5.0,
 ) -> AiResponse:
@@ -315,7 +313,6 @@ def call_ai(
   * `thinking` (`bool`, optional): Enables extended reasoning/thinking mode (e.g. on supported models). Defaults to `False`.
   * `format_json` (`bool`, optional): Forces the model to respond in valid JSON format. Defaults to `False`.
   * `timeout` (`int`, optional): Network timeout in seconds. Defaults to `120`.
-  * `include_reasoning` (`bool`, optional): Returns the step-by-step thinking process in the response. Defaults to `False`.
   * `max_retries` (`int`, optional): Number of retry attempts on network/rate-limit failures. Defaults to `3`.
   * `retry_base_delay` (`float`, optional): Initial backoff delay for exponential retries in seconds. Defaults to `5.0`.
 * **Returns:** `AiResponse` dataclass containing response text, token metrics, and optional reasoning text.
@@ -369,7 +366,7 @@ The standard response object returned by `call_ai()`.
   * `input_tokens` (`int`): The number of prompt/input tokens consumed. Defaults to `0`.
   * `output_tokens` (`int`): The number of completion/output tokens generated. Defaults to `0`.
   * `reasoning_tokens` (`int`): The number of tokens spent on internal reasoning/thinking. Defaults to `0`.
-  * `reasoning_text` (`str`): The full reasoning/thinking transcript if requested via `include_reasoning=True` (and supported by the provider). Defaults to `""`.
+  * `reasoning_text` (`str`): The full reasoning/thinking transcript if produced by the model (supported models may generate reasoning even when thinking is not explicitly requested). Defaults to `""`.
 
 ---
 

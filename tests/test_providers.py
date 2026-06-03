@@ -126,10 +126,8 @@ def test_airequest_construction() -> None:
         model="llava",
         prompt="test",
         file_path=["a.jpg", "b.txt"],
-        include_reasoning=True,
     )
     assert r.file_path == ["a.jpg", "b.txt"]
-    assert r.include_reasoning is True
     assert not hasattr(r, "image_path"), "Old 'image_path' field must not exist on AiRequest"
 
 
@@ -410,7 +408,7 @@ def test_ollama_live_with_text_file() -> None:
         os.unlink(tmp)
 
 
-def test_ollama_live_include_reasoning() -> None:
+def test_ollama_live_thinking() -> None:
     if not _ollama_available():
         raise SkipTest("Ollama not reachable at localhost:11434")
     model = _first_ollama_model()
@@ -424,7 +422,6 @@ def test_ollama_live_include_reasoning() -> None:
             model=model,
             prompt="What is 2+2?",
             thinking=True,
-            include_reasoning=True,
             temperature=0.0,
             timeout=30,
         )
@@ -472,7 +469,6 @@ def test_ollama_live_reasoning_tokens_thinking_true() -> None:
             model=model,
             prompt="What is 2+2? Think step by step.",
             thinking=True,
-            include_reasoning=True,
             temperature=0.0,
             timeout=120,
         )
@@ -595,7 +591,6 @@ def test_script_generate_with_reasoning() -> None:
             model=script,
             prompt="Think",
             thinking=True,
-            include_reasoning=True,
             timeout=15,
         )
         assert response.reasoning_text == "I thought about it."
@@ -653,38 +648,41 @@ def test_google_thinking_config_offline() -> None:
 
     # 1. Test thinking=False (explicitly disabled/minimized)
     # Gemini 3 models must set thinking_level to MINIMAL
-    cfg_g3_off = provider._build_thinking_config(thinking=False, model_name="gemini-3.5-flash", include_reasoning=False)
+    cfg_g3_off = provider._build_thinking_config(thinking=False, model_name="gemini-3.5-flash")
     assert cfg_g3_off is not None
     assert cfg_g3_off.thinking_level == "MINIMAL"
+    assert cfg_g3_off.include_thoughts is True
 
     # Gemini 2.5 models must set thinking_budget to 0
-    cfg_g25_off = provider._build_thinking_config(thinking=False, model_name="gemini-2.5-pro", include_reasoning=False)
+    cfg_g25_off = provider._build_thinking_config(thinking=False, model_name="gemini-2.5-pro")
     assert cfg_g25_off is not None
     assert cfg_g25_off.thinking_budget == 0
+    assert cfg_g25_off.include_thoughts is True
 
     # Other models must set thinking_budget to 0
-    cfg_other_off = provider._build_thinking_config(thinking=False, model_name="gemini-1.5-pro", include_reasoning=False)
+    cfg_other_off = provider._build_thinking_config(thinking=False, model_name="gemini-1.5-pro")
     assert cfg_other_off is not None
     assert cfg_other_off.thinking_budget == 0
+    assert cfg_other_off.include_thoughts is True
 
     # 2. Test thinking=True (enabled)
     # Gemini 3 models must set thinking_level to HIGH
-    cfg_g3_on = provider._build_thinking_config(thinking=True, model_name="gemini-3.5-flash", include_reasoning=True)
+    cfg_g3_on = provider._build_thinking_config(thinking=True, model_name="gemini-3.5-flash")
     assert cfg_g3_on is not None
     assert cfg_g3_on.thinking_level == "HIGH"
     assert cfg_g3_on.include_thoughts is True
 
     # Gemini 2.5 models must set thinking_budget to 24576
-    cfg_g25_on = provider._build_thinking_config(thinking=True, model_name="gemini-2.5-pro", include_reasoning=True)
+    cfg_g25_on = provider._build_thinking_config(thinking=True, model_name="gemini-2.5-pro")
     assert cfg_g25_on is not None
     assert cfg_g25_on.thinking_budget == 24576
     assert cfg_g25_on.include_thoughts is True
 
     # Other models must set thinking_budget to 1024
-    cfg_other_on = provider._build_thinking_config(thinking=True, model_name="gemini-1.5-pro", include_reasoning=False)
+    cfg_other_on = provider._build_thinking_config(thinking=True, model_name="gemini-1.5-pro")
     assert cfg_other_on is not None
     assert cfg_other_on.thinking_budget == 1024
-    assert getattr(cfg_other_on, "include_thoughts", None) is not True
+    assert cfg_other_on.include_thoughts is True
 
 
 
@@ -731,7 +729,7 @@ def test_google_live_with_text_file() -> None:
         os.unlink(tmp)
 
 
-def test_google_live_include_reasoning() -> None:
+def test_google_live_thinking() -> None:
     from unified_ai_client.config import load_secrets
     secrets = load_secrets(os.getcwd())
     if not secrets.get("google_api_key"):
@@ -742,7 +740,6 @@ def test_google_live_include_reasoning() -> None:
         model="gemini-2.5-flash",
         prompt="What is 2+2? Think step by step.",
         thinking=True,
-        include_reasoning=True,
         temperature=0.0,
         timeout=60,
     )
@@ -833,14 +830,14 @@ _TESTS = [
     # Ollama live
     ("ollama_live/generate", test_ollama_live_generate),
     ("ollama_live/with_text_file", test_ollama_live_with_text_file),
-    ("ollama_live/include_reasoning", test_ollama_live_include_reasoning),
+    ("ollama_live/thinking", test_ollama_live_thinking),
     ("ollama_live/reasoning_tokens_thinking_true", test_ollama_live_reasoning_tokens_thinking_true),
     ("ollama_live/reasoning_tokens_thinking_false", test_ollama_live_reasoning_tokens_thinking_false),
     ("ollama_live/embedding", test_ollama_live_embedding),
     # Cloud live (skip if no key)
     ("google_live/generate", test_google_live_generate),
     ("google_live/with_text_file", test_google_live_with_text_file),
-    ("google_live/include_reasoning", test_google_live_include_reasoning),
+    ("google_live/thinking", test_google_live_thinking),
     ("anthropic_live/generate", test_anthropic_live_generate),
     ("openai_live/generate", test_openai_live_generate),
 ]

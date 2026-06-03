@@ -152,7 +152,6 @@ def call_ai(
     thinking: bool = False,
     format_json: bool = False,
     timeout: int = 120,
-    include_reasoning: bool = False,
     max_retries: int = 3,
     retry_base_delay: float = 5.0,
 ) -> AiResponse:
@@ -175,9 +174,6 @@ def call_ai(
         thinking: Enable extended reasoning/thinking mode.
         format_json: Force JSON-formatted response.
         timeout: Maximum seconds to wait for a response.
-        include_reasoning: Return the model's reasoning text in
-            AiResponse.reasoning_text. Requires thinking=True on most
-            providers. If reasoning is not supported, the field is empty.
         max_retries: Number of retry attempts on failure.
         retry_base_delay: Initial exponential backoff delay in seconds.
 
@@ -200,7 +196,6 @@ def call_ai(
         thinking=thinking,
         format_json=format_json,
         timeout=timeout,
-        include_reasoning=include_reasoning,
     )
 
     from unified_ai_client.retry import with_retry
