@@ -186,7 +186,7 @@ class AnthropicProvider(BaseProvider):
         if request.system_prompt:
             payload["system"] = request.system_prompt
 
-        if request.thinking:
+        if request.thinking is True:
             payload["thinking"] = {"type": "adaptive"}
 
         resp = self._post(payload, request.timeout)

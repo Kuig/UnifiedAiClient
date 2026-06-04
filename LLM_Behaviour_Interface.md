@@ -89,7 +89,7 @@ The script reads **one JSON object** from stdin. The object contains the followi
 | `messages` | `array \| null` | ✅ Yes | Chat history as a list of role/content objects, or null. |
 | `file_path` | `array[string]` | ✅ Yes | List of absolute paths to attached files. Empty list if no files. Never null. |
 | `temperature` | `float` | ✅ Yes | Sampling temperature. Range: 0.0–2.0. |
-| `thinking` | `bool` | ✅ Yes | Whether extended reasoning was requested. |
+| `thinking` | `bool \| string` | ✅ Yes | Whether extended reasoning was requested (`true`/`false`) or let the provider decide (`"default"`). |
 | `format_json` | `bool` | ✅ Yes | Whether JSON-formatted output was requested. |
 | `timeout` | `int` | ✅ Yes | Maximum seconds allowed for the entire call. |
 
@@ -268,7 +268,7 @@ reporting.
 The following fields are passed for completeness but many scripts will not use them:
 
 - `thinking`: A hint that the caller wants extended reasoning. The script may implement
-  a more thorough reasoning process when this is `true`, or ignore it entirely.
+  a more thorough reasoning process when this is `true` (or decide by default when `"default"`), or ignore it entirely.
   If implemented, put the reasoning transcript in `reasoning_text` in the output.
 - `format_json`: A hint that the caller wants JSON-formatted output in `text`. The
   script should produce valid JSON in the `text` field when this is `true`. If the

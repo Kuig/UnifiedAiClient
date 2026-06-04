@@ -166,6 +166,9 @@ class GoogleProvider(BaseProvider):
         model_lower = model_name.lower()
         kwargs: dict[str, Any] = {}
 
+        if thinking == "default":
+            return types.ThinkingConfig(include_thoughts=True)
+
         if not thinking:
             if "gemini-3" in model_lower:
                 try:

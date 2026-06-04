@@ -42,7 +42,8 @@ class AiRequest:
             multimodal input. Accepts images, audio, text files, and PDFs.
             The provider handles all encoding, upload, and fallback internally.
         temperature: Sampling temperature.
-        thinking: Whether to enable extended thinking/reasoning mode.
+        thinking: Whether to enable extended thinking/reasoning mode (True/False)
+            or use the provider's default behavior ("default").
         format_json: Whether to force JSON output format.
         timeout: Maximum seconds to wait for a response.
     """
@@ -53,7 +54,7 @@ class AiRequest:
     messages: list[dict] | None = None
     file_path: str | list[str] | None = None
     temperature: float = 0.7
-    thinking: bool = False
+    thinking: bool | str = "default"
     format_json: bool = False
     timeout: int = 120
 

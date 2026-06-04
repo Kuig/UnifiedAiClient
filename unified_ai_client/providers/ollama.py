@@ -180,8 +180,10 @@ class OllamaProvider(BaseProvider):
         if request.format_json:
             payload["format"] = "json"
 
-        if request.thinking:
+        if request.thinking is True:
             payload["think"] = True
+        elif request.thinking is False:
+            payload["think"] = False
 
         # 5. Make request
         resp = self._post("/api/chat", payload, request.timeout)

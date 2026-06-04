@@ -684,6 +684,13 @@ def test_google_thinking_config_offline() -> None:
     assert cfg_other_on.thinking_budget == 1024
     assert cfg_other_on.include_thoughts is True
 
+    # 3. Test thinking="default" (default settings but capture thoughts)
+    cfg_default = provider._build_thinking_config(thinking="default", model_name="gemini-2.5-pro")
+    assert cfg_default is not None
+    assert cfg_default.include_thoughts is True
+    assert getattr(cfg_default, "thinking_budget", None) is None
+    assert getattr(cfg_default, "thinking_level", None) is None
+
 
 
 # ---------------------------------------------------------------------------
@@ -740,6 +747,24 @@ def test_google_live_thinking() -> None:
         model="gemini-2.5-flash",
         prompt="What is 2+2? Think step by step.",
         thinking=True,
+        temperature=0.0,
+        timeout=60,
+    )
+    assert isinstance(response.text, str)
+    assert isinstance(response.reasoning_text, str)
+
+
+def test_google_live_thinking_default() -> None:
+    from unified_ai_client.config import load_secrets
+    secrets = load_secrets(os.getcwd())
+    if not secrets.get("google_api_key"):
+        raise SkipTest("google_api_key not found in secrets.json or environment variables")
+    from unified_ai_client import call_ai
+    response = call_ai(
+        provider="google",
+        model="gemini-2.5-flash",
+        prompt="What is 2+2? Think step by step.",
+        thinking="default",
         temperature=0.0,
         timeout=60,
     )
@@ -838,6 +863,7 @@ _TESTS = [
     ("google_live/generate", test_google_live_generate),
     ("google_live/with_text_file", test_google_live_with_text_file),
     ("google_live/thinking", test_google_live_thinking),
+    ("google_live/thinking_default", test_google_live_thinking_default),
     ("anthropic_live/generate", test_anthropic_live_generate),
     ("openai_live/generate", test_openai_live_generate),
 ]

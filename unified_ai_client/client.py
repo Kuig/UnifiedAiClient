@@ -149,7 +149,7 @@ def call_ai(
     messages: list[dict] | None = None,
     file_path: str | list[str] | None = None,
     temperature: float = 0.7,
-    thinking: bool = False,
+    thinking: bool | str = "default",
     format_json: bool = False,
     timeout: int = 120,
     max_retries: int = 3,
@@ -171,7 +171,8 @@ def call_ai(
             input. Supports images, audio, text files, and PDFs. The provider
             handles all encoding and upload internally.
         temperature: Sampling temperature.
-        thinking: Enable extended reasoning/thinking mode.
+        thinking: Enable extended reasoning/thinking mode (True/False) or
+            use provider's default behavior ("default").
         format_json: Force JSON-formatted response.
         timeout: Maximum seconds to wait for a response.
         max_retries: Number of retry attempts on failure.

@@ -222,6 +222,11 @@ print(response.text)          # Final answer
 print(response.reasoning_text)  # Thinking process
 ```
 
+> [!NOTE]
+> * **Supported Providers**: `google` (Gemini 2.5/3.x), `ollama` (via `think` option), and `anthropic` (adaptive thinking) support explicit control over the `thinking` parameter (`True` or `False`).
+> * **OpenAI-Compatible Providers**: `openai`, `lmstudio`, and `llamacpp` do not support explicit API control over thinking. For these providers, the parameter always behaves as `"default"` (leaving control to the model/server).
+> * **Reasoning Extraction**: Regardless of the `thinking` parameter value, `reasoning_text` will always be populated if the model returns a reasoning trace (e.g. `reasoning_content` for OpenAI or `thinking` blocks parsed by Ollama/Anthropic/Google).
+
 ### Model Pre-loading (Ollama only)
 
 ```python
@@ -294,7 +299,7 @@ def call_ai(
     messages: list[dict] | None = None,
     file_path: str | list[str] | None = None,
     temperature: float = 0.7,
-    thinking: bool = False,
+    thinking: bool | str = "default",
     format_json: bool = False,
     timeout: int = 120,
     max_retries: int = 3,
@@ -310,7 +315,7 @@ def call_ai(
   * `messages` (`list[dict] | None`, optional): A list of previous chat messages in the format `[{"role": "user" | "assistant", "content": "..."}]`. Messages can also include an optional `"files"` key containing a list of local file paths. Defaults to `None`.
   * `file_path` (`str | list[str] | None`, optional): Local file path(s) to attach for multimodal prompts. Supports images, audio, PDFs, and text files. Defaults to `None`.
   * `temperature` (`float`, optional): Sampling temperature. Defaults to `0.7`.
-  * `thinking` (`bool`, optional): Enables extended reasoning/thinking mode (e.g. on supported models). Defaults to `False`.
+  * `thinking` (`bool | str`, optional): Enables extended reasoning/thinking mode (`True`/`False`), or delegates to the provider's default behavior (`"default"`). Defaults to `"default"`.
   * `format_json` (`bool`, optional): Forces the model to respond in valid JSON format. Defaults to `False`.
   * `timeout` (`int`, optional): Network timeout in seconds. Defaults to `120`.
   * `max_retries` (`int`, optional): Number of retry attempts on network/rate-limit failures. Defaults to `3`.
