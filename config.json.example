@@ -41,5 +41,35 @@
         "url": "http://localhost:8080",
         "timeout": 120,
         "context_size": 0
+    },
+
+    "mistral": {
+        "url": "https://api.mistral.ai",
+        "timeout": 120,
+        "sleep_time": 0
+    },
+
+    "cohere": {
+        "url": "https://api.cohere.ai/compatibility/v1",
+        "timeout": 120,
+        "sleep_time": 0
+    },
+
+    "meta": {
+        "url": "https://api.llama-api.com",
+        "timeout": 120,
+        "sleep_time": 0
+    },
+
+    "groq": {
+        "url": "https://api.groq.com/openai",
+        "timeout": 120,
+        "sleep_time": 0
+    },
+
+    "xai": {
+        "url": "https://api.x.ai",
+        "timeout": 120,
+        "sleep_time": 0
     }
 }

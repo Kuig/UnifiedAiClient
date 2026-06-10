@@ -11,6 +11,12 @@ _ENV_VAR_MAP: dict[str, str] = {
     "GOOGLE_API_KEY": "google_api_key",
     "ANTHROPIC_API_KEY": "anthropic_api_key",
     "OPENAI_API_KEY": "openai_api_key",
+    "MISTRAL_API_KEY": "mistral_api_key",
+    "COHERE_API_KEY": "cohere_api_key",
+    "LLAMA_API_KEY": "meta_api_key",
+    "META_API_KEY": "meta_api_key",
+    "GROQ_API_KEY": "groq_api_key",
+    "XAI_API_KEY": "xai_api_key",
 }
 
 

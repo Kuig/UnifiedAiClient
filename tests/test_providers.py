@@ -106,12 +106,19 @@ def test_import_providers() -> None:
     from unified_ai_client.providers.google import GoogleProvider
     from unified_ai_client.providers.anthropic import AnthropicProvider
     from unified_ai_client.providers.openai import OpenAiProvider
+    from unified_ai_client.providers.mistral import MistralProvider
+    from unified_ai_client.providers.cohere import CohereProvider
+    from unified_ai_client.providers.meta import MetaProvider
+    from unified_ai_client.providers.groq import GroqProvider
+    from unified_ai_client.providers.xai import XAiProvider
     from unified_ai_client.providers.lmstudio import LmStudioProvider
     from unified_ai_client.providers.llamacpp import LlamaCppProvider
     from unified_ai_client.providers.script import ScriptProvider
     assert all([
         OllamaProvider, GoogleProvider, AnthropicProvider,
-        OpenAiProvider, LmStudioProvider, LlamaCppProvider, ScriptProvider,
+        OpenAiProvider, MistralProvider, CohereProvider,
+        MetaProvider, GroqProvider, XAiProvider,
+        LmStudioProvider, LlamaCppProvider, ScriptProvider,
     ])
 
 
@@ -289,6 +296,41 @@ def test_dispatch_openai() -> None:
     from unified_ai_client.providers.openai import OpenAiProvider
     p = get_provider("openai")
     assert isinstance(p, OpenAiProvider)
+
+
+def test_dispatch_mistral() -> None:
+    from unified_ai_client.client import get_provider
+    from unified_ai_client.providers.mistral import MistralProvider
+    p = get_provider("mistral")
+    assert isinstance(p, MistralProvider)
+
+
+def test_dispatch_cohere() -> None:
+    from unified_ai_client.client import get_provider
+    from unified_ai_client.providers.cohere import CohereProvider
+    p = get_provider("cohere")
+    assert isinstance(p, CohereProvider)
+
+
+def test_dispatch_meta() -> None:
+    from unified_ai_client.client import get_provider
+    from unified_ai_client.providers.meta import MetaProvider
+    p = get_provider("meta")
+    assert isinstance(p, MetaProvider)
+
+
+def test_dispatch_groq() -> None:
+    from unified_ai_client.client import get_provider
+    from unified_ai_client.providers.groq import GroqProvider
+    p = get_provider("groq")
+    assert isinstance(p, GroqProvider)
+
+
+def test_dispatch_xai() -> None:
+    from unified_ai_client.client import get_provider
+    from unified_ai_client.providers.xai import XAiProvider
+    p = get_provider("xai")
+    assert isinstance(p, XAiProvider)
 
 
 def test_dispatch_lmstudio() -> None:
@@ -958,6 +1000,11 @@ _TESTS = [
     ("dispatch/google", test_dispatch_google),
     ("dispatch/anthropic", test_dispatch_anthropic),
     ("dispatch/openai", test_dispatch_openai),
+    ("dispatch/mistral", test_dispatch_mistral),
+    ("dispatch/cohere", test_dispatch_cohere),
+    ("dispatch/meta", test_dispatch_meta),
+    ("dispatch/groq", test_dispatch_groq),
+    ("dispatch/xai", test_dispatch_xai),
     ("dispatch/lmstudio", test_dispatch_lmstudio),
     ("dispatch/llamacpp", test_dispatch_llamacpp),
     ("dispatch/script", test_dispatch_script),

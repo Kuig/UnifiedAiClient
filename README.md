@@ -11,6 +11,11 @@ Supported providers:
 | `"google"` | Cloud | google-genai SDK |
 | `"anthropic"` | Cloud | urllib only, no SDK |
 | `"openai"` | Cloud | urllib only, no SDK |
+| `"mistral"` | Cloud | urllib only, no SDK |
+| `"cohere"` | Cloud | urllib only, no SDK |
+| `"meta"` | Cloud | Llama API (llama-api.com), urllib only |
+| `"groq"` | Cloud | urllib only, no SDK |
+| `"xai"` | Cloud | urllib only, no SDK |
 | `"ollama"` | Local | urllib only, no SDK |
 | `"lmstudio"` | Local | OpenAI-compatible API |
 | `"llamacpp"` | Local | OpenAI-compatible API |
@@ -93,6 +98,11 @@ Supported keys (see [`secrets.json.example`](secrets.json.example) and [`.env.ex
 | `google_api_key`      | `GOOGLE_API_KEY`      |
 | `anthropic_api_key`   | `ANTHROPIC_API_KEY`   |
 | `openai_api_key`      | `OPENAI_API_KEY`      |
+| `mistral_api_key`     | `MISTRAL_API_KEY`     |
+| `cohere_api_key`      | `COHERE_API_KEY`      |
+| `meta_api_key`        | `META_API_KEY` or `LLAMA_API_KEY` |
+| `groq_api_key`        | `GROQ_API_KEY`        |
+| `xai_api_key`         | `XAI_API_KEY`         |
 
 **Via environment variables** (shell / CI/CD / Docker):
 ```bash
@@ -104,7 +114,12 @@ export GOOGLE_API_KEY=your-google-api-key-here
 {
     "google_api_key": "your-google-api-key-here",
     "anthropic_api_key": "your-anthropic-api-key-here",
-    "openai_api_key": "your-openai-api-key-here"
+    "openai_api_key": "your-openai-api-key-here",
+    "mistral_api_key": "your-mistral-api-key-here",
+    "cohere_api_key": "your-cohere-api-key-here",
+    "meta_api_key": "your-llama-api-key-here",
+    "groq_api_key": "your-groq-api-key-here",
+    "xai_api_key": "your-xai-api-key-here"
 }
 ```
 
@@ -121,6 +136,11 @@ Edit `UnifiedAiClient/config.json` directly (or copy from [`config.json.example`
     "google":    { "sleep_time": 3, "disable_safety": false, "timeout": 30 },
     "openai":    { "url": "https://api.openai.com", "timeout": 120, "max_tokens": 8192 },
     "anthropic": { "url": "https://api.anthropic.com", "timeout": 120, "max_tokens": 8192 },
+    "mistral":   { "url": "https://api.mistral.ai", "timeout": 120 },
+    "cohere":    { "url": "https://api.cohere.ai/compatibility/v1", "timeout": 120 },
+    "meta":      { "url": "https://api.llama-api.com", "timeout": 120 },
+    "groq":      { "url": "https://api.groq.com/openai", "timeout": 120 },
+    "xai":       { "url": "https://api.x.ai", "timeout": 120 },
     "lmstudio":  { "url": "http://localhost:1234", "timeout": 120, "context_size": 0 },
     "llamacpp":  { "url": "http://localhost:8080", "timeout": 120, "context_size": 0 }
 }
@@ -208,6 +228,11 @@ Supported file types per provider:
 | `ollama` | ✅ base64 | ✅ base64 (multimodal models) | ✅ Inlined | ⚠️ Inline attempt |
 | `openai` | ✅ base64 | ✅ base64 | ✅ Inlined | ✅ base64 |
 | `anthropic` | ✅ base64 | ⚠️ Skipped | ✅ Inlined | ✅ base64 |
+| `mistral` | ✅ base64 | ⚠️ Inline attempt | ✅ Inlined | ⚠️ Inline attempt |
+| `cohere` | ✅ base64 | ⚠️ Inline attempt | ✅ Inlined | ⚠️ Inline attempt |
+| `meta` | ✅ base64 | ⚠️ Inline attempt | ✅ Inlined | ⚠️ Inline attempt |
+| `groq` | ✅ base64 | ⚠️ Inline attempt | ✅ Inlined | ⚠️ Inline attempt |
+| `xai` | ✅ base64 | ⚠️ Inline attempt | ✅ Inlined | ⚠️ Inline attempt |
 | `lmstudio` / `llamacpp` | ✅ base64 | ⚠️ Skipped | ✅ Inlined | ⚠️ Inline attempt |
 | `script` | Path passed | Path passed | Path passed | Path passed |
 
@@ -226,7 +251,7 @@ print(response.reasoning_text)  # Thinking process
 
 > [!NOTE]
 > * **Supported Providers**: `google` (Gemini 2.5/3.x), `ollama` (via `think` option), and `anthropic` (adaptive thinking) support explicit control over the `thinking` parameter (`True` or `False`).
-> * **OpenAI-Compatible Providers**: `openai`, `lmstudio`, and `llamacpp` do not support explicit API control over thinking. For these providers, the parameter always behaves as `"default"` (leaving control to the model/server).
+> * **OpenAI-Compatible Providers**: `openai`, `mistral`, `cohere`, `meta`, `groq`, `xai`, `lmstudio`, and `llamacpp` do not support explicit API control over thinking. For these providers, the parameter always behaves as `"default"` (leaving control to the model/server).
 > * **Reasoning Extraction**: Regardless of the `thinking` parameter value, `reasoning_text` will always be populated if the model returns a reasoning trace (e.g. `reasoning_content` for OpenAI or `thinking` blocks parsed by Ollama/Anthropic/Google).
 
 ### Model Pre-loading (Ollama only)
@@ -241,9 +266,11 @@ preload_model(
 )
 ```
 
-### Text Embeddings (Ollama only)
+### Text Embeddings
 
-Generate text embedding vectors using local models such as `bge-m3`:
+Generate text embedding vectors using supported providers (`openai`, `ollama`, `mistral`, `cohere`, `xai`, `lmstudio`, `llamacpp`).
+
+Example using local Ollama model:
 
 ```python
 from unified_ai_client import get_embedding
@@ -255,6 +282,18 @@ vector = get_embedding(
 )
 print(f"Embedding vector length: {len(vector)}")
 print(f"First 5 coordinates: {vector[:5]}")
+```
+
+Example using Mistral cloud model:
+
+```python
+from unified_ai_client import get_embedding
+
+vector = get_embedding(
+    provider="mistral",
+    model="mistral-embed",
+    text="I like rusty spoons.",
+)
 ```
 
 ### Script Provider

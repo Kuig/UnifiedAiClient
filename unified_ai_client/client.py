@@ -81,6 +81,11 @@ def get_provider(provider_name: str) -> BaseProvider:
         api_key_google = secrets.get("google_api_key")
         api_key_anthropic = secrets.get("anthropic_api_key")
         api_key_openai = secrets.get("openai_api_key")
+        api_key_mistral = secrets.get("mistral_api_key")
+        api_key_cohere = secrets.get("cohere_api_key")
+        api_key_meta = secrets.get("meta_api_key")
+        api_key_groq = secrets.get("groq_api_key")
+        api_key_xai = secrets.get("xai_api_key")
 
         # 5. Instantiate provider adapter
         if provider_name == "ollama":
@@ -95,6 +100,21 @@ def get_provider(provider_name: str) -> BaseProvider:
         elif provider_name == "openai":
             from unified_ai_client.providers.openai import OpenAiProvider
             provider_instance = OpenAiProvider(config, api_key=api_key_openai)
+        elif provider_name == "mistral":
+            from unified_ai_client.providers.mistral import MistralProvider
+            provider_instance = MistralProvider(config, api_key=api_key_mistral)
+        elif provider_name == "cohere":
+            from unified_ai_client.providers.cohere import CohereProvider
+            provider_instance = CohereProvider(config, api_key=api_key_cohere)
+        elif provider_name == "meta":
+            from unified_ai_client.providers.meta import MetaProvider
+            provider_instance = MetaProvider(config, api_key=api_key_meta)
+        elif provider_name == "groq":
+            from unified_ai_client.providers.groq import GroqProvider
+            provider_instance = GroqProvider(config, api_key=api_key_groq)
+        elif provider_name == "xai":
+            from unified_ai_client.providers.xai import XAiProvider
+            provider_instance = XAiProvider(config, api_key=api_key_xai)
         elif provider_name == "lmstudio":
             from unified_ai_client.providers.lmstudio import LmStudioProvider
             provider_instance = LmStudioProvider(config)
@@ -107,8 +127,9 @@ def get_provider(provider_name: str) -> BaseProvider:
         else:
             raise ValueError(
                 f"Unsupported AI provider: '{provider_name}'. "
-                f"Supported providers: 'ollama', 'google', 'anthropic', "
-                f"'openai', 'lmstudio', 'llamacpp', 'script'."
+                f"Supported providers: 'ollama', 'google', 'anthropic', 'openai', "
+                f"'mistral', 'cohere', 'meta', 'groq', 'xai', "
+                f"'lmstudio', 'llamacpp', 'script'."
             )
 
         _PROVIDERS[cache_key] = provider_instance
@@ -164,6 +185,7 @@ def call_ai(
 
     Args:
         provider: Provider name ('ollama', 'google', 'anthropic', 'openai',
+            'mistral', 'cohere', 'meta', 'groq', 'xai',
             'lmstudio', 'llamacpp', or 'script').
         model: Model identifier. For 'script' provider, this is the script
             file path.
