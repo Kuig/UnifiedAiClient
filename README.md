@@ -6,20 +6,20 @@ encoding, upload, retry, and error-handling details from consuming projects.
 
 Supported providers:
 
-| Provider | Type | Notes |
+| Provider | Type | Implementation Notes / SDK |
 |---|---|---|
-| `"google"` | Cloud | google-genai SDK |
-| `"anthropic"` | Cloud | urllib only, no SDK |
-| `"openai"` | Cloud | urllib only, no SDK |
-| `"mistral"` | Cloud | urllib only, no SDK |
-| `"cohere"` | Cloud | urllib only, no SDK |
-| `"meta"` | Cloud | Llama API (llama-api.com), urllib only |
-| `"groq"` | Cloud | urllib only, no SDK |
-| `"xai"` | Cloud | urllib only, no SDK |
-| `"ollama"` | Local | urllib only, no SDK |
-| `"lmstudio"` | Local | OpenAI-compatible API |
-| `"llamacpp"` | Local | OpenAI-compatible API |
-| `"script"` | External | stdin/stdout JSON protocol |
+| `"google"` | Cloud | Official `google-genai` SDK |
+| `"anthropic"` | Cloud | Native HTTP API via `urllib` (no SDK dependencies) |
+| `"openai"` | Cloud | Native HTTP API via `urllib` (no SDK dependencies) |
+| `"mistral"` | Cloud | OpenAI-compatible endpoint via `urllib` |
+| `"cohere"` | Cloud | OpenAI-compatible endpoint via `urllib` |
+| `"meta"` | Cloud | OpenAI-compatible endpoint via `urllib` |
+| `"groq"` | Cloud | OpenAI-compatible endpoint via `urllib` |
+| `"xai"` | Cloud | OpenAI-compatible endpoint via `urllib` |
+| `"ollama"` | Local | Native Ollama HTTP API via `urllib` (no SDK dependencies) |
+| `"lmstudio"` | Local | OpenAI-compatible API via `urllib` |
+| `"llamacpp"` | Local | OpenAI-compatible API via `urllib` |
+| `"script"` | External | Subprocess runner with JSON stdin/stdout protocol |
 
 ---
 
@@ -225,15 +225,15 @@ Supported file types per provider:
 | Provider | Images | Audio | Text files | PDFs |
 |---|---|---|---|---|
 | `google` | ✅ Upload | ✅ Upload | ✅ Upload | ✅ Upload |
-| `ollama` | ✅ base64 | ✅ base64 (multimodal models) | ✅ Inlined | ⚠️ Inline attempt |
+| `ollama` | ✅ base64 | ✅ base64 (multimodal models) | ✅ Inlined | ❌ Not supported |
 | `openai` | ✅ base64 | ✅ base64 | ✅ Inlined | ✅ base64 |
-| `anthropic` | ✅ base64 | ⚠️ Skipped | ✅ Inlined | ✅ base64 |
-| `mistral` | ✅ base64 | ⚠️ Inline attempt | ✅ Inlined | ⚠️ Inline attempt |
-| `cohere` | ✅ base64 | ⚠️ Inline attempt | ✅ Inlined | ⚠️ Inline attempt |
-| `meta` | ✅ base64 | ⚠️ Inline attempt | ✅ Inlined | ⚠️ Inline attempt |
-| `groq` | ✅ base64 | ⚠️ Inline attempt | ✅ Inlined | ⚠️ Inline attempt |
-| `xai` | ✅ base64 | ⚠️ Inline attempt | ✅ Inlined | ⚠️ Inline attempt |
-| `lmstudio` / `llamacpp` | ✅ base64 | ⚠️ Skipped | ✅ Inlined | ⚠️ Inline attempt |
+| `anthropic` | ✅ base64 | ❌ Not supported | ✅ Inlined | ✅ base64 |
+| `mistral` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
+| `cohere` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
+| `meta` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
+| `groq` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
+| `xai` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
+| `lmstudio` / `llamacpp` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
 | `script` | Path passed | Path passed | Path passed | Path passed |
 
 ### Thinking / Reasoning
@@ -533,6 +533,11 @@ unified_ai_client/
     ├── openai_compat.py  # Base for OpenAI-compatible APIs
     ├── openai.py         # OpenAI — native audio + PDF blocks
     ├── anthropic.py      # Anthropic — urllib, image/document blocks, thinking
+    ├── mistral.py        # Mistral — OpenAI-compatible
+    ├── cohere.py         # Cohere — OpenAI-compatible
+    ├── meta.py           # Meta (Llama API) — OpenAI-compatible
+    ├── groq.py           # Groq — OpenAI-compatible
+    ├── xai.py            # xAI — OpenAI-compatible
     ├── lmstudio.py       # LM Studio — OpenAI-compatible
     ├── llamacpp.py       # llama.cpp — OpenAI-compatible
     └── script.py         # External script via stdin/stdout JSON
