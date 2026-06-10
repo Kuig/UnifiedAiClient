@@ -194,9 +194,12 @@ class OpenAiCompatProvider(BaseProvider):
         Returns:
             Standardized AiResponse.
         """
-        # Rate limiting for cloud providers
-        if self.config.sleep_time > 0:
-            time.sleep(self.config.sleep_time)
+        # Merge options
+        opts = {}
+        if self.config.extra_options:
+            opts.update(self.config.extra_options)
+        if request.extra_options:
+            opts.update(request.extra_options)
 
         messages: list[dict[str, Any]] = []
 
@@ -219,8 +222,23 @@ class OpenAiCompatProvider(BaseProvider):
         }
         if request.format_json:
             payload["response_format"] = {"type": "json_object"}
-        if self.config.max_tokens > 0:
-            payload["max_tokens"] = self.config.max_tokens
+
+        max_tokens = request.max_tokens if request.max_tokens is not None else opts.get("max_tokens")
+        if max_tokens is not None and max_tokens > 0:
+            payload["max_tokens"] = max_tokens
+
+        top_k = request.top_k if request.top_k is not None else opts.get("top_k")
+        if top_k is not None:
+            payload["top_k"] = top_k
+
+        top_p = request.top_p if request.top_p is not None else opts.get("top_p")
+        if top_p is not None:
+            payload["top_p"] = top_p
+
+        # Populate payload from other opts
+        for k, v in opts.items():
+            if k not in ("max_tokens", "temperature", "top_k", "top_p", "timeout", "sleep_time", "keep_alive"):
+                payload[k] = v
 
         resp = self._post("/v1/chat/completions", payload, request.timeout)
         choice = resp["choices"][0]["message"]

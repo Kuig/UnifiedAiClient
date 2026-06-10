@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -46,6 +46,10 @@ class AiRequest:
             or use the provider's default behavior ("default").
         format_json: Whether to force JSON output format.
         timeout: Maximum seconds to wait for a response.
+        extra_options: Optional dict of arbitrary provider-specific options
+            merged into the API payload. Keys and values are provider-dependent
+            (e.g. {'visual_token_budget': 1120} for Ollama/Gemma4). These
+            override any config-level defaults for the same key.
     """
     provider: str
     model: str
@@ -57,34 +61,28 @@ class AiRequest:
     thinking: bool | str = "default"
     format_json: bool = False
     timeout: int = 120
+    top_k: int = 64
+    top_p: float = 0.95
+    max_tokens: int | None = None
+    sleep_time: int | None = None
+    extra_options: dict | None = None
 
 
 @dataclass
 class ProviderConfig:
     """Provider-specific configuration loaded from config.json.
 
-    This is a flat dataclass holding the superset of all provider settings.
-    Each provider reads only the fields it needs and ignores the rest.
+    This is a flat dataclass holding the configuration for a provider.
+    Unrecognized keys from config.json are collected into extra_options.
 
     Attributes:
         url: Base URL for the provider's API endpoint.
         timeout: Maximum seconds to wait for a response.
-        keep_alive: Duration to keep a model loaded in memory (Ollama).
         sleep_time: Seconds to sleep before each API call. Used for cloud
             provider rate limiting. Defaults to 0 (no sleep).
-        disable_safety: Whether to disable safety filters (Google only).
-        upload_poll_timeout: Maximum polling iterations when waiting for a
-            Google-uploaded file to become ACTIVE. Each iteration sleeps 1s.
-        max_tokens: Maximum number of tokens in the response. Used by
-            Anthropic and OpenAI.
-        context_size: Context window size override. Used by Ollama (num_ctx)
-            and local providers. 0 means use the model default.
+        extra_options: Dictionary of provider-specific configuration options.
     """
     url: str = "http://localhost:11434"
     timeout: int = 120
-    keep_alive: str = "15m"
     sleep_time: int = 0
-    disable_safety: bool = False
-    upload_poll_timeout: int = 15
-    max_tokens: int = 8192
-    context_size: int = 0
+    extra_options: dict = field(default_factory=dict)

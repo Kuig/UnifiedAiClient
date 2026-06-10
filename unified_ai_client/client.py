@@ -154,6 +154,11 @@ def call_ai(
     timeout: int = 120,
     max_retries: int = 3,
     retry_base_delay: float = 5.0,
+    top_k: int = 64,
+    top_p: float = 0.95,
+    max_tokens: int | None = None,
+    sleep_time: int | None = None,
+    extra_options: dict | None = None,
 ) -> AiResponse:
     """Main routing function for all unified AI text generation requests.
 
@@ -177,6 +182,14 @@ def call_ai(
         timeout: Maximum seconds to wait for a response.
         max_retries: Number of retry attempts on failure.
         retry_base_delay: Initial exponential backoff delay in seconds.
+        top_k: Sampling parameter top_k (default 64).
+        top_p: Sampling parameter top_p (default 0.95).
+        max_tokens: Limit on the number of generated tokens.
+        sleep_time: Rate limit delay in seconds before calling the API.
+        extra_options: Optional dict of arbitrary provider-specific options
+            merged into the API payload at call time. Keys and values are
+            provider-dependent (e.g. {'visual_token_budget': 1120} for
+            Ollama/Gemma4). Override any config-level defaults for the same key.
 
     Returns:
         AiResponse dataclass containing response text, token metrics, and
@@ -185,6 +198,15 @@ def call_ai(
     _register_cleanup()
 
     prov = get_provider(provider)
+
+    # Resolve centralized sleep rate-limiting delay
+    effective_sleep = sleep_time
+    if effective_sleep is None:
+        effective_sleep = getattr(getattr(prov, "config", None), "sleep_time", 0)
+
+    if effective_sleep > 0:
+        import time
+        time.sleep(effective_sleep)
 
     request = AiRequest(
         provider=provider,
@@ -197,6 +219,11 @@ def call_ai(
         thinking=thinking,
         format_json=format_json,
         timeout=timeout,
+        top_k=top_k,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        sleep_time=sleep_time,
+        extra_options=extra_options,
     )
 
     from unified_ai_client.retry import with_retry

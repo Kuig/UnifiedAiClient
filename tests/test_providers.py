@@ -692,6 +692,124 @@ def test_google_thinking_config_offline() -> None:
     assert getattr(cfg_default, "thinking_level", None) is None
 
 
+def test_config_dynamic_extra_options() -> None:
+    """Verify that load_config places unrecognized configuration keys into extra_options."""
+    from unified_ai_client.config import load_config
+    from unified_ai_client.models import ProviderConfig
+
+    # Write a temporary config JSON
+    tmp_config_fd, tmp_config_path = tempfile.mkstemp(suffix=".json")
+    try:
+        config_data = {
+            "google": {
+                "url": "http://google-api-mock",
+                "timeout": 45,
+                "sleep_time": 5,
+                "disable_safety": True,
+                "upload_poll_timeout": 20,
+                "custom_app_setting": "hello_world"
+            }
+        }
+        with os.fdopen(tmp_config_fd, "w", encoding="utf-8") as f:
+            json.dump(config_data, f)
+
+        cfg = load_config(tmp_config_path, ProviderConfig, section="google")
+        assert cfg.url == "http://google-api-mock"
+        assert cfg.timeout == 45
+        assert cfg.sleep_time == 5
+        assert isinstance(cfg.extra_options, dict)
+        assert cfg.extra_options.get("disable_safety") is True
+        assert cfg.extra_options.get("upload_poll_timeout") == 20
+        assert cfg.extra_options.get("custom_app_setting") == "hello_world"
+    finally:
+        os.unlink(tmp_config_path)
+
+
+def test_script_provider_forwards_new_params() -> None:
+    """Verify that ScriptProvider forwards top_k, top_p, max_tokens, and extra_options in the payload."""
+    script_content = """\
+from __future__ import annotations
+import json, sys
+
+def main() -> None:
+    req = json.loads(sys.stdin.read())
+    result = {
+        "text": f"top_k={req.get('top_k')} top_p={req.get('top_p')} max_tokens={req.get('max_tokens')} extra={req.get('extra_options')}",
+        "input_tokens": 1,
+        "output_tokens": 2
+    }
+    print(json.dumps(result))
+
+if __name__ == "__main__":
+    main()
+"""
+    script_path = _make_script(script_content)
+    try:
+        from unified_ai_client import call_ai
+        response = call_ai(
+            provider="script",
+            model=script_path,
+            prompt="test",
+            top_k=42,
+            top_p=0.8,
+            max_tokens=150,
+            extra_options={"some_custom_option": "xyz"},
+            timeout=10,
+        )
+        assert "top_k=42" in response.text
+        assert "top_p=0.8" in response.text
+        assert "max_tokens=150" in response.text
+        assert "some_custom_option" in response.text
+    finally:
+        os.unlink(script_path)
+
+
+def test_ollama_provider_options_mapping() -> None:
+    """Verify that OllamaProvider correctly maps config and call parameters."""
+    from unified_ai_client.providers.ollama import OllamaProvider
+    from unified_ai_client.models import ProviderConfig, AiRequest
+
+    # Set up config with extra options
+    config = ProviderConfig(
+        url="http://mock-ollama:11434",
+        extra_options={"context_size": 2048, "keep_alive": "30m", "my_custom_option": 123}
+    )
+    provider = OllamaProvider(config=config)
+
+    # Mock call to _post to intercept the payload
+    intercepted_payload = None
+    def mock_post(endpoint, payload, timeout):
+        nonlocal intercepted_payload
+        intercepted_payload = payload
+        return {
+            "message": {"content": "response", "thinking": ""},
+            "eval_count": 10,
+            "prompt_eval_count": 5
+        }
+    provider._post = mock_post
+
+    request = AiRequest(
+        provider="ollama",
+        model="mock-model",
+        prompt="hello",
+        top_k=50,
+        top_p=0.9,
+        max_tokens=100,
+        extra_options={"my_custom_option": 456, "visual_token_budget": 70}
+    )
+
+    provider.call(request)
+
+    assert intercepted_payload is not None
+    assert intercepted_payload["keep_alive"] == "30m"
+    options = intercepted_payload["options"]
+    assert options["top_k"] == 50
+    assert options["top_p"] == 0.9
+    assert options["num_ctx"] == 2048
+    assert options["num_predict"] == 100
+    assert options["my_custom_option"] == 456
+    assert options["visual_token_budget"] == 70
+
 
 # ---------------------------------------------------------------------------
 # 7. Google (skip if no API key)
@@ -852,6 +970,9 @@ _TESTS = [
     ("script/nonzero_exit_raises", test_script_nonzero_exit),
     # Google offline
     ("google/thinking_config_offline", test_google_thinking_config_offline),
+    ("config/dynamic_extra_options", test_config_dynamic_extra_options),
+    ("script/forwards_new_params", test_script_provider_forwards_new_params),
+    ("ollama/options_mapping", test_ollama_provider_options_mapping),
     # Ollama live
     ("ollama_live/generate", test_ollama_live_generate),
     ("ollama_live/with_text_file", test_ollama_live_with_text_file),

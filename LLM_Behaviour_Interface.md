@@ -92,6 +92,10 @@ The script reads **one JSON object** from stdin. The object contains the followi
 | `thinking` | `bool \| string` | ✅ Yes | Whether extended reasoning was requested (`true`/`false`) or let the provider decide (`"default"`). |
 | `format_json` | `bool` | ✅ Yes | Whether JSON-formatted output was requested. |
 | `timeout` | `int` | ✅ Yes | Maximum seconds allowed for the entire call. |
+| `top_k` | `int` | ✅ Yes | Sampling parameter top_k. |
+| `top_p` | `float` | ✅ Yes | Sampling parameter top_p. |
+| `max_tokens` | `int \| null` | ✅ Yes | Limit on the number of generated tokens, or null. |
+| `extra_options` | `dict \| null` | ✅ Yes | Dictionary of provider-specific options, or null. |
 
 All fields are always present. Fields that are not applicable to a given call are sent
 as `null` or their zero/empty value (never omitted). The script must handle `null`
@@ -109,7 +113,8 @@ Each message is a dict with `role` and `content`. It may also contain a `files` 
 {"role": "user", "content": "...", "files": ["/path/to/file.pdf"]}
 ```
 
-Scripts that do not support file attachments in history may ignore the `files` key.
+Rules:
+- Scripts that do not support file attachments in history may ignore the `files` key.
 
 **Full example input:**
 ```json
@@ -125,7 +130,11 @@ Scripts that do not support file attachments in history may ignore the `files` k
     "temperature": 0.3,
     "thinking": false,
     "format_json": false,
-    "timeout": 120
+    "timeout": 120,
+    "top_k": 64,
+    "top_p": 0.95,
+    "max_tokens": null,
+    "extra_options": null
 }
 ```
 

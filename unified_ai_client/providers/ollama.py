@@ -165,16 +165,43 @@ class OllamaProvider(BaseProvider):
         messages.append(user_message)
 
         # 4. Build payload
+        opts = {}
+        if self.config.extra_options:
+            opts.update(self.config.extra_options)
+        if request.extra_options:
+            opts.update(request.extra_options)
+
         options: dict[str, Any] = {"temperature": request.temperature}
-        if self.config.context_size > 0:
-            options["num_ctx"] = self.config.context_size
+
+        if request.top_k is not None:
+            options["top_k"] = request.top_k
+        if request.top_p is not None:
+            options["top_p"] = request.top_p
+
+        # Populate options from opts
+        for k, v in opts.items():
+            if k not in ("keep_alive", "timeout", "sleep_time"):
+                # Map context_size to num_ctx
+                if k == "context_size":
+                    options["num_ctx"] = v
+                # Map max_tokens to num_predict
+                elif k == "max_tokens":
+                    options["num_predict"] = v
+                else:
+                    options[k] = v
+
+        # Call-time max_tokens takes precedence
+        if request.max_tokens is not None:
+            options["num_predict"] = request.max_tokens
+
+        keep_alive = opts.get("keep_alive", "15m")
 
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
             "stream": False,
             "options": options,
-            "keep_alive": self.config.keep_alive,
+            "keep_alive": keep_alive,
         }
 
         if request.format_json:

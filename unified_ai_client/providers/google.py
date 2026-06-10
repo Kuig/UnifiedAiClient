@@ -60,18 +60,19 @@ class GoogleProvider(BaseProvider):
                     self._client = genai.Client(api_key=self.api_key)
         return self._client
 
-    def _upload_file(self, file_path: str) -> Any:
+    def _upload_file(self, file_path: str, upload_poll_timeout: int = 15) -> Any:
         """Upload a file to Google Cloud or return the cached reference.
 
         If the same local file path has already been uploaded in this
         session, the existing remote reference is returned immediately
         without a network round-trip.
 
-        Polls at most `config.upload_poll_timeout` times (one second apart)
+        Polls at most `upload_poll_timeout` times (one second apart)
         waiting for the file to become ACTIVE.
 
         Args:
             file_path: Path to the local file to upload.
+            upload_poll_timeout: Timeout in seconds for ACTIVE polling.
 
         Returns:
             The uploaded file reference from google.genai.
@@ -92,7 +93,7 @@ class GoogleProvider(BaseProvider):
         try:
             _log.info("Uploading file '%s' to Google AI...", os.path.basename(file_path))
             file_ref = client.files.upload(file=Path(file_path))
-            for elapsed in range(self.config.upload_poll_timeout):
+            for elapsed in range(upload_poll_timeout):
                 file_info = client.files.get(name=file_ref.name)
                 state_str = str(file_info.state).upper()
                 if "ACTIVE" in state_str:
@@ -111,7 +112,7 @@ class GoogleProvider(BaseProvider):
                     self._uploaded_files[abs_path] = file_ref
                     return file_ref
             raise TimeoutError(
-                f"Google file upload polling timed out after {self.config.upload_poll_timeout}s"
+                f"Google file upload polling timed out after {upload_poll_timeout}s"
             )
         except Exception as exc:
             raise RuntimeError(f"Google file upload failed: {exc}") from exc
@@ -195,18 +196,19 @@ class GoogleProvider(BaseProvider):
         kwargs["include_thoughts"] = True
         return types.ThinkingConfig(**kwargs)
 
-    def _build_parts_for_files(self, file_paths: list[str]) -> list[Any]:
+    def _build_parts_for_files(self, file_paths: list[str], upload_poll_timeout: int = 15) -> list[Any]:
         """Upload files and return a list of Part objects.
 
         Args:
             file_paths: List of local file paths to attach.
+            upload_poll_timeout: Timeout in seconds for ACTIVE polling.
 
         Returns:
             List of types.Part objects referencing the uploaded files.
         """
         parts = []
         for fp in file_paths:
-            ref = self._upload_file(fp)
+            ref = self._upload_file(fp, upload_poll_timeout)
             parts.append(
                 types.Part.from_uri(file_uri=ref.uri, mime_type=ref.mime_type)
             )
@@ -221,11 +223,16 @@ class GoogleProvider(BaseProvider):
         Returns:
             Standardized AiResponse.
         """
-        # Apply rate limiting delay
-        if self.config.sleep_time > 0:
-            time.sleep(self.config.sleep_time)
-
         client = self._get_client()
+
+        # Merge options
+        opts = {}
+        if self.config.extra_options:
+            opts.update(self.config.extra_options)
+        if request.extra_options:
+            opts.update(request.extra_options)
+
+        upload_poll_timeout = opts.get("upload_poll_timeout", 15)
 
         # --- Build contents list ---
         contents: list[Any] = []
@@ -240,7 +247,7 @@ class GoogleProvider(BaseProvider):
                 # Attach files from message history
                 msg_files = normalize_file_paths(msg.get("files"))
                 if msg_files:
-                    parts.extend(self._build_parts_for_files(msg_files))
+                    parts.extend(self._build_parts_for_files(msg_files, upload_poll_timeout))
                 parts.append(
                     types.Part.from_text(text=msg.get("content", ""))
                 )
@@ -250,20 +257,39 @@ class GoogleProvider(BaseProvider):
         current_parts: list[Any] = []
         file_paths = normalize_file_paths(request.file_path)
         if file_paths:
-            current_parts.extend(self._build_parts_for_files(file_paths))
+            current_parts.extend(self._build_parts_for_files(file_paths, upload_poll_timeout))
         current_parts.append(types.Part.from_text(text=request.prompt))
         contents.append(types.Content(role="user", parts=current_parts))
 
         # --- Build generation config ---
-        gen_config = types.GenerateContentConfig(
-            temperature=request.temperature,
-            system_instruction=request.system_prompt,
-            safety_settings=self._build_safety_settings(self.config.disable_safety),
-            thinking_config=self._build_thinking_config(
+        config_kwargs = {
+            "temperature": request.temperature,
+            "system_instruction": request.system_prompt,
+            "safety_settings": self._build_safety_settings(opts.get("disable_safety", False)),
+            "thinking_config": self._build_thinking_config(
                 request.thinking, request.model
             ),
-            response_mime_type="application/json" if request.format_json else None,
-        )
+            "response_mime_type": "application/json" if request.format_json else None,
+        }
+
+        top_k = request.top_k if request.top_k is not None else opts.get("top_k")
+        if top_k is not None:
+            config_kwargs["top_k"] = top_k
+
+        top_p = request.top_p if request.top_p is not None else opts.get("top_p")
+        if top_p is not None:
+            config_kwargs["top_p"] = top_p
+
+        max_output_tokens = request.max_tokens if request.max_tokens is not None else (opts.get("max_output_tokens") or opts.get("max_tokens"))
+        if max_output_tokens is not None:
+            config_kwargs["max_output_tokens"] = max_output_tokens
+
+        # Pass other recognized fields if present in opts
+        for field_name in ("response_schema", "stop_sequences", "presence_penalty", "frequency_penalty", "seed"):
+            if field_name in opts:
+                config_kwargs[field_name] = opts[field_name]
+
+        gen_config = types.GenerateContentConfig(**config_kwargs)
 
         def _do_call() -> Any:
             return client.models.generate_content(

@@ -112,7 +112,7 @@ export GOOGLE_API_KEY=your-google-api-key-here
 
 ### Provider settings — `config.json`
 
-Controls server URLs, timeouts, rate-limit delays, context sizes, etc.
+Controls server URLs, timeouts, rate-limit delays, and other provider-specific settings.
 Edit `UnifiedAiClient/config.json` directly (or copy from [`config.json.example`](config.json.example)):
 
 ```json
@@ -125,6 +125,8 @@ Edit `UnifiedAiClient/config.json` directly (or copy from [`config.json.example`
     "llamacpp":  { "url": "http://localhost:8080", "timeout": 120, "context_size": 0 }
 }
 ```
+
+> **Dynamic Option Loading**: Except for base config fields (`url`, `timeout`, `sleep_time`), any unrecognized keys present in `config.json` for a provider are automatically collected into the provider's `extra_options` dictionary. This prevents payload payload definitions from breaking when updating client settings in `config.json`.
 
 If a consuming project needs its own provider settings, call this once at startup:
 ```python
@@ -304,6 +306,11 @@ def call_ai(
     timeout: int = 120,
     max_retries: int = 3,
     retry_base_delay: float = 5.0,
+    top_k: int = 64,
+    top_p: float = 0.95,
+    max_tokens: int | None = None,
+    sleep_time: int | None = None,
+    extra_options: dict | None = None,
 ) -> AiResponse:
 ```
 
@@ -320,6 +327,11 @@ def call_ai(
   * `timeout` (`int`, optional): Network timeout in seconds. Defaults to `120`.
   * `max_retries` (`int`, optional): Number of retry attempts on network/rate-limit failures. Defaults to `3`.
   * `retry_base_delay` (`float`, optional): Initial backoff delay for exponential retries in seconds. Defaults to `5.0`.
+  * `top_k` (`int`, optional): Sampling parameter top_k. Defaults to `64`.
+  * `top_p` (`float`, optional): Sampling parameter top_p. Defaults to `0.95`.
+  * `max_tokens` (`int | None`, optional): Maximum number of tokens in the response. Maps to `num_predict`, `max_output_tokens`, etc. Defaults to `None`.
+  * `sleep_time` (`int | None`, optional): Pre-call rate limit sleep delay in seconds. Defaults to `None` (falls back to config `sleep_time`).
+  * `extra_options` (`dict | None`, optional): Optional dict of arbitrary provider-specific options merged into the API payload at call time. Override any config-level defaults for the same key. Defaults to `None`.
 * **Returns:** `AiResponse` dataclass containing response text, token metrics, and optional reasoning text.
 
 ---
@@ -361,6 +373,72 @@ def preload_model(
 
 ---
 
+#### `set_default_config`
+Overrides the default `config.json` path used by the library. Typically called at application startup.
+
+```python
+def set_default_config(path: str) -> None:
+```
+
+* **Parameters:**
+  * `path` (`str`): The absolute path to the project-specific configuration JSON file.
+
+---
+
+#### `silence_sdks`
+Suppresses verbose debug and info log messages from downstream provider SDKs (such as `google_genai`, `httpx`, and `httpcore`).
+
+```python
+def silence_sdks() -> None:
+```
+
+---
+
+#### `cleanup`
+Triggers remote and local resource purging across all active cached providers. For example, it deletes uploaded Gemini files from the Google remote cloud cache to release quota. It is automatically registered to run at process exit via `atexit`, but can be called manually.
+
+```python
+def cleanup() -> None:
+```
+
+---
+
+#### `load_secrets`
+Loads API credentials from environment variables or a local JSON file. Environment variables take priority over JSON.
+
+```python
+def load_secrets(
+    project_root: str,
+    filename: str = "secrets.json",
+) -> dict[str, str]:
+```
+
+* **Parameters:**
+  * `project_root` (`str`): The root directory of the project.
+  * `filename` (`str`, optional): The name of the secrets JSON file. Defaults to `"secrets.json"`.
+* **Returns:** A dictionary of loaded credentials.
+
+---
+
+#### `load_config`
+Loads configurations from a JSON file into a dataclass type, handling defaults and dynamic option collecting.
+
+```python
+def load_config(
+    config_path: str,
+    dataclass_type: type[Any],
+    section: str | None = None,
+) -> Any:
+```
+
+* **Parameters:**
+  * `config_path` (`str`): The path to the configuration JSON file.
+  * `dataclass_type` (`type`): The dataclass type to load configuration into.
+  * `section` (`str | None`, optional): A subsection key to load from the JSON. Defaults to `None`.
+* **Returns:** An instance of `dataclass_type`.
+
+---
+
 ### Dataclasses
 
 #### `AiResponse`
@@ -372,6 +450,29 @@ The standard response object returned by `call_ai()`.
   * `output_tokens` (`int`): The number of completion/output tokens generated. Defaults to `0`.
   * `reasoning_tokens` (`int`): The number of tokens spent on internal reasoning/thinking. Defaults to `0`.
   * `reasoning_text` (`str`): The full reasoning/thinking transcript if produced by the model (supported models may generate reasoning even when thinking is not explicitly requested). Defaults to `""`.
+
+---
+
+## Design Concepts: Caching and Lifecycle
+
+`UnifiedAiClient` utilizes a hybrid architectural design that separates stateful infrastructure configuration from stateless call parameters.
+
+### 1. General Settings (Stateful Configuration)
+The Python client is **stateful** regarding its connection infrastructure. Provider instances are created and cached inside the global module scope upon their first invocation:
+* Config parameters like `url`, basic network `timeout`, and rate-limiting `sleep_time` are structural settings loaded from `config.json` once.
+* Local settings like Ollama's `context_size` (`num_ctx`) are configuration-level settings because changing them dynamically at call-time would force local model reloads or re-allocation of GPU VRAM.
+* API credentials (API keys) loaded from `secrets.json` or system variables are cached.
+* Thread-safe singletons avoid unnecessary config loading and connection re-initialization on high-frequency requests.
+
+> [!WARNING]
+> **Concurrent Multi-Configuration Limitation**:
+> Since configuration settings and provider instance caches are stored in global module-level variables, calling `set_default_config()` concurrently from different threads within the same process is **not** isolated. Doing so will clear the global cache and mutate the active config path for all threads. If you need to run concurrent calls with different configurations, run them in separate operating system processes (which is the standard case for individual CLI tools or microservices), or pass request-level overrides via `extra_options` in `call_ai()`.
+
+### 2. Call-Time Parameters (Stateless Requests)
+The conversation logic is **stateless**. `UnifiedAiClient` does not track chat history, context, or previous requests:
+* Parameters like `temperature`, `top_k`, `top_p`, `max_tokens` (mapped automatically to `num_predict`, `max_output_tokens`, etc.), and JSON formatting flags can be modified per-call in `call_ai()`.
+* Consuming projects maintain their own state (e.g. accumulating message history in `messages`) and must pass the full history to each call.
+* Call-time overrides can be passed via the `extra_options` dictionary to customize behaviour temporarily without mutating the cached provider instance config.
 
 ---
 

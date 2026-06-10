@@ -1,11 +1,13 @@
 {
-    "_comment": "Copy this file to config.json and adjust values as needed. All sections and keys are optional — omitted keys fall back to these defaults.",
+    "_comment": "Copy this file to config.json. All keys except 'url', 'timeout', and 'sleep_time' are dynamically loaded into the provider's 'extra_options'. You can specify custom provider-specific keys or universal sampling defaults (like 'top_k', 'top_p', 'max_tokens') here.",
 
     "ollama": {
         "url": "http://localhost:11434",
         "timeout": 120,
         "keep_alive": "15m",
-        "context_size": 0
+        "context_size": 0,
+        "top_k": 64,
+        "top_p": 0.95
     },
 
     "google": {

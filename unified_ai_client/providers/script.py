@@ -122,6 +122,10 @@ class ScriptProvider(BaseProvider):
             "thinking": request.thinking,
             "format_json": request.format_json,
             "timeout": request.timeout,
+            "top_k": request.top_k,
+            "top_p": request.top_p,
+            "max_tokens": request.max_tokens,
+            "extra_options": request.extra_options,
         }
 
         data = _run_script(cmd, payload, request.timeout)

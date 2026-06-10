@@ -163,8 +163,12 @@ class AnthropicProvider(BaseProvider):
         Returns:
             Standardized AiResponse.
         """
-        if self.config.sleep_time > 0:
-            time.sleep(self.config.sleep_time)
+        # Merge options
+        opts = {}
+        if self.config.extra_options:
+            opts.update(self.config.extra_options)
+        if request.extra_options:
+            opts.update(request.extra_options)
 
         messages: list[dict[str, Any]] = []
 
@@ -176,12 +180,27 @@ class AnthropicProvider(BaseProvider):
         user_content = self._build_user_content(request.prompt, file_paths)
         messages.append({"role": "user", "content": user_content})
 
+        max_tokens = request.max_tokens if request.max_tokens is not None else opts.get("max_tokens", 8192)
+
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens,
             "temperature": request.temperature,
         }
+
+        top_k = request.top_k if request.top_k is not None else opts.get("top_k")
+        if top_k is not None:
+            payload["top_k"] = top_k
+
+        top_p = request.top_p if request.top_p is not None else opts.get("top_p")
+        if top_p is not None:
+            payload["top_p"] = top_p
+
+        # Populate payload from other opts
+        for k, v in opts.items():
+            if k not in ("max_tokens", "temperature", "top_k", "top_p", "timeout", "sleep_time", "keep_alive"):
+                payload[k] = v
 
         if request.system_prompt:
             payload["system"] = request.system_prompt
