@@ -195,39 +195,57 @@ class OllamaProvider(BaseProvider):
             options["num_predict"] = request.max_tokens
 
         keep_alive = opts.get("keep_alive", "15m")
+        use_generate = opts.get("use_generate", False)
 
-        payload: dict[str, Any] = {
-            "model": request.model,
-            "messages": messages,
-            "stream": False,
-            "options": options,
-            "keep_alive": keep_alive,
-        }
+        if use_generate:
+            # Map back to /api/generate format
+            # We assume effective_prompt is the main prompt and multimodal_data are the images
+            payload: dict[str, Any] = {
+                "model": request.model,
+                "prompt": effective_prompt,
+                "stream": False,
+                "options": options,
+                "keep_alive": keep_alive,
+            }
+            if multimodal_data:
+                payload["images"] = multimodal_data
+            
+            if request.format_json:
+                payload["format"] = "json"
+                
+            resp = self._post("/api/generate", payload, request.timeout)
+            
+            content_text = resp.get("response", "") or ""
+            eval_count = resp.get("eval_count", 0)
+            raw_thinking = ""
+            reasoning_text = "" # /api/generate doesn't cleanly separate thinking tokens yet
+        else:
+            payload: dict[str, Any] = {
+                "model": request.model,
+                "messages": messages,
+                "stream": False,
+                "options": options,
+                "keep_alive": keep_alive,
+            }
 
-        if request.format_json:
-            payload["format"] = "json"
+            if request.format_json:
+                payload["format"] = "json"
 
-        if request.thinking is True:
-            payload["think"] = True
-        elif request.thinking is False:
-            payload["think"] = False
+            if request.thinking is True:
+                payload["think"] = True
+            elif request.thinking is False:
+                payload["think"] = False
 
-        # 5. Make request
-        resp = self._post("/api/chat", payload, request.timeout)
+            # 5. Make request
+            resp = self._post("/api/chat", payload, request.timeout)
 
-        # 6. Parse output
-        message = resp.get("message", {})
-        content_text = message.get("content", "") or ""
-        eval_count = resp.get("eval_count", 0)
+            # 6. Parse output
+            message = resp.get("message", {})
+            content_text = message.get("content", "") or ""
+            eval_count = resp.get("eval_count", 0)
 
-        # Both reasoning_tokens and raw_thinking are always processed.
-        # Ollama does not expose a dedicated thinking-token counter — eval_count
-        # aggregates both thinking and response tokens.  When thinking text is
-        # present, estimate reasoning_tokens using the exact chars-per-token
-        # ratio of this response: eval_count / (len(content) + len(thinking)).
-        # This avoids a fixed global ratio and is self-consistent per response.
-        raw_thinking = message.get("thinking", "") or ""
-        reasoning_text = raw_thinking
+            raw_thinking = message.get("thinking", "") or ""
+            reasoning_text = raw_thinking
 
         reasoning_tokens = 0
         if raw_thinking:
