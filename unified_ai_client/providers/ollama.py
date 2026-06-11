@@ -244,18 +244,64 @@ class OllamaProvider(BaseProvider):
             reasoning_text=reasoning_text,
         )
 
-    def preload_model(self, model: str, keep_alive: str = "15m") -> None:
-        """Pre-load an Ollama model into memory.
+    def preload_model(
+        self,
+        model: str,
+        keep_alive: str = "15m",
+        context_size: int | None = None,
+        extra_options: dict | None = None,
+    ) -> None:
+        """Pre-load an Ollama model into memory with the specified options.
+
+        Includes any provider-level ``extra_options`` (registered via
+        ``configure_provider()``) and call-time overrides in the preload
+        payload so Ollama allocates the model with the correct options
+        (e.g. context window size) from the start.
 
         Args:
             model: Model identifier.
             keep_alive: Duration to keep model loaded.
+            context_size: Context window size in tokens. Mapped to ``num_ctx``.
+                Takes priority over ``context_size`` in ``extra_options``.
+            extra_options: Additional provider-specific options merged into the
+                preload request options dict.
         """
-        payload = {
+        options: dict[str, Any] = {}
+
+        # 1. Config-level extra_options (from configure_provider / previous preload)
+        if self.config.extra_options:
+            for k, v in self.config.extra_options.items():
+                if k not in ("keep_alive", "timeout", "sleep_time"):
+                    if k == "context_size":
+                        options["num_ctx"] = v
+                    elif k == "max_tokens":
+                        options["num_predict"] = v
+                    else:
+                        options[k] = v
+
+        # 2. Call-time extra_options (override config)
+        if extra_options:
+            for k, v in extra_options.items():
+                if k not in ("keep_alive", "timeout", "sleep_time"):
+                    if k == "context_size":
+                        options["num_ctx"] = v
+                    elif k == "max_tokens":
+                        options["num_predict"] = v
+                    else:
+                        options[k] = v
+
+        # 3. Explicit context_size parameter (highest priority)
+        if context_size is not None:
+            options["num_ctx"] = context_size
+
+        payload: dict[str, Any] = {
             "model": model,
             "messages": [],
             "keep_alive": keep_alive,
         }
+        if options:
+            payload["options"] = options
+
         self._post("/api/chat", payload, self.config.timeout)
 
     def get_embedding(self, model: str, text: str) -> list[float]:

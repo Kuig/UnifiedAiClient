@@ -342,12 +342,20 @@ class GoogleProvider(BaseProvider):
             reasoning_text=reasoning_text,
         )
 
-    def preload_model(self, model: str, keep_alive: str = "15m") -> None:
+    def preload_model(
+        self,
+        model: str,
+        keep_alive: str = "15m",
+        context_size: int | None = None,
+        extra_options: dict | None = None,
+    ) -> None:
         """Model preloading is not supported on the Google provider.
 
         Args:
             model: Model identifier. Unused.
             keep_alive: Duration. Unused.
+            context_size: Unused.
+            extra_options: Unused.
 
         Raises:
             NotImplementedError: Always.

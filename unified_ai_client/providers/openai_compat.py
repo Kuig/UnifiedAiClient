@@ -262,12 +262,20 @@ class OpenAiCompatProvider(BaseProvider):
             reasoning_text=raw_reasoning,
         )
 
-    def preload_model(self, model: str, keep_alive: str = "15m") -> None:
+    def preload_model(
+        self,
+        model: str,
+        keep_alive: str = "15m",
+        context_size: int | None = None,
+        extra_options: dict | None = None,
+    ) -> None:
         """Model preloading is not supported by OpenAI-compatible endpoints.
 
         Args:
             model: Unused.
             keep_alive: Unused.
+            context_size: Unused.
+            extra_options: Unused.
         """
         pass  # No-op: not supported
 

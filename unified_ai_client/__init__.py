@@ -1,5 +1,12 @@
 from __future__ import annotations
-from unified_ai_client.client import call_ai, get_embedding, preload_model, cleanup, set_default_config
+from unified_ai_client.client import (
+    call_ai,
+    get_embedding,
+    preload_model,
+    cleanup,
+    configure_provider,
+    get_provider,
+)
 from unified_ai_client.config import load_secrets, load_config
 from unified_ai_client.silence import silence_sdks
 from unified_ai_client.models import AiResponse, AiRequest, ProviderConfig
@@ -10,7 +17,8 @@ __all__ = [
     "get_embedding",
     "preload_model",
     "cleanup",
-    "set_default_config",
+    "configure_provider",
+    "get_provider",
     "load_secrets",
     "load_config",
     "silence_sdks",

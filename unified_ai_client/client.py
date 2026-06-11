@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import atexit
 import os
-import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -10,70 +9,141 @@ from typing import Any
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig
 from unified_ai_client.providers.base import BaseProvider
 
-# --- Constants ---
-_LIB_ROOT = Path(__file__).parent.parent
-_DEFAULT_CONFIG_PATH = str(os.path.join(_LIB_ROOT, "config.json"))
+# --- Thread-safe programmatic provider configuration registry ---
+# Populated via configure_provider(). Takes priority over file-based config.
+_PROVIDER_CONFIGS: dict[str, ProviderConfig] = {}
+_PROVIDER_CONFIGS_LOCK = threading.Lock()
 
-# --- Module-level mutable config path (overridable via set_default_config) ---
-_effective_config_path: str = _DEFAULT_CONFIG_PATH
-
-# --- Thread-safe global provider cache ---
-_PROVIDERS: dict[tuple[str, str], BaseProvider] = {}
+# --- Thread-safe global provider instance cache ---
+_PROVIDERS: dict[str, BaseProvider] = {}
 _PROVIDERS_LOCK = threading.Lock()
 
 # --- Resource cleanup registration flag ---
 _CLEANUP_REGISTERED = False
 _CLEANUP_LOCK = threading.Lock()
 
+# --- Legacy file-based config path (kept for backward compat with load_config) ---
+_LIB_ROOT = Path(__file__).parent.parent
+_effective_config_path: str = str(os.path.join(_LIB_ROOT, "config.json"))
 
-def set_default_config(path: str) -> None:
-    """Override the default config.json path used by all subsequent provider calls.
 
-    Call this once at application startup (e.g., in the entry point) to direct
-    UnifiedAiClient to a project-specific config.json instead of the library default.
-    Clears the provider cache so that the next call picks up the new configuration.
+def configure_provider(name: str, **kwargs: Any) -> None:
+    """Register or update provider-specific configuration programmatically.
+
+    Call this at application startup to set provider settings that do not
+    change per-call, such as server URLs, timeouts, or provider-specific
+    parameters like ``context_size`` and ``visual_token_budget``.
+
+    Known ``ProviderConfig`` fields (``url``, ``timeout``, ``sleep_time``) are
+    stored as typed attributes. All other keyword arguments are collected into
+    ``extra_options`` and passed through to the provider as-is (e.g.
+    ``context_size``, ``visual_token_budget``, ``keep_alive``,
+    ``disable_safety``).
+
+    Subsequent calls are **merge-based**: only the fields explicitly passed are
+    updated; previously registered values for other fields are preserved. This
+    means ``configure_provider("ollama", url="…")`` followed by
+    ``configure_provider("ollama", context_size=8000)`` results in both
+    ``url`` and ``context_size`` being active simultaneously.
+
+    Invalidates any cached provider instance for ``name`` so the next call
+    picks up the new configuration.
+
+    This function is thread-safe. Concurrent calls for the same provider name
+    are serialized via an internal lock. Calling ``configure_provider`` from
+    multiple threads for *different* provider names is fully safe. Calling it
+    for the *same* name from multiple threads is safe but the last writer wins.
 
     Args:
-        path: Absolute path to the project's config.json file.
+        name: Provider name (e.g. ``'ollama'``, ``'google'``).
+        **kwargs: Configuration values. Known ProviderConfig fields: ``url``,
+            ``timeout``, ``sleep_time``. Everything else goes into
+            ``extra_options`` as provider-specific settings.
+
+    Example::
+
+        configure_provider(
+            "ollama",
+            url="http://192.168.1.5:11434",
+            timeout=240,
+            context_size=8000,
+            visual_token_budget=1120,
+        )
+        configure_provider("google", sleep_time=3)
     """
-    global _effective_config_path, _PROVIDERS
-    _effective_config_path = path
+    name = name.strip().lower()
+    known_fields = {"url", "timeout", "sleep_time"}
+    new_known = {k: v for k, v in kwargs.items() if k in known_fields}
+    new_extra = {k: v for k, v in kwargs.items() if k not in known_fields}
+
+    with _PROVIDER_CONFIGS_LOCK:
+        existing = _PROVIDER_CONFIGS.get(name)
+        if existing is not None:
+            # Merge: keep existing values, override only explicitly supplied fields
+            merged_known: dict[str, Any] = {}
+            if existing.url is not None:
+                merged_known["url"] = existing.url
+            if existing.timeout is not None:
+                merged_known["timeout"] = existing.timeout
+            if existing.sleep_time is not None:
+                merged_known["sleep_time"] = existing.sleep_time
+            merged_known.update(new_known)
+            merged_extra = dict(existing.extra_options or {})
+            merged_extra.update(new_extra)
+            config = ProviderConfig(**merged_known, extra_options=merged_extra)
+        else:
+            config = ProviderConfig(**new_known, extra_options=new_extra)
+        _PROVIDER_CONFIGS[name] = config
+
+    # Invalidate cached provider instance so the next call rebuilds with new config
     with _PROVIDERS_LOCK:
-        _PROVIDERS.clear()
+        _PROVIDERS.pop(name, None)
 
 
 def get_provider(provider_name: str) -> BaseProvider:
     """Thread-safe factory to resolve, configure, and cache provider instances.
 
-    Uses the currently active config path (set via set_default_config or the
-    library default). Provider instances are cached per (provider_name, config_path)
-    pair, so different config paths yield independent instances.
+    Configuration priority (highest to lowest):
+    1. Programmatic configuration registered via ``configure_provider()``.
+    2. File-based configuration from the library's ``config.json`` (legacy).
+    3. Built-in ``ProviderConfig`` defaults.
+
+    Provider instances are cached by name. Calling ``configure_provider()``
+    invalidates the cache entry for the affected provider.
 
     Args:
-        provider_name: The lower-case provider name (e.g. 'ollama', 'google').
+        provider_name: The lower-case provider name (e.g. ``'ollama'``,
+            ``'google'``).
 
     Returns:
-        An instance of BaseProvider.
+        An instance of ``BaseProvider``.
 
     Raises:
         ValueError: If the provider name is not supported.
     """
     provider_name = provider_name.strip().lower()
-    cache_key = (provider_name, _effective_config_path)
 
-    if cache_key in _PROVIDERS:
-        return _PROVIDERS[cache_key]
+    if provider_name in _PROVIDERS:
+        return _PROVIDERS[provider_name]
 
     with _PROVIDERS_LOCK:
-        if cache_key in _PROVIDERS:
-            return _PROVIDERS[cache_key]
+        if provider_name in _PROVIDERS:
+            return _PROVIDERS[provider_name]
 
-        # 1. Load config from the effective path
-        from unified_ai_client.config import load_config
-        config = load_config(_effective_config_path, ProviderConfig, section=provider_name)
+        # 1. Resolve configuration: programmatic > file > default
+        with _PROVIDER_CONFIGS_LOCK:
+            programmatic_config = _PROVIDER_CONFIGS.get(provider_name)
+
+        if programmatic_config is not None:
+            config = programmatic_config
+        else:
+            from unified_ai_client.config import load_config
+            config = load_config(
+                _effective_config_path, ProviderConfig, section=provider_name
+            )
 
         # 2. Search for secrets.json in the current working directory
-        # (= the consuming project's root when the script is launched from there)
+        # (= the consuming project's root when launched from there)
         from unified_ai_client.config import load_secrets
         secrets = load_secrets(os.getcwd())
 
@@ -87,7 +157,7 @@ def get_provider(provider_name: str) -> BaseProvider:
         api_key_groq = secrets.get("groq_api_key")
         api_key_xai = secrets.get("xai_api_key")
 
-        # 5. Instantiate provider adapter
+        # 4. Instantiate provider adapter
         if provider_name == "ollama":
             from unified_ai_client.providers.ollama import OllamaProvider
             provider_instance: BaseProvider = OllamaProvider(config)
@@ -132,7 +202,7 @@ def get_provider(provider_name: str) -> BaseProvider:
                 f"'lmstudio', 'llamacpp', 'script'."
             )
 
-        _PROVIDERS[cache_key] = provider_instance
+        _PROVIDERS[provider_name] = provider_instance
         return provider_instance
 
 
@@ -184,22 +254,22 @@ def call_ai(
     """Main routing function for all unified AI text generation requests.
 
     Args:
-        provider: Provider name ('ollama', 'google', 'anthropic', 'openai',
-            'mistral', 'cohere', 'meta', 'groq', 'xai',
-            'lmstudio', 'llamacpp', or 'script').
-        model: Model identifier. For 'script' provider, this is the script
+        provider: Provider name (``'ollama'``, ``'google'``, ``'anthropic'``,
+            ``'openai'``, ``'mistral'``, ``'cohere'``, ``'meta'``, ``'groq'``,
+            ``'xai'``, ``'lmstudio'``, ``'llamacpp'``, or ``'script'``).
+        model: Model identifier. For ``'script'`` provider, this is the script
             file path.
         prompt: User prompt text.
         system_prompt: Optional system instructions.
         messages: Optional chat history as a list of role/content dicts.
-            Each dict may include an optional 'files' key with a list of
+            Each dict may include an optional ``'files'`` key with a list of
             file paths to attach to that message.
         file_path: Optional local file path or list of paths for multimodal
             input. Supports images, audio, text files, and PDFs. The provider
             handles all encoding and upload internally.
         temperature: Sampling temperature.
-        thinking: Enable extended reasoning/thinking mode (True/False) or
-            use provider's default behavior ("default").
+        thinking: Enable extended reasoning/thinking mode (``True``/``False``)
+            or use the provider's default behavior (``"default"``).
         format_json: Force JSON-formatted response.
         timeout: Maximum seconds to wait for a response.
         max_retries: Number of retry attempts on failure.
@@ -208,13 +278,15 @@ def call_ai(
         top_p: Sampling parameter top_p (default 0.95).
         max_tokens: Limit on the number of generated tokens.
         sleep_time: Rate limit delay in seconds before calling the API.
-        extra_options: Optional dict of arbitrary provider-specific options
-            merged into the API payload at call time. Keys and values are
-            provider-dependent (e.g. {'visual_token_budget': 1120} for
-            Ollama/Gemma4). Override any config-level defaults for the same key.
+            Overrides the value set via ``configure_provider()`` for this call.
+        extra_options: Optional dict of provider-specific options merged into
+            the API payload at call time. Call-time values override any
+            provider-level defaults registered via ``configure_provider()``
+            for the same key. Examples: ``{'visual_token_budget': 1120}`` for
+            Ollama/Gemma4, ``{'disable_safety': True}`` for Google.
 
     Returns:
-        AiResponse dataclass containing response text, token metrics, and
+        ``AiResponse`` dataclass containing response text, token metrics, and
         optional reasoning text.
     """
     _register_cleanup()
@@ -261,16 +333,55 @@ def preload_model(
     provider: str,
     model: str,
     keep_alive: str = "15m",
+    context_size: int | None = None,
+    extra_options: dict | None = None,
 ) -> None:
-    """Pre-load a model into resident memory (Ollama only).
+    """Pre-load a model into resident memory and register its settings.
+
+    For Ollama, sends a warm-up request that allocates the model in GPU/CPU
+    memory with the specified options (e.g. ``context_size`` → ``num_ctx``).
+    This avoids a VRAM reallocation on the first ``call_ai()`` call.
+
+    When ``context_size`` or ``extra_options`` are provided, they are
+    registered via ``configure_provider()`` so that all subsequent
+    ``call_ai()`` calls for this provider automatically use the same settings
+    without needing to pass them again per-call.
+
+    ``extra_options`` is merged with any ``extra_options`` previously
+    registered via ``configure_provider()``.
+
+    For providers that do not support preloading (Google, Anthropic, OpenAI,
+    etc.) this function is a no-op for the warm-up part, but still registers
+    any provided settings via ``configure_provider()``.
 
     Args:
-        provider: Provider name (e.g. 'ollama').
+        provider: Provider name (e.g. ``'ollama'``).
         model: Model identifier.
-        keep_alive: How long to keep model loaded (e.g. '15m', '1h').
+        keep_alive: How long to keep model loaded (e.g. ``'15m'``, ``'1h'``).
+            Ollama-specific; ignored by other providers.
+        context_size: Context window size in tokens. Ollama maps this to
+            ``num_ctx`` in the API payload. If provided, registered via
+            ``configure_provider()`` so it persists across all ``call_ai()``
+            calls. Passing ``context_size`` here instead of in each
+            ``call_ai()`` call prevents Ollama from reloading the model with
+            a different context window mid-session.
+        extra_options: Optional dict of additional provider-specific settings
+            (e.g. ``{'visual_token_budget': 1120}``). Merged with any
+            previously registered settings and persisted via
+            ``configure_provider()``.
     """
+    # Register settings so they persist into all subsequent call_ai() calls
+    if context_size is not None or extra_options:
+        config_kwargs: dict[str, Any] = {}
+        if context_size is not None:
+            config_kwargs["context_size"] = context_size
+        if extra_options:
+            config_kwargs.update(extra_options)
+        configure_provider(provider, **config_kwargs)
+
+    # get_provider after configure_provider so it picks up the new config
     prov = get_provider(provider)
-    prov.preload_model(model, keep_alive)
+    prov.preload_model(model, keep_alive, context_size=context_size, extra_options=extra_options)
 
 
 def get_embedding(

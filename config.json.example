@@ -1,5 +1,5 @@
 {
-    "_comment": "Copy this file to config.json. All keys except 'url', 'timeout', and 'sleep_time' are dynamically loaded into the provider's 'extra_options'. You can specify custom provider-specific keys or universal sampling defaults (like 'top_k', 'top_p', 'max_tokens') here.",
+    "_comment": "Reference of built-in provider defaults. The preferred way to configure providers is now configure_provider() in code (see README). This file is still read as a fallback if configure_provider() was never called for a given provider. Keys: 'url', 'timeout', 'sleep_time' map to ProviderConfig fields; all other keys are collected into extra_options and forwarded as provider-specific settings (e.g. context_size → num_ctx in Ollama, max_tokens → num_predict/max_output_tokens).",
 
     "ollama": {
         "url": "http://localhost:11434",

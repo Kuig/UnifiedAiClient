@@ -35,7 +35,7 @@ pip install -e /path/to/UnifiedAiClient
 **Production / other machines** — declare in your project's `requirements.txt`:
 
 ```text
-unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.1.1
+unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.2.0
 ```
 
 then run `pip install -r requirements.txt`.
@@ -47,45 +47,10 @@ then run `pip install -r requirements.txt`.
 All configuration is **optional**. The library falls back to built-in defaults when
 nothing is provided.
 
-### Where do the files live?
-
-| File | Lives in | Created by | Purpose |
-|---|---|---|---|
-| `secrets.json` | **Each consuming project's root** | You, per-project | Cloud API keys (local dev) |
-| `config.json` | **The library directory** (`UnifiedAiClient/`) | You, once | Provider URLs, timeouts, etc. |
-
-**`secrets.json`** is looked up at runtime via `os.getcwd()`, so it must be in whichever
-directory you launch your script from — which is conventionally the consuming project's
-root. Each project has its own `secrets.json` with its own API keys.
-
-**`config.json`** is the library's shared configuration. It lives once inside the
-`UnifiedAiClient/` directory and applies to all consuming projects. If a project needs
-different provider settings (e.g. a different Ollama port), it can call
-`set_default_config("path/to/its/own/config.json")` at startup to override.
-
-```
-/your-workspace/
-├── UnifiedAiClient/
-│   ├── config.json          ← shared library config (URLs, timeouts, etc.)
-│   ├── config.json.example  ← template to copy and edit
-│   └── secrets.json.example ← template to copy and edit
-│
-├── AppAlpha/
-│   ├── secrets.json         ← AppAlpha's API keys (gitignored)
-│   ├── my_config.json       ← Custom AppAlpha's library config (set_default_config)
-│   └── ...
-│
-└── AppBeta/
-    ├── secrets.json         ← AppBeta's API keys (gitignored)
-    └── ...
-```
-
----
-
 ### API credentials — environment variables and/or `secrets.json`
 
 Only API keys for cloud providers belong here. Server URLs for local providers (Ollama,
-LM Studio, llama.cpp) are **not** credentials — put them in `config.json`.
+LM Studio, llama.cpp) are **not** credentials — register them via `configure_provider()`.
 
 **Precedence** (highest → lowest):
 1. Environment variables (`os.environ`) — shell, Docker, CI/CD
@@ -125,34 +90,36 @@ export GOOGLE_API_KEY=your-google-api-key-here
 
 > **Add `secrets.json` to each consuming project's `.gitignore`** to avoid leaking credentials.
 
-### Provider settings — `config.json`
+### Provider settings — `configure_provider()`
 
-Controls server URLs, timeouts, rate-limit delays, and other provider-specific settings.
-Edit `UnifiedAiClient/config.json` directly (or copy from [`config.json.example`](config.json.example)):
+Controls server URLs, timeouts, rate-limit delays, and provider-specific options such
+as `context_size` or `visual_token_budget`. Call this once at application startup for
+any setting that should not change per-call:
 
-```json
-{
-    "ollama":    { "url": "http://localhost:11434", "timeout": 120, "keep_alive": "15m", "context_size": 0 },
-    "google":    { "sleep_time": 3, "disable_safety": false, "timeout": 30 },
-    "openai":    { "url": "https://api.openai.com", "timeout": 120, "max_tokens": 8192 },
-    "anthropic": { "url": "https://api.anthropic.com", "timeout": 120, "max_tokens": 8192 },
-    "mistral":   { "url": "https://api.mistral.ai", "timeout": 120 },
-    "cohere":    { "url": "https://api.cohere.ai/compatibility/v1", "timeout": 120 },
-    "meta":      { "url": "https://api.llama-api.com", "timeout": 120 },
-    "groq":      { "url": "https://api.groq.com/openai", "timeout": 120 },
-    "xai":       { "url": "https://api.x.ai", "timeout": 120 },
-    "lmstudio":  { "url": "http://localhost:1234", "timeout": 120, "context_size": 0 },
-    "llamacpp":  { "url": "http://localhost:8080", "timeout": 120, "context_size": 0 }
-}
-```
-
-> **Dynamic Option Loading**: Except for base config fields (`url`, `timeout`, `sleep_time`), any unrecognized keys present in `config.json` for a provider are automatically collected into the provider's `extra_options` dictionary. This prevents payload payload definitions from breaking when updating client settings in `config.json`.
-
-If a consuming project needs its own provider settings, call this once at startup:
 ```python
-from unified_ai_client import set_default_config
-set_default_config("path/to/its/own/config.json")
+from unified_ai_client import configure_provider
+
+# Ollama on a remote host with a custom context window
+configure_provider(
+    "ollama",
+    url="http://192.168.1.5:11434",
+    timeout=240,
+    context_size=8000,
+    visual_token_budget=1120,
+)
+
+# Google with rate-limiting delay
+configure_provider("google", sleep_time=3)
 ```
+
+If `configure_provider()` is never called, built-in defaults are used automatically
+(Ollama: `http://localhost:11434`, timeout 120 s; cloud providers: their standard
+endpoints). Per-call overrides via `extra_options` in `call_ai()` always take
+precedence over values registered here.
+
+Known top-level fields: `url`, `timeout`, `sleep_time`. Everything else is treated as
+a provider-specific setting and forwarded to the API payload (e.g. `context_size` →
+`num_ctx` in Ollama, `max_tokens` → `max_output_tokens` in cloud providers).
 
 ---
 
@@ -256,6 +223,9 @@ print(response.reasoning_text)  # Thinking process
 
 ### Model Pre-loading (Ollama only)
 
+Pre-loads a model into GPU/CPU memory and registers its settings so they
+propagate automatically into all subsequent `call_ai()` calls:
+
 ```python
 from unified_ai_client import preload_model
 
@@ -263,8 +233,18 @@ preload_model(
     provider="ollama",
     model="gemma4:e2b",
     keep_alive="15m",
+    context_size=8000,                       # allocates VRAM with correct num_ctx
+    extra_options={"visual_token_budget": 1120},  # any other provider-specific setting
 )
 ```
+
+Passing `context_size` here (rather than in each `call_ai()` call) is important:
+Ollama allocates the context window once at preload time. If a different `num_ctx`
+value arrives at the first `call_ai()`, Ollama reloads the model and reallocates VRAM.
+
+For providers that do not support preloading (Google, Anthropic, OpenAI, etc.) the
+warm-up part is a no-op, but any provided `context_size` / `extra_options` are still
+registered and will apply to `call_ai()` calls.
 
 ### Text Embeddings
 
@@ -395,32 +375,69 @@ def get_embedding(
 ---
 
 #### `preload_model`
-Pre-loads a model into system memory (currently only supported by the `"ollama"` provider).
+Pre-loads a model into system memory and registers its settings for all
+subsequent `call_ai()` calls. Currently only Ollama performs an actual warm-up;
+all other providers treat the warm-up as a no-op but still register the settings.
 
 ```python
 def preload_model(
     provider: str,
     model: str,
     keep_alive: str = "15m",
+    context_size: int | None = None,
+    extra_options: dict | None = None,
 ) -> None:
 ```
 
 * **Parameters:**
-  * `provider` (`str`): Must be `"ollama"`.
-  * `model` (`str`): The Ollama model name to preload.
-  * `keep_alive` (`str`, optional): How long to keep the model resident in memory (e.g., `"15m"`, `"1h"`, `"0"`). Defaults to `"15m"`.
+  * `provider` (`str`): Provider name (e.g. `"ollama"`).
+  * `model` (`str`): The model identifier to preload.
+  * `keep_alive` (`str`, optional): How long to keep the model resident in memory
+    (e.g. `"15m"`, `"1h"`, `"0"`). Defaults to `"15m"`. Ollama-specific.
+  * `context_size` (`int`, optional): Context window size in tokens. Ollama maps
+    this to `num_ctx` in the API payload. Registered via `configure_provider()`
+    so it persists across all `call_ai()` calls without needing to be repeated.
+    Pass it **here** rather than in per-call `extra_options` to prevent Ollama
+    from reloading the model with a different context window mid-session.
+  * `extra_options` (`dict`, optional): Additional provider-specific settings
+    (e.g. `{"visual_token_budget": 1120}`). Merged with any previously registered
+    settings and persisted via `configure_provider()`.
 
 ---
 
-#### `set_default_config`
-Overrides the default `config.json` path used by the library. Typically called at application startup.
+#### `configure_provider`
+Registers or updates provider-specific configuration programmatically. Calls are
+**merge-based**: only the fields explicitly passed are updated; previously
+registered values for other fields are preserved.
+
+Known top-level fields (`url`, `timeout`, `sleep_time`) are stored as typed
+attributes on `ProviderConfig`. All other keyword arguments are collected into
+`extra_options` and forwarded as provider-specific settings (e.g. `context_size`
+→ `num_ctx` in Ollama payloads, `visual_token_budget`, `disable_safety`, etc.).
+
+Thread-safe. Concurrent calls for different provider names are fully safe.
+Calling it for the same name from multiple threads is safe but last-writer-wins.
 
 ```python
-def set_default_config(path: str) -> None:
+def configure_provider(name: str, **kwargs) -> None:
 ```
 
 * **Parameters:**
-  * `path` (`str`): The absolute path to the project-specific configuration JSON file.
+  * `name` (`str`): The provider name (e.g. `"ollama"`, `"google"`).
+  * `**kwargs`: Configuration values. Known fields: `url`, `timeout`, `sleep_time`.
+    All other keys go into `extra_options` as provider-specific settings.
+
+```python
+# Examples
+from unified_ai_client import configure_provider
+
+configure_provider("ollama",
+                   url="http://192.168.1.5:11434",
+                   timeout=240,
+                   context_size=8000,
+                   visual_token_budget=1120)
+configure_provider("google", sleep_time=3)
+```
 
 ---
 
@@ -494,24 +511,34 @@ The standard response object returned by `call_ai()`.
 
 ## Design Concepts: Caching and Lifecycle
 
-`UnifiedAiClient` utilizes a hybrid architectural design that separates stateful infrastructure configuration from stateless call parameters.
+`UnifiedAiClient` utilises a hybrid architectural design that separates stateful
+infrastructure configuration from stateless call parameters.
 
 ### 1. General Settings (Stateful Configuration)
-The Python client is **stateful** regarding its connection infrastructure. Provider instances are created and cached inside the global module scope upon their first invocation:
-* Config parameters like `url`, basic network `timeout`, and rate-limiting `sleep_time` are structural settings loaded from `config.json` once.
-* Local settings like Ollama's `context_size` (`num_ctx`) are configuration-level settings because changing them dynamically at call-time would force local model reloads or re-allocation of GPU VRAM.
+The Python client is **stateful** regarding its connection infrastructure. Provider
+instances are created and cached inside the global module scope upon their first
+invocation:
+* Settings like `url`, network `timeout`, rate-limiting `sleep_time`, and
+  provider-specific options such as `context_size` are registered once via
+  `configure_provider()` at application startup.
+* Local settings like Ollama's `context_size` (`num_ctx`) are configuration-level
+  settings because changing them dynamically at call-time would force local model
+  reloads or re-allocation of GPU VRAM.
 * API credentials (API keys) loaded from `secrets.json` or system variables are cached.
-* Thread-safe singletons avoid unnecessary config loading and connection re-initialization on high-frequency requests.
-
-> [!WARNING]
-> **Concurrent Multi-Configuration Limitation**:
-> Since configuration settings and provider instance caches are stored in global module-level variables, calling `set_default_config()` concurrently from different threads within the same process is **not** isolated. Doing so will clear the global cache and mutate the active config path for all threads. If you need to run concurrent calls with different configurations, run them in separate operating system processes (which is the standard case for individual CLI tools or microservices), or pass request-level overrides via `extra_options` in `call_ai()`.
+* Thread-safe singletons avoid unnecessary config loading and connection
+  re-initialisation on high-frequency requests.
 
 ### 2. Call-Time Parameters (Stateless Requests)
-The conversation logic is **stateless**. `UnifiedAiClient` does not track chat history, context, or previous requests:
-* Parameters like `temperature`, `top_k`, `top_p`, `max_tokens` (mapped automatically to `num_predict`, `max_output_tokens`, etc.), and JSON formatting flags can be modified per-call in `call_ai()`.
-* Consuming projects maintain their own state (e.g. accumulating message history in `messages`) and must pass the full history to each call.
-* Call-time overrides can be passed via the `extra_options` dictionary to customize behaviour temporarily without mutating the cached provider instance config.
+The conversation logic is **stateless**. `UnifiedAiClient` does not track chat history,
+context, or previous requests:
+* Parameters like `temperature`, `top_k`, `top_p`, `max_tokens` (mapped automatically
+  to `num_predict`, `max_output_tokens`, etc.), and JSON formatting flags can be
+  modified per-call in `call_ai()`.
+* Consuming projects maintain their own state (e.g. accumulating message history in
+  `messages`) and must pass the full history to each call.
+* Call-time overrides can be passed via the `extra_options` dictionary to customise
+  behaviour temporarily. They take precedence over values registered via
+  `configure_provider()` for the same key.
 
 ---
 
@@ -520,10 +547,10 @@ The conversation logic is **stateless**. `UnifiedAiClient` does not track chat h
 ```
 unified_ai_client/
 ├── __init__.py           # Public API exports
-├── client.py             # call_ai() router + provider cache
+├── client.py             # call_ai(), configure_provider() router + provider cache
 ├── models.py             # AiRequest, AiResponse, ProviderConfig dataclasses
 ├── file_utils.py         # classify_file, encode_file_base64, inline_text_attachments, ...
-├── config.py             # load_config(), load_secrets()
+├── config.py             # load_secrets(), load_config() (utility)
 ├── retry.py              # Exponential backoff
 ├── silence.py            # silence_sdks()
 └── providers/

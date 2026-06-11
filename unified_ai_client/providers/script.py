@@ -138,12 +138,20 @@ class ScriptProvider(BaseProvider):
             reasoning_text=data.get("reasoning_text", ""),
         )
 
-    def preload_model(self, model: str, keep_alive: str = "15m") -> None:
+    def preload_model(
+        self,
+        model: str,
+        keep_alive: str = "15m",
+        context_size: int | None = None,
+        extra_options: dict | None = None,
+    ) -> None:
         """Not supported by ScriptProvider. Emits a warning and returns.
 
         Args:
             model: Script path. Unused.
             keep_alive: Unused.
+            context_size: Unused.
+            extra_options: Unused.
         """
         warnings.warn(
             f"ScriptProvider does not support model preloading. "

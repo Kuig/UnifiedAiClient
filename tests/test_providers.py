@@ -476,12 +476,33 @@ def test_ollama_live_thinking() -> None:
     assert isinstance(response.reasoning_text, str)
 
 
+def _first_ollama_embed_model() -> str | None:
+    """Return the first Ollama embedding-capable model available.
+
+    Looks for models whose name matches known embedding model patterns
+    (bge-, e5-, embed, embedding, nomic-embed, mxbai-embed, etc.).
+    Returns None if no embedding model is found.
+    """
+    import urllib.request, json as _json
+    _EMBED_PATTERNS = ("embed", "embedding", "bge-", "e5-", "nomic-", "mxbai-")
+    try:
+        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2) as r:
+            data = _json.loads(r.read())
+        for m in data.get("models", []):
+            name: str = m["name"]
+            if any(p in name.lower() for p in _EMBED_PATTERNS):
+                return name
+        return None
+    except Exception:
+        return None
+
+
 def test_ollama_live_embedding() -> None:
     if not _ollama_available():
         raise SkipTest("Ollama not reachable at localhost:11434")
-    model = _first_ollama_model()
+    model = _first_ollama_embed_model()
     if not model:
-        raise SkipTest("No Ollama models installed")
+        raise SkipTest("No embedding-capable Ollama models installed (need bge-m3, embeddinggemma, nomic-embed-text, or similar)")
     import urllib.error
     from unified_ai_client import get_embedding
     try:
@@ -491,6 +512,7 @@ def test_ollama_live_embedding() -> None:
         assert all(isinstance(x, float) for x in vec)
     except (RuntimeError, urllib.error.HTTPError) as exc:
         raise SkipTest(f"Model '{model}' does not support embeddings ({exc})")
+
 
 def test_ollama_live_reasoning_tokens_thinking_true() -> None:
     """With thinking=True, reasoning_tokens must be > 0 if the model supports thinking.

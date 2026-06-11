@@ -27,12 +27,24 @@ class BaseProvider(ABC):
         ...
 
     @abstractmethod
-    def preload_model(self, model: str, keep_alive: str = "15m") -> None:
+    def preload_model(
+        self,
+        model: str,
+        keep_alive: str = "15m",
+        context_size: int | None = None,
+        extra_options: dict | None = None,
+    ) -> None:
         """Pre-load a model into memory for faster first inference.
 
         Args:
             model: Model identifier to preload.
             keep_alive: How long to keep the model in memory.
+            context_size: Context window size in tokens (provider-specific).
+                Ollama maps this to ``num_ctx``. Ignored by providers that
+                do not support preloading.
+            extra_options: Additional provider-specific options to include in
+                the preload request. Ignored by providers that do not support
+                preloading.
 
         Raises:
             NotImplementedError: If the provider does not support preloading.
