@@ -7,7 +7,7 @@ import warnings
 from pathlib import Path
 
 from unified_ai_client.file_utils import normalize_file_paths
-from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig
+from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
 
 
@@ -126,9 +126,36 @@ class ScriptProvider(BaseProvider):
             "top_p": request.top_p,
             "max_tokens": request.max_tokens,
             "extra_options": request.extra_options,
+            "tools": [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                }
+                for t in request.tools
+            ] if request.tools else None,
+            "tool_results": [
+                {
+                    "call_id": tr.call_id,
+                    "name": tr.name,
+                    "content": tr.content,
+                }
+                for tr in request.tool_results
+            ] if request.tool_results else None,
         }
 
         data = _run_script(cmd, payload, request.timeout)
+
+        # Parse tool calls if returned by the script
+        raw_tool_calls = data.get("tool_calls") or []
+        tool_calls: list[ToolCall] = [
+            ToolCall(
+                id=tc.get("id", f"{tc.get('name', 'tool')}_{i}"),
+                name=tc["name"],
+                arguments=tc.get("arguments", {}),
+            )
+            for i, tc in enumerate(raw_tool_calls)
+        ]
 
         return AiResponse(
             text=data["text"],
@@ -136,6 +163,7 @@ class ScriptProvider(BaseProvider):
             output_tokens=data.get("output_tokens", 0),
             reasoning_tokens=data.get("reasoning_tokens", 0),
             reasoning_text=data.get("reasoning_text", ""),
+            tool_calls=tool_calls,
         )
 
     def preload_model(

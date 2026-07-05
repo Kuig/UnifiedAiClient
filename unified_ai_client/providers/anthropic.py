@@ -15,7 +15,7 @@ from unified_ai_client.file_utils import (
     inline_text_attachments,
     normalize_file_paths,
 )
-from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig
+from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.anthropic")
@@ -176,9 +176,11 @@ class AnthropicProvider(BaseProvider):
             for msg in request.messages:
                 messages.append(self._build_message(msg))
 
-        file_paths = normalize_file_paths(request.file_path)
-        user_content = self._build_user_content(request.prompt, file_paths)
-        messages.append({"role": "user", "content": user_content})
+        # Current user message — only add when NOT in a tool result continuation.
+        if not request.tool_results:
+            file_paths = normalize_file_paths(request.file_path)
+            user_content = self._build_user_content(request.prompt, file_paths)
+            messages.append({"role": "user", "content": user_content})
 
         max_tokens = request.max_tokens if request.max_tokens is not None else opts.get("max_tokens", 8192)
 
@@ -205,17 +207,51 @@ class AnthropicProvider(BaseProvider):
         if request.system_prompt:
             payload["system"] = request.system_prompt
 
+        # Tool definitions
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                }
+                for t in request.tools
+            ]
+
+        # Tool results — Anthropic expects them as a user message with
+        # tool_result content blocks, immediately following the assistant
+        # message that contained the tool_use blocks.
+        if request.tool_results:
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tr.call_id,
+                        "content": tr.content,
+                    }
+                    for tr in request.tool_results
+                ],
+            })
+
         if request.thinking is True:
             payload["thinking"] = {"type": "adaptive"}
 
         resp = self._post(payload, request.timeout)
 
-        # Parse content blocks — always collect both text and thinking.
+        # Parse content blocks — always collect text, thinking, and tool_use.
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
         for block in resp.get("content", []):
             if block.get("type") == "thinking":
                 reasoning_parts.append(block.get("thinking", ""))
+            elif block.get("type") == "tool_use":
+                tool_calls.append(ToolCall(
+                    id=block["id"],
+                    name=block["name"],
+                    arguments=block.get("input", {}),
+                ))
             elif block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
 
@@ -240,6 +276,7 @@ class AnthropicProvider(BaseProvider):
             output_tokens=max(0, output_tokens - reasoning_tokens),
             reasoning_tokens=reasoning_tokens,
             reasoning_text=raw_reasoning,
+            tool_calls=tool_calls,
         )
 
     def preload_model(

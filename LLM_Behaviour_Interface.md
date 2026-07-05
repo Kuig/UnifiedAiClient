@@ -96,6 +96,8 @@ The script reads **one JSON object** from stdin. The object contains the followi
 | `top_p` | `float` | ✅ Yes | Sampling parameter top_p. |
 | `max_tokens` | `int \| null` | ✅ Yes | Limit on the number of generated tokens, or null. |
 | `extra_options` | `dict \| null` | ✅ Yes | Dictionary of provider-specific options, or null. |
+| `tools` | `array \| null` | ✅ Yes | List of tool definitions the model may call, or null if no tools are provided. |
+| `tool_results` | `array \| null` | ✅ Yes | List of tool execution results to inject into the conversation, or null. |
 
 All fields are always present. Fields that are not applicable to a given call are sent
 as `null` or their zero/empty value (never omitted). The script must handle `null`
@@ -103,8 +105,7 @@ values and empty lists gracefully.
 
 **`messages` element structure** (when not null):
 
-Each message is a dict with `role` and `content`. It may also contain a `files` key
-(list of file paths) if the consumer attached files to a specific message in history:
+Each message is a dict with `role` and `content`. Additional fields depend on the role:
 
 ```json
 {"role": "user" | "assistant", "content": "..."}
@@ -112,9 +113,24 @@ Each message is a dict with `role` and `content`. It may also contain a `files` 
 ```json
 {"role": "user", "content": "...", "files": ["/path/to/file.pdf"]}
 ```
+```json
+{
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+        {
+            "function": {
+                "name": "get_weather",
+                "arguments": {"location": "Rome"}
+            }
+        }
+    ]
+}
+```
 
 Rules:
 - Scripts that do not support file attachments in history may ignore the `files` key.
+- Scripts that do not support tool calling may ignore the `tool_calls` key on assistant messages.
 
 **Full example input:**
 ```json
@@ -135,6 +151,99 @@ Rules:
     "top_p": 0.95,
     "max_tokens": null,
     "extra_options": null
+}
+```
+
+**Example with tool calling:**
+```json
+{
+    "mode": "generate",
+    "prompt": "What is the weather in Rome?",
+    "system_prompt": null,
+    "messages": null,
+    "file_path": [],
+    "temperature": 0.0,
+    "thinking": false,
+    "format_json": false,
+    "timeout": 120,
+    "top_k": 64,
+    "top_p": 0.95,
+    "max_tokens": null,
+    "extra_options": null,
+    "tools": [
+        {
+            "name": "get_weather",
+            "description": "Returns the current weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"]
+            }
+        }
+    ],
+    "tool_results": null
+}
+```
+
+**Example with tool results (follow-up turn):**
+
+The follow-up call must include the full conversation history in `messages`, including
+the assistant's intermediate turn with `tool_calls`. This allows the model to link the
+tool result back to its own request.
+
+When `tool_results` is non-null, the library does **not** append the current `prompt`
+as a new user message — the prompt is present in `messages` already.
+
+```json
+{
+    "mode": "generate",
+    "prompt": "What is the weather in Rome?",
+    "system_prompt": null,
+    "messages": [
+        {
+            "role": "user",
+            "content": "What is the weather in Rome?"
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": {"location": "Rome"}
+                    }
+                }
+            ]
+        }
+    ],
+    "file_path": [],
+    "temperature": 0.0,
+    "thinking": false,
+    "format_json": false,
+    "timeout": 120,
+    "top_k": 64,
+    "top_p": 0.95,
+    "max_tokens": null,
+    "extra_options": null,
+    "tools": [
+        {
+            "name": "get_weather",
+            "description": "Returns the current weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"]
+            }
+        }
+    ],
+    "tool_results": [
+        {
+            "call_id": "get_weather_0",
+            "name": "get_weather",
+            "content": "22 degrees Celsius and sunny in Rome."
+        }
+    ]
 }
 ```
 
@@ -180,9 +289,11 @@ contain the following fields:
 | `output_tokens` | `int` | ❌ No | Number of output tokens generated. Defaults to 0 if absent. |
 | `reasoning_tokens` | `int` | ❌ No | Number of reasoning tokens used. Defaults to 0 if absent. |
 | `reasoning_text` | `string` | ❌ No | Reasoning/thinking transcript. Defaults to `""` if absent. |
+| `tool_calls` | `array \| null` | ❌ No | List of tool calls requested by the script's model. Omit or set to null/empty if the model replied with text. |
 
 The `text` field is the only mandatory field. Scripts that do not track token usage
-or reasoning may omit those fields entirely.
+or reasoning may omit those fields entirely. If tool calls are returned, `text` may
+be an empty string.
 
 **Minimal valid output:**
 ```json
@@ -196,7 +307,24 @@ or reasoning may omit those fields entirely.
     "input_tokens": 18,
     "output_tokens": 12,
     "reasoning_tokens": 45,
-    "reasoning_text": "The user asked about photosynthesis. I should explain the core mechanism..."
+    "reasoning_text": "The user asked about photosynthesis. I should explain the core mechanism...",
+    "tool_calls": null
+}
+```
+
+**Output with tool calls (model requesting tool execution):**
+```json
+{
+    "text": "",
+    "input_tokens": 25,
+    "output_tokens": 10,
+    "tool_calls": [
+        {
+            "id": "get_weather_0",
+            "name": "get_weather",
+            "arguments": {"location": "Rome"}
+        }
+    ]
 }
 ```
 

@@ -15,7 +15,7 @@ from unified_ai_client.file_utils import (
     inline_text_attachments,
     normalize_file_paths,
 )
-from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig
+from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.openai_compat")
@@ -210,9 +210,13 @@ class OpenAiCompatProvider(BaseProvider):
             for msg in request.messages:
                 messages.append(self._build_message(msg))
 
-        file_paths = normalize_file_paths(request.file_path)
-        user_content = self._build_user_content(request.prompt, file_paths)
-        messages.append({"role": "user", "content": user_content})
+        # Current user message — only add when NOT in a tool result continuation.
+        # When tool_results are provided, the consumer has already placed the user
+        # message in `messages` and the prompt should not be re-appended.
+        if not request.tool_results:
+            file_paths = normalize_file_paths(request.file_path)
+            user_content = self._build_user_content(request.prompt, file_paths)
+            messages.append({"role": "user", "content": user_content})
 
         payload: dict[str, Any] = {
             "model": request.model,
@@ -222,6 +226,29 @@ class OpenAiCompatProvider(BaseProvider):
         }
         if request.format_json:
             payload["response_format"] = {"type": "json_object"}
+
+        # Tool definitions
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    },
+                }
+                for t in request.tools
+            ]
+
+        # Tool results — appended as role:"tool" messages after the last user message
+        if request.tool_results:
+            for tr in request.tool_results:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tr.call_id,
+                    "content": tr.content,
+                })
 
         max_tokens = request.max_tokens if request.max_tokens is not None else opts.get("max_tokens")
         if max_tokens is not None and max_tokens > 0:
@@ -244,6 +271,17 @@ class OpenAiCompatProvider(BaseProvider):
         choice = resp["choices"][0]["message"]
         usage = resp.get("usage", {})
 
+        # Parse tool calls if present
+        raw_tool_calls = choice.get("tool_calls") or []
+        tool_calls: list[ToolCall] = [
+            ToolCall(
+                id=tc["id"],
+                name=tc["function"]["name"],
+                arguments=json.loads(tc["function"].get("arguments", "{}")),
+            )
+            for tc in raw_tool_calls
+        ]
+
         # Always read reasoning_content from the response: the model may
         # produce reasoning output even when not explicitly requested.
         raw_reasoning = choice.get("reasoning_content") or ""
@@ -260,6 +298,7 @@ class OpenAiCompatProvider(BaseProvider):
             output_tokens=max(0, total_output - reasoning_tokens),
             reasoning_tokens=reasoning_tokens,
             reasoning_text=raw_reasoning,
+            tool_calls=tool_calls,
         )
 
     def preload_model(

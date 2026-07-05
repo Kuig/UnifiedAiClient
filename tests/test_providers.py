@@ -995,6 +995,421 @@ def test_openai_live_generate() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 11. Tool Calling Unit Tests
+# ---------------------------------------------------------------------------
+
+def test_import_tool_types() -> None:
+    from unified_ai_client import ToolDefinition, ToolCall, ToolResult
+    assert ToolDefinition and ToolCall and ToolResult
+
+
+def test_tool_definition_construction() -> None:
+    from unified_ai_client import ToolDefinition
+    td = ToolDefinition(
+        name="get_weather",
+        description="Get current weather.",
+        parameters={
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+            "required": ["location"],
+        },
+    )
+    assert td.name == "get_weather"
+    assert td.parameters["type"] == "object"
+
+
+def test_tool_call_construction() -> None:
+    from unified_ai_client import ToolCall
+    tc = ToolCall(id="call_abc", name="get_weather", arguments={"location": "Rome"})
+    assert tc.id == "call_abc"
+    assert tc.arguments["location"] == "Rome"
+
+
+def test_tool_result_construction() -> None:
+    from unified_ai_client import ToolResult
+    tr = ToolResult(call_id="call_abc", name="get_weather", content="22C, sunny")
+    assert tr.call_id == "call_abc"
+    assert tr.name == "get_weather"
+    assert tr.content == "22C, sunny"
+
+
+def test_airesponse_tool_calls_default() -> None:
+    from unified_ai_client import AiResponse
+    r = AiResponse(text="hello")
+    assert r.tool_calls == []
+
+
+def test_airequest_tools_fields() -> None:
+    from unified_ai_client.models import AiRequest, ToolDefinition, ToolResult
+    td = ToolDefinition(name="f", description="d", parameters={"type": "object", "properties": {}})
+    tr = ToolResult(call_id="c1", name="f", content="result")
+    r = AiRequest(
+        provider="ollama", model="m", prompt="p",
+        tools=[td], tool_results=[tr],
+    )
+    assert r.tools is not None and len(r.tools) == 1
+    assert r.tool_results is not None and len(r.tool_results) == 1
+
+
+def test_openai_compat_tool_payload() -> None:
+    """OpenAI-compat provider must build the correct tools payload."""
+    from unittest.mock import patch
+    from unified_ai_client.providers.openai_compat import OpenAiCompatProvider
+    from unified_ai_client.models import AiRequest, ProviderConfig, ToolDefinition
+
+    config = ProviderConfig(url="http://localhost:8080")
+    provider = OpenAiCompatProvider(config)
+
+    tool = ToolDefinition(
+        name="get_weather",
+        description="Returns current weather.",
+        parameters={"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
+    )
+    request = AiRequest(
+        provider="openai", model="gpt-4o-mini", prompt="Weather in Rome?",
+        tools=[tool],
+    )
+
+    captured_payload: dict = {}
+
+    def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+        captured_payload.update(payload)
+        return {
+            "choices": [{"message": {"content": "Sunny.", "tool_calls": None}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+
+    with patch.object(provider, "_post", side_effect=fake_post):
+        resp = provider.call(request)
+
+    assert "tools" in captured_payload
+    assert captured_payload["tools"][0]["type"] == "function"
+    assert captured_payload["tools"][0]["function"]["name"] == "get_weather"
+    assert resp.tool_calls == []
+    assert resp.text == "Sunny."
+
+
+def test_openai_compat_parse_tool_calls() -> None:
+    """OpenAI-compat provider must parse tool calls from the response."""
+    import json
+    from unittest.mock import patch
+    from unified_ai_client.providers.openai_compat import OpenAiCompatProvider
+    from unified_ai_client.models import AiRequest, ProviderConfig, ToolDefinition
+
+    config = ProviderConfig(url="http://localhost:8080")
+    provider = OpenAiCompatProvider(config)
+
+    tool = ToolDefinition(
+        name="get_weather",
+        description="Returns current weather.",
+        parameters={"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
+    )
+    request = AiRequest(
+        provider="openai", model="gpt-4o-mini", prompt="Weather in Rome?",
+        tools=[tool],
+    )
+
+    def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+        return {
+            "choices": [{
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_xyz",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": json.dumps({"location": "Rome"}),
+                            },
+                        },
+                    ],
+                },
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+
+    with patch.object(provider, "_post", side_effect=fake_post):
+        resp = provider.call(request)
+
+    assert len(resp.tool_calls) == 1
+    tc = resp.tool_calls[0]
+    assert tc.id == "call_xyz"
+    assert tc.name == "get_weather"
+    assert tc.arguments == {"location": "Rome"}
+    assert resp.text == ""
+
+
+def test_openai_compat_tool_results_in_messages() -> None:
+    """Tool results must be serialized as role:tool messages."""
+    from unittest.mock import patch
+    from unified_ai_client.providers.openai_compat import OpenAiCompatProvider
+    from unified_ai_client.models import AiRequest, ProviderConfig, ToolResult
+
+    config = ProviderConfig(url="http://localhost:8080")
+    provider = OpenAiCompatProvider(config)
+
+    request = AiRequest(
+        provider="openai", model="gpt-4o-mini", prompt="What now?",
+        tool_results=[
+            ToolResult(call_id="call_xyz", name="get_weather", content="22C, sunny"),
+        ],
+    )
+
+    captured_messages: list = []
+
+    def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+        captured_messages.extend(payload["messages"])
+        return {
+            "choices": [{"message": {"content": "Great weather!", "tool_calls": None}}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 5},
+        }
+
+    with patch.object(provider, "_post", side_effect=fake_post):
+        provider.call(request)
+
+    tool_msgs = [m for m in captured_messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "call_xyz"
+    assert tool_msgs[0]["content"] == "22C, sunny"
+
+
+def test_anthropic_tool_payload() -> None:
+    """Anthropic provider must build tools in input_schema format."""
+    from unittest.mock import patch
+    from unified_ai_client.providers.anthropic import AnthropicProvider
+    from unified_ai_client.models import AiRequest, ProviderConfig, ToolDefinition
+
+    config = ProviderConfig(url="https://api.anthropic.com")
+    provider = AnthropicProvider(config, api_key="fake-key")
+
+    tool = ToolDefinition(
+        name="get_weather",
+        description="Returns weather.",
+        parameters={"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
+    )
+    request = AiRequest(
+        provider="anthropic", model="claude-opus-4-5", prompt="Weather in Rome?",
+        tools=[tool],
+    )
+
+    captured_payload: dict = {}
+
+    def fake_post(payload: dict, timeout: int) -> dict:
+        captured_payload.update(payload)
+        return {
+            "content": [{"type": "text", "text": "Sunny."}],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+
+    with patch.object(provider, "_post", side_effect=fake_post):
+        provider.call(request)
+
+    assert "tools" in captured_payload
+    assert captured_payload["tools"][0]["name"] == "get_weather"
+    assert "input_schema" in captured_payload["tools"][0]
+    assert "parameters" not in captured_payload["tools"][0]
+
+
+def test_anthropic_parse_tool_calls() -> None:
+    """Anthropic provider must parse tool_use content blocks."""
+    from unittest.mock import patch
+    from unified_ai_client.providers.anthropic import AnthropicProvider
+    from unified_ai_client.models import AiRequest, ProviderConfig
+
+    config = ProviderConfig(url="https://api.anthropic.com")
+    provider = AnthropicProvider(config, api_key="fake-key")
+
+    request = AiRequest(
+        provider="anthropic", model="claude-opus-4-5", prompt="Weather?",
+    )
+
+    def fake_post(payload: dict, timeout: int) -> dict:
+        return {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01",
+                    "name": "get_weather",
+                    "input": {"location": "Rome"},
+                },
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+
+    with patch.object(provider, "_post", side_effect=fake_post):
+        resp = provider.call(request)
+
+    assert len(resp.tool_calls) == 1
+    assert resp.tool_calls[0].id == "toolu_01"
+    assert resp.tool_calls[0].name == "get_weather"
+    assert resp.tool_calls[0].arguments == {"location": "Rome"}
+
+
+def test_ollama_tool_payload() -> None:
+    """Ollama provider must build tools in OpenAI-compatible format."""
+    from unittest.mock import patch
+    from unified_ai_client.providers.ollama import OllamaProvider
+    from unified_ai_client.models import AiRequest, ProviderConfig, ToolDefinition
+
+    config = ProviderConfig(url="http://localhost:11434")
+    provider = OllamaProvider(config)
+
+    tool = ToolDefinition(
+        name="get_weather",
+        description="Returns weather.",
+        parameters={"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
+    )
+    request = AiRequest(
+        provider="ollama", model="gemma4:12b", prompt="Weather in Rome?",
+        tools=[tool],
+    )
+
+    captured_payload: dict = {}
+
+    def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+        captured_payload.update(payload)
+        return {
+            "message": {"content": "", "tool_calls": []},
+            "eval_count": 0,
+            "prompt_eval_count": 0,
+        }
+
+    with patch.object(provider, "_post", side_effect=fake_post):
+        provider.call(request)
+
+    assert "tools" in captured_payload
+    assert captured_payload["tools"][0]["type"] == "function"
+    assert captured_payload["tools"][0]["function"]["name"] == "get_weather"
+
+
+def test_ollama_parse_tool_calls() -> None:
+    """Ollama provider must parse message.tool_calls."""
+    from unittest.mock import patch
+    from unified_ai_client.providers.ollama import OllamaProvider
+    from unified_ai_client.models import AiRequest, ProviderConfig
+
+    config = ProviderConfig(url="http://localhost:11434")
+    provider = OllamaProvider(config)
+
+    request = AiRequest(
+        provider="ollama", model="gemma4:12b", prompt="Weather?",
+    )
+
+    def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+        return {
+            "message": {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": {"location": "Rome"},
+                        },
+                    },
+                ],
+            },
+            "eval_count": 0,
+            "prompt_eval_count": 0,
+        }
+
+    with patch.object(provider, "_post", side_effect=fake_post):
+        resp = provider.call(request)
+
+    assert len(resp.tool_calls) == 1
+    assert resp.tool_calls[0].name == "get_weather"
+    assert resp.tool_calls[0].arguments == {"location": "Rome"}
+
+
+def test_ollama_live_tool_calling() -> None:
+    """Live Ollama test: gemma4:12b tool calling with get_weather (two-turn).
+
+    The second call must pass the full conversation history including the
+    assistant's intermediate tool_calls turn so the model can link the tool
+    result back to its own request.
+    """
+    from unified_ai_client import call_ai, ToolDefinition, ToolResult
+    from unittest import SkipTest
+
+    tools = [
+        ToolDefinition(
+            name="get_weather",
+            description="Returns the current weather for a given city.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "The city name, e.g. Rome",
+                    },
+                },
+                "required": ["location"],
+            },
+        ),
+    ]
+
+    prompt = "What is the weather in Rome right now? Use the get_weather tool."
+
+    try:
+        response = call_ai(
+            provider="ollama",
+            model="gemma4:12b",
+            prompt=prompt,
+            tools=tools,
+            temperature=0.0,
+            timeout=300,
+        )
+    except Exception as exc:
+        raise SkipTest(f"Ollama unavailable: {exc}") from exc
+
+    if not response.tool_calls:
+        raise SkipTest("gemma4:12b did not produce a tool call — model may not support it")
+
+    tc = response.tool_calls[0]
+    assert tc.name == "get_weather", f"Expected get_weather, got {tc.name!r}"
+    assert "location" in tc.arguments, f"Expected 'location' in arguments, got {tc.arguments}"
+
+    weather_result = f"The weather in {tc.arguments['location']} is 22 degrees Celsius and sunny."
+
+    # Build the conversation history for the second turn:
+    # [user turn 1] → [assistant turn with tool_calls] → [tool result]
+    # The assistant message must be in Ollama's format so the model knows
+    # which tool result corresponds to which call.
+    assistant_tool_message = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "function": {
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                },
+            },
+        ],
+    }
+
+    try:
+        final = call_ai(
+            provider="ollama",
+            model="gemma4:12b",
+            prompt=prompt,  # stored in history but not re-appended (tool_results present)
+            messages=[
+                {"role": "user", "content": prompt},
+                assistant_tool_message,
+            ],
+            tools=tools,
+            tool_results=[
+                ToolResult(call_id=tc.id, name=tc.name, content=weather_result),
+            ],
+            temperature=0.0,
+            timeout=300,
+        )
+    except Exception as exc:
+        raise SkipTest(f"Ollama second call failed: {exc}") from exc
+
+    assert isinstance(final.text, str) and len(final.text) > 0, "Final response must contain text"
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1049,6 +1464,21 @@ _TESTS = [
     ("ollama_live/reasoning_tokens_thinking_true", test_ollama_live_reasoning_tokens_thinking_true),
     ("ollama_live/reasoning_tokens_thinking_false", test_ollama_live_reasoning_tokens_thinking_false),
     ("ollama_live/embedding", test_ollama_live_embedding),
+    # Tool calling
+    ("tool_calling/import_types", test_import_tool_types),
+    ("tool_calling/tool_definition", test_tool_definition_construction),
+    ("tool_calling/tool_call", test_tool_call_construction),
+    ("tool_calling/tool_result", test_tool_result_construction),
+    ("tool_calling/airesponse_default", test_airesponse_tool_calls_default),
+    ("tool_calling/airequest_fields", test_airequest_tools_fields),
+    ("tool_calling/openai_compat_payload", test_openai_compat_tool_payload),
+    ("tool_calling/openai_compat_parse", test_openai_compat_parse_tool_calls),
+    ("tool_calling/openai_compat_results", test_openai_compat_tool_results_in_messages),
+    ("tool_calling/anthropic_payload", test_anthropic_tool_payload),
+    ("tool_calling/anthropic_parse", test_anthropic_parse_tool_calls),
+    ("tool_calling/ollama_payload", test_ollama_tool_payload),
+    ("tool_calling/ollama_parse", test_ollama_parse_tool_calls),
+    ("tool_calling/ollama_live", test_ollama_live_tool_calling),
     # Cloud live (skip if no key)
     ("google_live/generate", test_google_live_generate),
     ("google_live/with_text_file", test_google_live_with_text_file),

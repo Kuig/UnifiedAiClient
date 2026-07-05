@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig
+from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolDefinition, ToolResult
 from unified_ai_client.providers.base import BaseProvider
 
 # --- Thread-safe programmatic provider configuration registry ---
@@ -250,6 +250,8 @@ def call_ai(
     max_tokens: int | None = None,
     sleep_time: int | None = None,
     extra_options: dict | None = None,
+    tools: list[ToolDefinition] | None = None,
+    tool_results: list[ToolResult] | None = None,
 ) -> AiResponse:
     """Main routing function for all unified AI text generation requests.
 
@@ -284,10 +286,16 @@ def call_ai(
             provider-level defaults registered via ``configure_provider()``
             for the same key. Examples: ``{'visual_token_budget': 1120}`` for
             Ollama/Gemma4, ``{'disable_safety': True}`` for Google.
+        tools: Optional list of ``ToolDefinition`` objects describing functions
+            the model may call. When provided, the model may respond with
+            ``AiResponse.tool_calls`` instead of (or in addition to) text.
+        tool_results: Optional list of ``ToolResult`` objects containing the
+            outputs of previously requested tool calls. Pass these on the
+            follow-up call after executing the tools requested by the model.
 
     Returns:
-        ``AiResponse`` dataclass containing response text, token metrics, and
-        optional reasoning text.
+        ``AiResponse`` dataclass containing response text, token metrics,
+        optional reasoning text, and any tool calls requested by the model.
     """
     _register_cleanup()
 
@@ -318,6 +326,8 @@ def call_ai(
         max_tokens=max_tokens,
         sleep_time=sleep_time,
         extra_options=extra_options,
+        tools=tools,
+        tool_results=tool_results,
     )
 
     from unified_ai_client.retry import with_retry

@@ -288,6 +288,111 @@ response = call_ai(
 )
 ```
 
+### Tool Calling (Function Calling)
+
+The library provides minimal, transport-level tool calling support. It passes
+tool definitions to the model and returns any tool calls the model requests.
+The **execution loop** is the consumer's responsibility.
+
+#### Defining Tools
+
+```python
+from unified_ai_client import call_ai, ToolDefinition, ToolCall, ToolResult
+
+tools = [
+    ToolDefinition(
+        name="get_weather",
+        description="Returns the current weather for a given city.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "The city name, e.g. Rome",
+                },
+            },
+            "required": ["location"],
+        },
+    ),
+]
+```
+
+#### Two-Turn Example
+
+```python
+prompt = "What is the weather in Rome right now? Use the get_weather tool."
+
+# Turn 1: model may respond with tool calls
+response = call_ai(
+    provider="ollama",
+    model="gemma4:12b",
+    prompt=prompt,
+    tools=tools,
+    temperature=0.0,
+)
+
+if response.tool_calls:
+    # Execute the tool (consumer's responsibility)
+    results = []
+    for tc in response.tool_calls:
+        if tc.name == "get_weather":
+            content = f"The weather in {tc.arguments['location']} is 22°C and sunny."
+        else:
+            content = "Tool not found."
+        results.append(ToolResult(call_id=tc.id, name=tc.name, content=content))
+
+    # Build the conversation history for turn 2.
+    # The assistant's intermediate message (with tool_calls) must be included
+    # so the model can link the tool result back to its own request.
+    assistant_msg = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"function": {"name": tc.name, "arguments": tc.arguments}} for tc in response.tool_calls],
+    }
+
+    # Turn 2: pass full history in messages + tool_results.
+    # When tool_results are provided, the library does NOT re-append the
+    # current prompt as a new user message — the consumer controls the history.
+    final = call_ai(
+        provider="ollama",
+        model="gemma4:12b",
+        prompt=prompt,           # passed for reference but not re-appended
+        messages=[
+            {"role": "user", "content": prompt},
+            assistant_msg,
+        ],
+        tools=tools,
+        tool_results=results,
+        temperature=0.0,
+    )
+    print(final.text)  # "The weather in Rome is 22°C and sunny."
+else:
+    print(response.text)  # Model answered directly without tools
+```
+
+#### Provider Compatibility
+
+All providers support tool calling. Whether a specific model will actually use
+tool calling depends on its training, not the provider.
+
+| Provider | Tool Calling | Notes |
+|---|---|---|
+| `google` | ✅ | `FunctionDeclaration` / `function_call` parts |
+| `anthropic` | ✅ | `input_schema` format / `tool_use` content blocks |
+| `openai` | ✅ | Standard OpenAI format |
+| `mistral` | ✅ | Inherited from `openai_compat` |
+| `cohere` | ✅ | Inherited from `openai_compat` |
+| `meta` | ✅ | Inherited from `openai_compat` |
+| `groq` | ✅ | Inherited from `openai_compat` |
+| `xai` | ✅ | Inherited from `openai_compat` |
+| `lmstudio` | ✅ | Inherited from `openai_compat` |
+| `llamacpp` | ✅ | Inherited from `openai_compat` |
+| `ollama` | ✅ | OpenAI-compatible format via `/api/chat` |
+| `script` | ✅ | Extended JSON protocol (see `LLM_Behaviour_Interface.md`) |
+
+> [!NOTE]
+> For `ollama`, tool calling requires models specifically trained for it (e.g. `gemma4`, `qwen3`, `llama3.1`). The library sends the tool definitions regardless; if the model ignores them, `AiResponse.tool_calls` will be empty and you will receive a plain text response.
+
 ### Resource Cleanup
 
 `atexit` cleanup is registered automatically on first call. For eager cleanup:
@@ -330,6 +435,8 @@ def call_ai(
     max_tokens: int | None = None,
     sleep_time: int | None = None,
     extra_options: dict | None = None,
+    tools: list[ToolDefinition] | None = None,
+    tool_results: list[ToolResult] | None = None,
 ) -> AiResponse:
 ```
 
@@ -351,7 +458,9 @@ def call_ai(
   * `max_tokens` (`int | None`, optional): Maximum number of tokens in the response. Maps to `num_predict`, `max_output_tokens`, etc. Defaults to `None`.
   * `sleep_time` (`int | None`, optional): Pre-call rate limit sleep delay in seconds. Defaults to `None` (falls back to config `sleep_time`).
   * `extra_options` (`dict | None`, optional): Optional dict of arbitrary provider-specific options merged into the API payload at call time. Override any config-level defaults for the same key. Defaults to `None`.
-* **Returns:** `AiResponse` dataclass containing response text, token metrics, and optional reasoning text.
+  * `tools` (`list[ToolDefinition] | None`, optional): Tool definitions the model may call. When provided, the model may respond with `AiResponse.tool_calls` instead of (or in addition to) text. Defaults to `None`.
+  * `tool_results` (`list[ToolResult] | None`, optional): Results of previously requested tool calls. Pass these on the follow-up call to continue the conversation after executing the tools. Defaults to `None`.
+* **Returns:** `AiResponse` dataclass containing response text, token metrics, optional reasoning text, and any tool calls requested by the model.
 
 ---
 
@@ -505,7 +614,38 @@ The standard response object returned by `call_ai()`.
   * `input_tokens` (`int`): The number of prompt/input tokens consumed. Defaults to `0`.
   * `output_tokens` (`int`): The number of completion/output tokens generated. Defaults to `0`.
   * `reasoning_tokens` (`int`): The number of tokens spent on internal reasoning/thinking. Defaults to `0`.
-  * `reasoning_text` (`str`): The full reasoning/thinking transcript if produced by the model (supported models may generate reasoning even when thinking is not explicitly requested). Defaults to `""`.
+  * `reasoning_text` (`str`): The full reasoning/thinking transcript if produced by the model. Defaults to `""`.
+  * `tool_calls` (`list[ToolCall]`): Tool calls requested by the model. Empty list if the model responded with text directly. Defaults to `[]`.
+
+---
+
+#### `ToolDefinition`
+Describes a function the model can call.
+
+* **Fields:**
+  * `name` (`str`): Unique function name (must be a valid identifier).
+  * `description` (`str`): Human-readable description of what the tool does and when to use it.
+  * `parameters` (`dict`): JSON Schema object describing the function's parameters (type `"object"` with `"properties"`).
+
+---
+
+#### `ToolCall`
+A tool call requested by the model, found in `AiResponse.tool_calls`.
+
+* **Fields:**
+  * `id` (`str`): Provider-assigned identifier. Pass back in `ToolResult.call_id`.
+  * `name` (`str`): Name of the tool function to execute.
+  * `arguments` (`dict`): Parsed argument dictionary for the tool function.
+
+---
+
+#### `ToolResult`
+The result of a tool execution, passed back to `call_ai()` via `tool_results`.
+
+* **Fields:**
+  * `call_id` (`str`): The `id` of the `ToolCall` this result corresponds to.
+  * `name` (`str`): Name of the tool function that was executed (required by some providers for result routing).
+  * `content` (`str`): String result of the tool execution.
 
 ---
 

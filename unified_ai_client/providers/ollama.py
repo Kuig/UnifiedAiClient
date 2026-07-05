@@ -12,7 +12,7 @@ from unified_ai_client.file_utils import (
     inline_text_attachments,
     normalize_file_paths,
 )
-from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig
+from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.ollama")
@@ -148,21 +148,29 @@ class OllamaProvider(BaseProvider):
                         entry["images"] = multimodal
                     messages.append(entry)
                 else:
-                    messages.append({"role": role, "content": content})
+                    entry = {"role": role, "content": content}
+                    # Preserve tool_calls on assistant messages so Ollama can
+                    # correctly link subsequent tool results back to the call.
+                    if role == "assistant" and msg.get("tool_calls"):
+                        entry["tool_calls"] = msg["tool_calls"]
+                    messages.append(entry)
 
-        # 3. Current User Message
+        # 3. Current User Message — only add when NOT in a tool result continuation.
+        # When tool_results are provided, the consumer has already placed the user
+        # message in `messages` (history) and the prompt should not be re-appended.
         file_paths = normalize_file_paths(request.file_path)
         effective_prompt, multimodal_data = self._process_files_for_message(
             file_paths, request.prompt
         )
 
-        user_message: dict[str, Any] = {
-            "role": "user",
-            "content": effective_prompt,
-        }
-        if multimodal_data:
-            user_message["images"] = multimodal_data
-        messages.append(user_message)
+        if not request.tool_results:
+            user_message: dict[str, Any] = {
+                "role": "user",
+                "content": effective_prompt,
+            }
+            if multimodal_data:
+                user_message["images"] = multimodal_data
+            messages.append(user_message)
 
         # 4. Build payload
         opts = {}
@@ -218,7 +226,8 @@ class OllamaProvider(BaseProvider):
             content_text = resp.get("response", "") or ""
             eval_count = resp.get("eval_count", 0)
             raw_thinking = ""
-            reasoning_text = "" # /api/generate doesn't cleanly separate thinking tokens yet
+            reasoning_text = ""  # /api/generate doesn't cleanly separate thinking tokens yet
+            tool_calls: list[ToolCall] = []  # tool calling not supported in /api/generate
         else:
             payload: dict[str, Any] = {
                 "model": request.model,
@@ -230,6 +239,30 @@ class OllamaProvider(BaseProvider):
 
             if request.format_json:
                 payload["format"] = "json"
+
+            # Tool definitions — Ollama uses OpenAI-compatible format
+            if request.tools:
+                payload["tools"] = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        },
+                    }
+                    for t in request.tools
+                ]
+
+            # Tool results — appended as role:"tool" messages
+            if request.tool_results:
+                for tr in request.tool_results:
+                    messages.append({
+                        "role": "tool",
+                        "content": tr.content,
+                    })
+
+            payload["messages"] = messages
 
             if request.thinking is True:
                 payload["think"] = True
@@ -247,6 +280,18 @@ class OllamaProvider(BaseProvider):
             raw_thinking = message.get("thinking", "") or ""
             reasoning_text = raw_thinking
 
+            # Parse tool calls
+            raw_tool_calls = message.get("tool_calls") or []
+            tool_calls: list[ToolCall] = []
+            for tc in raw_tool_calls:
+                fn = tc.get("function", {})
+                tc_id = tc.get("id") or f"{fn.get('name', 'tool')}_{len(tool_calls)}"
+                tool_calls.append(ToolCall(
+                    id=tc_id,
+                    name=fn.get("name", ""),
+                    arguments=fn.get("arguments") or {},
+                ))
+
         reasoning_tokens = 0
         if raw_thinking:
             total_chars = len(content_text) + len(raw_thinking)
@@ -260,6 +305,7 @@ class OllamaProvider(BaseProvider):
             output_tokens=max(0, eval_count - reasoning_tokens),
             reasoning_tokens=reasoning_tokens,
             reasoning_text=reasoning_text,
+            tool_calls=tool_calls,
         )
 
     def preload_model(

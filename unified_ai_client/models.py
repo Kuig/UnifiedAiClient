@@ -1,5 +1,69 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class ToolDefinition:
+    """Definition of a tool that the model can call.
+
+    Pass a list of these to call_ai() via the ``tools`` parameter to expose
+    callable functions to the model. The model may then respond with
+    ``AiResponse.tool_calls`` instead of (or in addition to) text.
+
+    Attributes:
+        name: Unique tool function name. Must be a valid identifier.
+        description: Human-readable description of what the tool does and when
+            to use it. Clear descriptions improve model accuracy.
+        parameters: JSON Schema object describing the function's parameters.
+            Must be a valid JSON Schema of type ``"object"`` with a
+            ``"properties"`` field.
+    """
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+@dataclass
+class ToolCall:
+    """A tool call requested by the model in an AiResponse.
+
+    When a model decides to invoke a tool, the provider parses the request
+    and populates ``AiResponse.tool_calls`` with one or more of these.
+    The consumer is responsible for executing the tool and re-invoking
+    ``call_ai()`` with a ``ToolResult`` for each call.
+
+    Attributes:
+        id: Provider-assigned identifier for this specific tool call. Must be
+            passed back in ``ToolResult.call_id`` to correlate the result.
+            Providers that do not return an id receive a generated fallback.
+        name: The name of the tool function to execute.
+        arguments: Parsed argument dictionary for the tool function.
+    """
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
+class ToolResult:
+    """Result of a tool execution, provided by the consumer.
+
+    After receiving ``AiResponse.tool_calls``, the consumer executes each
+    tool and wraps the output in a ``ToolResult``. Pass the list of results
+    back to ``call_ai()`` via the ``tool_results`` parameter to continue the
+    conversation.
+
+    Attributes:
+        call_id: The ``id`` of the ``ToolCall`` this result corresponds to.
+            Used by providers to correlate result to request.
+        name: The name of the tool function that was executed. Required by
+            some providers (e.g. Google) for result routing.
+        content: The string result of the tool execution.
+    """
+    call_id: str
+    name: str
+    content: str
 
 
 @dataclass
@@ -15,12 +79,14 @@ class AiResponse:
         reasoning_text: Full reasoning/thinking text returned by the model.
             Empty string if reasoning was not requested or not supported by the
             provider.
+        tool_calls: List of tool calls requested by the model.
     """
     text: str
     input_tokens: int = 0
     output_tokens: int = 0
     reasoning_tokens: int = 0
     reasoning_text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
 
 @dataclass
@@ -46,6 +112,8 @@ class AiRequest:
             or use the provider's default behavior ("default").
         format_json: Whether to force JSON output format.
         timeout: Maximum seconds to wait for a response.
+        tools: Optional list of tool definitions the model can use.
+        tool_results: Optional list of tool results to include in the prompt.
         extra_options: Optional dict of arbitrary provider-specific options
             merged into the API payload. Keys and values are provider-dependent
             (e.g. {'visual_token_budget': 1120} for Ollama/Gemma4). These
@@ -65,6 +133,8 @@ class AiRequest:
     top_p: float = 0.95
     max_tokens: int | None = None
     sleep_time: int | None = None
+    tools: list[ToolDefinition] | None = None
+    tool_results: list[ToolResult] | None = None
     extra_options: dict | None = None
 
 

@@ -12,7 +12,7 @@ from google import genai
 from google.genai import types
 
 from unified_ai_client.file_utils import normalize_file_paths
-from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig
+from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.google")
@@ -261,6 +261,26 @@ class GoogleProvider(BaseProvider):
         current_parts.append(types.Part.from_text(text=request.prompt))
         contents.append(types.Content(role="user", parts=current_parts))
 
+        # Tool results: if provided, append assistant tool_call turn + user tool_result turn
+        if request.tool_results:
+            # The assistant turn (model requesting tools) must come before results.
+            # We build it as an empty model content here; the actual function_call
+            # parts would have been in the previous response. Google requires
+            # us to provide them as function_call parts in the model turn.
+            function_call_parts: list[Any] = [
+                types.Part.from_function_call(name=tr.name, args={})
+                for tr in request.tool_results
+            ]
+            contents.append(types.Content(role="model", parts=function_call_parts))
+
+            function_response_parts: list[Any] = [
+                types.Part.from_function_response(
+                    name=tr.name, response={"result": tr.content}
+                )
+                for tr in request.tool_results
+            ]
+            contents.append(types.Content(role="user", parts=function_response_parts))
+
         # --- Build generation config ---
         config_kwargs = {
             "temperature": request.temperature,
@@ -288,6 +308,18 @@ class GoogleProvider(BaseProvider):
         for field_name in ("response_schema", "stop_sequences", "presence_penalty", "frequency_penalty", "seed"):
             if field_name in opts:
                 config_kwargs[field_name] = opts[field_name]
+
+        # Tool definitions
+        if request.tools:
+            declarations = [
+                types.FunctionDeclaration(
+                    name=t.name,
+                    description=t.description,
+                    parameters=t.parameters,
+                )
+                for t in request.tools
+            ]
+            config_kwargs["tools"] = [types.Tool(function_declarations=declarations)]
 
         gen_config = types.GenerateContentConfig(**config_kwargs)
 
@@ -318,17 +350,26 @@ class GoogleProvider(BaseProvider):
             output_tokens = getattr(usage, "candidates_token_count", 0) or 0
             reasoning_tokens = getattr(usage, "thoughts_token_count", 0) or 0
 
-        # --- Extract text and reasoning ---
+        # --- Extract text, reasoning, and tool calls ---
         # Always collect thought parts regardless of request.thinking: a model
         # may produce thinking output even when thinking was not explicitly
         # requested (e.g., thinking=False only minimises thinking, not prevents
         # it entirely).
         response_text = ""
         reasoning_text = ""
+        tool_calls: list[ToolCall] = []
         try:
             for part in response.candidates[0].content.parts:
                 if getattr(part, "thought", False):
                     reasoning_text += part.text or ""
+                elif getattr(part, "function_call", None) is not None:
+                    fc = part.function_call
+                    call_id = getattr(fc, "id", None) or f"{fc.name}_{len(tool_calls)}"
+                    tool_calls.append(ToolCall(
+                        id=call_id,
+                        name=fc.name,
+                        arguments=dict(fc.args) if fc.args else {},
+                    ))
                 else:
                     response_text += part.text or ""
         except (IndexError, AttributeError):
@@ -340,6 +381,7 @@ class GoogleProvider(BaseProvider):
             output_tokens=output_tokens,
             reasoning_tokens=reasoning_tokens,
             reasoning_text=reasoning_text,
+            tool_calls=tool_calls,
         )
 
     def preload_model(

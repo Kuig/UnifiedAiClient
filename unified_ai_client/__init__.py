@@ -9,7 +9,7 @@ from unified_ai_client.client import (
 )
 from unified_ai_client.config import load_secrets, load_config
 from unified_ai_client.silence import silence_sdks
-from unified_ai_client.models import AiResponse, AiRequest, ProviderConfig
+from unified_ai_client.models import AiResponse, AiRequest, ProviderConfig, ToolDefinition, ToolCall, ToolResult
 from unified_ai_client.providers.base import BaseProvider
 
 __all__ = [
@@ -26,4 +26,7 @@ __all__ = [
     "AiRequest",
     "ProviderConfig",
     "BaseProvider",
+    "ToolDefinition",
+    "ToolCall",
+    "ToolResult",
 ]
