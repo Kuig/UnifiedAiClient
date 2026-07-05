@@ -194,6 +194,14 @@ tool result back to its own request.
 When `tool_results` is non-null, the library does **not** append the current `prompt`
 as a new user message — the prompt is present in `messages` already.
 
+> **Note on `messages` format:** The `tool_calls` structure in assistant messages is
+> always the same OpenAI-style `{"function": {"name": ..., "arguments": {...}}}` format,
+> regardless of which provider the consumer is targeting. For native providers
+> (Anthropic, Google, OpenAI-compat, Ollama), the library converts this format
+> internally to the provider's native representation before the API call.
+> For the `script` provider, messages are passed through as-is — the script receives
+> this exact format and is responsible for handling it.
+
 ```json
 {
     "mode": "generate",

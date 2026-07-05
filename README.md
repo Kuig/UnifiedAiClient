@@ -344,6 +344,12 @@ if response.tool_calls:
     # Build the conversation history for turn 2.
     # The assistant's intermediate message (with tool_calls) must be included
     # so the model can link the tool result back to its own request.
+    #
+    # IMPORTANT: this format is always the same regardless of the provider.
+    # The library converts it internally to each provider's native format:
+    #   - Anthropic  →  tool_use content blocks
+    #   - Google     →  function_call Parts
+    #   - Ollama / OpenAI-compat  →  OpenAI-style tool_calls (passed through)
     assistant_msg = {
         "role": "assistant",
         "content": "",
