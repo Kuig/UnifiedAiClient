@@ -4,6 +4,8 @@
 It routes all AI calls through a single `call_ai()` interface, hiding provider-specific 
 encoding, upload, retry, and error-handling details from consuming projects.
 
+See [COMPARISON.md](COMPARISON.md) for a feature-by-feature comparison with other libraries.
+
 Supported providers:
 
 | Provider | Type | Implementation Notes / SDK |
@@ -35,7 +37,7 @@ pip install -e /path/to/UnifiedAiClient
 **Production / other machines** — declare in your project's `requirements.txt`:
 
 ```text
-unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.2.0
+unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.3.2
 ```
 
 then run `pip install -r requirements.txt`.
