@@ -140,7 +140,9 @@ class AnthropicProvider(BaseProvider):
         """Build a single message dict, processing optional 'files' key.
 
         Args:
-            msg: Source message dict.
+            msg: Source message dict. May contain 'files' (list of file paths)
+                 or 'tool_calls' (for assistant messages that requested tool
+                 execution — converted to Anthropic ``tool_use`` blocks).
 
         Returns:
             Anthropic-format message dict.
@@ -148,6 +150,23 @@ class AnthropicProvider(BaseProvider):
         role = msg.get("role", "user")
         text = msg.get("content", "")
         file_paths = normalize_file_paths(msg.get("files"))
+
+        if role == "assistant" and msg.get("tool_calls"):
+            # Convert consumer's tool_calls into Anthropic tool_use blocks
+            # so the API can link subsequent tool_result messages back.
+            content: list[dict[str, Any]] = []
+            if text:
+                content.append({"type": "text", "text": text})
+            for i, tc in enumerate(msg["tool_calls"]):
+                fn = tc.get("function", tc)
+                content.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", f"tool_{i}"),
+                    "name": fn.get("name", ""),
+                    "input": fn.get("arguments", {}),
+                })
+            return {"role": role, "content": content}
+
         if file_paths or role == "user":
             content = self._build_user_content(text, file_paths)
         else:

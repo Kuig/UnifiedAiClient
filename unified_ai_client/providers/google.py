@@ -248,31 +248,37 @@ class GoogleProvider(BaseProvider):
                 msg_files = normalize_file_paths(msg.get("files"))
                 if msg_files:
                     parts.extend(self._build_parts_for_files(msg_files, upload_poll_timeout))
-                parts.append(
-                    types.Part.from_text(text=msg.get("content", ""))
-                )
+
+                # Preserve tool_calls on assistant/model messages by converting
+                # them to function_call Parts — required by Google to link
+                # subsequent function_response Parts.
+                if role == "model" and msg.get("tool_calls"):
+                    for tc in msg["tool_calls"]:
+                        fn = tc.get("function", tc)
+                        parts.append(types.Part.from_function_call(
+                            name=fn.get("name", ""),
+                            args=fn.get("arguments", {}),
+                        ))
+                else:
+                    parts.append(
+                        types.Part.from_text(text=msg.get("content", ""))
+                    )
                 contents.append(types.Content(role=role, parts=parts))
 
         # Current turn: files + prompt
-        current_parts: list[Any] = []
-        file_paths = normalize_file_paths(request.file_path)
-        if file_paths:
-            current_parts.extend(self._build_parts_for_files(file_paths, upload_poll_timeout))
-        current_parts.append(types.Part.from_text(text=request.prompt))
-        contents.append(types.Content(role="user", parts=current_parts))
+        # Only add when NOT in a tool result continuation. When tool_results
+        # are provided, the consumer has already placed the user message in
+        # `messages` and the prompt should not be re-appended.
+        if not request.tool_results:
+            current_parts: list[Any] = []
+            file_paths = normalize_file_paths(request.file_path)
+            if file_paths:
+                current_parts.extend(self._build_parts_for_files(file_paths, upload_poll_timeout))
+            current_parts.append(types.Part.from_text(text=request.prompt))
+            contents.append(types.Content(role="user", parts=current_parts))
 
-        # Tool results: if provided, append assistant tool_call turn + user tool_result turn
+        # Tool results: append function_response Parts in a user turn
         if request.tool_results:
-            # The assistant turn (model requesting tools) must come before results.
-            # We build it as an empty model content here; the actual function_call
-            # parts would have been in the previous response. Google requires
-            # us to provide them as function_call parts in the model turn.
-            function_call_parts: list[Any] = [
-                types.Part.from_function_call(name=tr.name, args={})
-                for tr in request.tool_results
-            ]
-            contents.append(types.Content(role="model", parts=function_call_parts))
-
             function_response_parts: list[Any] = [
                 types.Part.from_function_response(
                     name=tr.name, response={"result": tr.content}

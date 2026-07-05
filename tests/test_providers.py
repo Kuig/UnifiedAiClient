@@ -954,6 +954,89 @@ def test_google_live_thinking_default() -> None:
     assert isinstance(response.reasoning_text, str)
 
 
+def test_google_live_tool_calling() -> None:
+    """Live Google test: gemini-2.5-flash tool calling with get_weather (two-turn).
+
+    The second call passes the full conversation history including the
+    assistant's intermediate tool_calls turn so the provider converts it to
+    function_call Parts and Google can link the result back.
+    """
+    from unified_ai_client.config import load_secrets
+    secrets = load_secrets(os.getcwd())
+    if not secrets.get("google_api_key"):
+        raise SkipTest("google_api_key not found in secrets.json or environment variables")
+
+    from unified_ai_client import call_ai, ToolDefinition, ToolResult
+
+    tools = [
+        ToolDefinition(
+            name="get_weather",
+            description="Returns the current weather for a given city.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "The city name, e.g. Rome",
+                    },
+                },
+                "required": ["location"],
+            },
+        ),
+    ]
+
+    prompt = "What is the weather in Rome right now? Use the get_weather tool."
+
+    response = call_ai(
+        provider="google",
+        model="gemini-2.5-flash",
+        prompt=prompt,
+        tools=tools,
+        temperature=0.0,
+        timeout=60,
+    )
+
+    if not response.tool_calls:
+        raise SkipTest("gemini-2.5-flash did not produce a tool call")
+
+    tc = response.tool_calls[0]
+    assert tc.name == "get_weather", f"Expected get_weather, got {tc.name!r}"
+    assert "location" in tc.arguments, f"Expected 'location' in arguments, got {tc.arguments}"
+
+    weather_result = f"The weather in {tc.arguments['location']} is 22 degrees Celsius and sunny."
+
+    assistant_tool_message = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "function": {
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                },
+            },
+        ],
+    }
+
+    final = call_ai(
+        provider="google",
+        model="gemini-2.5-flash",
+        prompt=prompt,
+        messages=[
+            {"role": "user", "content": prompt},
+            assistant_tool_message,
+        ],
+        tools=tools,
+        tool_results=[
+            ToolResult(call_id=tc.id, name=tc.name, content=weather_result),
+        ],
+        temperature=0.0,
+        timeout=60,
+    )
+
+    assert isinstance(final.text, str) and len(final.text) > 0, "Final response must contain text"
+
+
 # ---------------------------------------------------------------------------
 # 8. Anthropic (skip if no API key)
 # ---------------------------------------------------------------------------

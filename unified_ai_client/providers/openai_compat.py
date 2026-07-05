@@ -174,7 +174,8 @@ class OpenAiCompatProvider(BaseProvider):
 
         Args:
             msg: Source message dict with at least 'role' and 'content' keys.
-                 May also contain 'files': list[str].
+                 May also contain 'files': list[str] or 'tool_calls' (for
+                 assistant messages that requested tool execution).
 
         Returns:
             OpenAI-format message dict.
@@ -183,7 +184,19 @@ class OpenAiCompatProvider(BaseProvider):
         text = msg.get("content", "")
         file_paths = normalize_file_paths(msg.get("files"))
         content = self._build_user_content(text, file_paths)
-        return {"role": role, "content": content}
+        entry: dict[str, Any] = {"role": role, "content": content}
+        # Preserve tool_calls on assistant messages so the API can link
+        # subsequent tool results back to the model's original request.
+        if role == "assistant" and msg.get("tool_calls"):
+            entry["tool_calls"] = [
+                {
+                    "id": tc.get("id", f"call_{i}"),
+                    "type": "function",
+                    "function": tc.get("function", tc),
+                }
+                for i, tc in enumerate(msg["tool_calls"])
+            ]
+        return entry
 
     def call(self, request: AiRequest) -> AiResponse:
         """Execute an inference call to the OpenAI-compatible endpoint.
