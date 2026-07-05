@@ -128,7 +128,7 @@ class AiRequest:
     temperature: float = 0.7
     thinking: bool | str = "default"
     format_json: bool = False
-    timeout: int = 120
+    timeout: int = 300
     top_k: int = 64
     top_p: float = 0.95
     max_tokens: int | None = None
@@ -153,6 +153,6 @@ class ProviderConfig:
         extra_options: Dictionary of provider-specific configuration options.
     """
     url: str = "http://localhost:11434"
-    timeout: int = 120
+    timeout: int = 300
     sleep_time: int = 0
     extra_options: dict = field(default_factory=dict)

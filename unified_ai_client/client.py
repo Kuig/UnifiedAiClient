@@ -242,7 +242,7 @@ def call_ai(
     temperature: float = 0.7,
     thinking: bool | str = "default",
     format_json: bool = False,
-    timeout: int = 120,
+    timeout: int = 300,
     max_retries: int = 3,
     retry_base_delay: float = 5.0,
     top_k: int = 64,

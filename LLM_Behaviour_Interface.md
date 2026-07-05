@@ -146,7 +146,7 @@ Rules:
     "temperature": 0.3,
     "thinking": false,
     "format_json": false,
-    "timeout": 120,
+    "timeout": 300,
     "top_k": 64,
     "top_p": 0.95,
     "max_tokens": null,
@@ -165,7 +165,7 @@ Rules:
     "temperature": 0.0,
     "thinking": false,
     "format_json": false,
-    "timeout": 120,
+    "timeout": 300,
     "top_k": 64,
     "top_p": 0.95,
     "max_tokens": null,
@@ -221,7 +221,7 @@ as a new user message — the prompt is present in `messages` already.
     "temperature": 0.0,
     "thinking": false,
     "format_json": false,
-    "timeout": 120,
+    "timeout": 300,
     "top_k": 64,
     "top_p": 0.95,
     "max_tokens": null,
@@ -258,7 +258,7 @@ as a new user message — the prompt is present in `messages` already.
     "temperature": 0.7,
     "thinking": false,
     "format_json": false,
-    "timeout": 120
+    "timeout": 300
 }
 ```
 

@@ -534,7 +534,7 @@ def test_ollama_live_reasoning_tokens_thinking_true() -> None:
             prompt="What is 2+2? Think step by step.",
             thinking=True,
             temperature=0.0,
-            timeout=120,
+            timeout=300,
         )
     except Exception as exc:
         if "400" in str(exc):

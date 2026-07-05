@@ -206,5 +206,5 @@ class ScriptProvider(BaseProvider):
         """
         cmd = _resolve_interpreter(model)
         payload = {"mode": "embed", "text": text}
-        data = _run_script(cmd, payload, timeout=120)
+        data = _run_script(cmd, payload, timeout=300)
         return data["embedding"]

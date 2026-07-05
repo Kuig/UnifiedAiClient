@@ -113,7 +113,7 @@ configure_provider("google", sleep_time=3)
 ```
 
 If `configure_provider()` is never called, built-in defaults are used automatically
-(Ollama: `http://localhost:11434`, timeout 120 s; cloud providers: their standard
+(Ollama: `http://localhost:11434`, timeout 300 s; cloud providers: their standard
 endpoints). Per-call overrides via `extra_options` in `call_ai()` always take
 precedence over values registered here.
 
@@ -427,7 +427,7 @@ def call_ai(
     temperature: float = 0.7,
     thinking: bool | str = "default",
     format_json: bool = False,
-    timeout: int = 120,
+    timeout: int = 300,
     max_retries: int = 3,
     retry_base_delay: float = 5.0,
     top_k: int = 64,
@@ -450,7 +450,7 @@ def call_ai(
   * `temperature` (`float`, optional): Sampling temperature. Defaults to `0.7`.
   * `thinking` (`bool | str`, optional): Enables extended reasoning/thinking mode (`True`/`False`), or delegates to the provider's default behavior (`"default"`). Defaults to `"default"`.
   * `format_json` (`bool`, optional): Forces the model to respond in valid JSON format. Defaults to `False`.
-  * `timeout` (`int`, optional): Network timeout in seconds. Defaults to `120`.
+  * `timeout` (`int`, optional): Network timeout in seconds. Defaults to `300`.
   * `max_retries` (`int`, optional): Number of retry attempts on network/rate-limit failures. Defaults to `3`.
   * `retry_base_delay` (`float`, optional): Initial backoff delay for exponential retries in seconds. Defaults to `5.0`.
   * `top_k` (`int`, optional): Sampling parameter top_k. Defaults to `64`.

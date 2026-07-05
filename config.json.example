@@ -3,7 +3,7 @@
 
     "ollama": {
         "url": "http://localhost:11434",
-        "timeout": 120,
+        "timeout": 300,
         "keep_alive": "15m",
         "context_size": 0,
         "top_k": 64,
@@ -19,57 +19,57 @@
 
     "openai": {
         "url": "https://api.openai.com",
-        "timeout": 120,
+        "timeout": 300,
         "sleep_time": 1,
         "max_tokens": 8192
     },
 
     "anthropic": {
         "url": "https://api.anthropic.com",
-        "timeout": 120,
+        "timeout": 300,
         "sleep_time": 1,
         "max_tokens": 8192
     },
 
     "lmstudio": {
         "url": "http://localhost:1234",
-        "timeout": 120,
+        "timeout": 300,
         "context_size": 0
     },
 
     "llamacpp": {
         "url": "http://localhost:8080",
-        "timeout": 120,
+        "timeout": 300,
         "context_size": 0
     },
 
     "mistral": {
         "url": "https://api.mistral.ai",
-        "timeout": 120,
+        "timeout": 300,
         "sleep_time": 0
     },
 
     "cohere": {
         "url": "https://api.cohere.ai/compatibility/v1",
-        "timeout": 120,
+        "timeout": 300,
         "sleep_time": 0
     },
 
     "meta": {
         "url": "https://api.llama-api.com",
-        "timeout": 120,
+        "timeout": 300,
         "sleep_time": 0
     },
 
     "groq": {
         "url": "https://api.groq.com/openai",
-        "timeout": 120,
+        "timeout": 300,
         "sleep_time": 0
     },
 
     "xai": {
         "url": "https://api.x.ai",
-        "timeout": 120,
+        "timeout": 300,
         "sleep_time": 0
     }
 }

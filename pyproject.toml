@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unified-ai-client"
-version = "0.3.1"
+version = "0.3.2"
 description = "Unified AI provider abstraction — route all AI calls through a single call_ai() interface"
 readme = "README.md"
 license = { text = "MIT" }
