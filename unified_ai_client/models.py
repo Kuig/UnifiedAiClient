@@ -79,6 +79,12 @@ class AiResponse:
         reasoning_text: Full reasoning/thinking text returned by the model.
             Empty string if reasoning was not requested or not supported by the
             provider.
+        reasoning_is_summary: True when ``reasoning_text`` is a summary the
+            provider generated from the model's actual chain of thought, rather
+            than the raw trace. Google returns thought summaries; Ollama,
+            Anthropic and the OpenAI-compatible providers return the raw text.
+            Consumers that measure the trace (length, composition, self-
+            corrections) must not compare a summarised trace against a raw one.
         tool_calls: List of tool calls requested by the model.
     """
     text: str
@@ -86,6 +92,7 @@ class AiResponse:
     output_tokens: int = 0
     reasoning_tokens: int = 0
     reasoning_text: str = ""
+    reasoning_is_summary: bool = False
     tool_calls: list[ToolCall] = field(default_factory=list)
 
 

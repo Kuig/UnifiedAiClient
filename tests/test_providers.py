@@ -544,6 +544,9 @@ def test_ollama_live_reasoning_tokens_thinking_true() -> None:
         raise SkipTest(f"Model '{model}' produced no thinking output — 'think' not supported")
     assert isinstance(response.text, str)
     assert len(response.text) > 0
+    assert response.reasoning_is_summary is False, (
+        "Ollama returns the raw thinking transcript, not a provider-written summary"
+    )
     assert response.reasoning_tokens > 0, (
         f"reasoning_tokens must be > 0 when thinking text is present, got {response.reasoning_tokens}"
     )
@@ -659,6 +662,7 @@ def test_script_generate_with_reasoning() -> None:
         )
         assert response.reasoning_text == "I thought about it."
         assert response.reasoning_tokens == 10
+        assert response.reasoning_is_summary is False
     finally:
         os.unlink(script)
 
@@ -754,6 +758,38 @@ def test_google_thinking_config_offline() -> None:
     assert cfg_default.include_thoughts is True
     assert getattr(cfg_default, "thinking_budget", None) is None
     assert getattr(cfg_default, "thinking_level", None) is None
+
+
+def test_reasoning_is_summary_offline() -> None:
+    """Verify the reasoning_is_summary contract across providers.
+
+    The flag tells consumers whether reasoning_text is the model's raw chain of
+    thought or a summary the provider wrote about it. Google summarises; every
+    other provider returns the raw trace. Consumers that measure trace length or
+    composition cannot compare the two, so the default must be conservative
+    (False = raw) and only Google may flip it.
+    """
+    from unified_ai_client.models import AiResponse
+
+    # Default is raw: a provider that never sets the flag reports a raw trace.
+    assert AiResponse(text="x").reasoning_is_summary is False
+    assert AiResponse(text="x", reasoning_text="raw trace").reasoning_is_summary is False
+
+    # Google sets it from the presence of thought parts, not from request.thinking:
+    # a model may emit thoughts even when thinking was not explicitly requested.
+    google_src = (
+        Path(__file__).parent.parent / "unified_ai_client" / "providers" / "google.py"
+    ).read_text(encoding="utf-8")
+    assert "reasoning_is_summary=bool(reasoning_text)" in google_src
+
+    # Raw-trace providers must not set the flag at all.
+    for name in ("ollama", "anthropic", "openai_compat", "script"):
+        src = (
+            Path(__file__).parent.parent / "unified_ai_client" / "providers" / f"{name}.py"
+        ).read_text(encoding="utf-8")
+        assert "reasoning_is_summary" not in src, (
+            f"{name} returns a raw trace and must leave reasoning_is_summary at its default"
+        )
 
 
 def test_config_dynamic_extra_options() -> None:
@@ -1537,6 +1573,7 @@ _TESTS = [
     ("script/nonzero_exit_raises", test_script_nonzero_exit),
     # Google offline
     ("google/thinking_config_offline", test_google_thinking_config_offline),
+    ("providers/reasoning_is_summary_offline", test_reasoning_is_summary_offline),
     ("config/dynamic_extra_options", test_config_dynamic_extra_options),
     ("script/forwards_new_params", test_script_provider_forwards_new_params),
     ("ollama/options_mapping", test_ollama_provider_options_mapping),

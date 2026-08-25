@@ -361,6 +361,11 @@ class GoogleProvider(BaseProvider):
         # may produce thinking output even when thinking was not explicitly
         # requested (e.g., thinking=False only minimises thinking, not prevents
         # it entirely).
+        #
+        # Gemini never exposes the raw chain of thought: every thought part it
+        # returns is a summary the model wrote about its own reasoning, and it
+        # is typically far shorter than thoughts_token_count implies. Callers
+        # are told so via AiResponse.reasoning_is_summary below.
         response_text = ""
         reasoning_text = ""
         tool_calls: list[ToolCall] = []
@@ -387,6 +392,7 @@ class GoogleProvider(BaseProvider):
             output_tokens=output_tokens,
             reasoning_tokens=reasoning_tokens,
             reasoning_text=reasoning_text,
+            reasoning_is_summary=bool(reasoning_text),
             tool_calls=tool_calls,
         )
 
