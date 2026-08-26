@@ -623,6 +623,7 @@ The standard response object returned by `call_ai()`.
   * `output_tokens` (`int`): The number of completion/output tokens generated. Defaults to `0`.
   * `reasoning_tokens` (`int`): The number of tokens spent on internal reasoning/thinking. Defaults to `0`.
   * `reasoning_text` (`str`): The full reasoning/thinking transcript if produced by the model. Defaults to `""`.
+  * `reasoning_is_summary` (`bool`): `True` when `reasoning_text` is a summary the provider generated from the model's actual chain of thought, rather than the raw trace. Defaults to `False`.
   * `tool_calls` (`list[ToolCall]`): Tool calls requested by the model. Empty list if the model responded with text directly. Defaults to `[]`.
 
 ---

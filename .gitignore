@@ -77,3 +77,4 @@ desktop.ini
 # Project-specific directories to exclude
 # ---------------------------------------------------------------------------
 Unused/
+.cora/
