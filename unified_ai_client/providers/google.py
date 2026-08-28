@@ -403,18 +403,50 @@ class GoogleProvider(BaseProvider):
         context_size: int | None = None,
         extra_options: dict | None = None,
     ) -> None:
-        """Model preloading is not supported on the Google provider.
+        """Model preloading is not supported by the Google AI API.
 
         Args:
-            model: Model identifier. Unused.
-            keep_alive: Duration. Unused.
+            model: Unused.
+            keep_alive: Unused.
             context_size: Unused.
             extra_options: Unused.
-
-        Raises:
-            NotImplementedError: Always.
         """
-        raise NotImplementedError("Google provider does not support model pre-loading.")
+        pass  # No-op: not supported
+
+    def warm_up(
+        self,
+        model: str,
+        file_paths: str | list[str] | None = None,
+    ) -> bool:
+        """Build the client, open the connection, and pre-upload any files.
+
+        This is where the Google provider's one-off costs actually live: the
+        lazy ``google.genai`` import, the client construction, the DNS + TCP +
+        TLS handshake, and above all the file upload with its ACTIVE polling,
+        which can take tens of seconds per file.
+
+        ``models.get()`` is a plain metadata GET: it consumes no tokens, and it
+        validates the API key and the model name as a side effect. Uploaded
+        files land in the same cache ``call()`` reads and ``cleanup()`` clears,
+        so warming up does not change the resource lifecycle.
+
+        Args:
+            model: Model identifier to validate and warm the connection with.
+            file_paths: Optional path or list of paths to upload ahead of time.
+
+        Returns:
+            Always True: this provider always has something to warm up.
+        """
+        opts = self.config.extra_options or {}
+        upload_poll_timeout = opts.get("upload_poll_timeout", 15)
+
+        client = self._get_client()
+        client.models.get(model=model)
+
+        for path in normalize_file_paths(file_paths):
+            self._upload_file(path, upload_poll_timeout)
+
+        return True
 
     def get_embedding(self, model: str, text: str) -> list[float]:
         """Text embeddings are not supported on the Google provider.

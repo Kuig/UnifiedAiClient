@@ -173,20 +173,69 @@ class ScriptProvider(BaseProvider):
         context_size: int | None = None,
         extra_options: dict | None = None,
     ) -> None:
-        """Not supported by ScriptProvider. Emits a warning and returns.
+        """Ask the script to preload itself via the 'preload' protocol mode.
+
+        Scripts are free to ignore the mode: one that implements only
+        'generate' exits non-zero on anything else, which is read here as
+        "not supported" and reported with a warning, exactly as before this
+        mode existed. A script that does implement it, however, now gets the
+        chance to load a model or open an index ahead of the first call.
 
         Args:
-            model: Script path. Unused.
-            keep_alive: Unused.
-            context_size: Unused.
-            extra_options: Unused.
+            model: Path to the script file.
+            keep_alive: Forwarded to the script, which decides what it means.
+            context_size: Context window size in tokens, or None.
+            extra_options: Additional script-specific settings, or None.
         """
-        warnings.warn(
-            f"ScriptProvider does not support model preloading. "
-            f"preload_model('{model}') call ignored.",
-            UserWarning,
-            stacklevel=2,
-        )
+        cmd = _resolve_interpreter(model)
+        payload = {
+            "mode": "preload",
+            "keep_alive": keep_alive,
+            "context_size": context_size,
+            "extra_options": extra_options,
+            "timeout": self.config.timeout,
+        }
+        try:
+            _run_script(cmd, payload, self.config.timeout)
+        except Exception:
+            warnings.warn(
+                f"Script '{model}' does not implement mode 'preload'. "
+                f"preload_model() call ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    def warm_up(
+        self,
+        model: str,
+        file_paths: str | list[str] | None = None,
+    ) -> bool:
+        """Ask the script to warm itself up via the 'warm_up' protocol mode.
+
+        A script that implements only 'generate' exits non-zero on any other
+        mode. That is read here as "nothing to warm up" and reported as False
+        rather than as an error, which is what the warm-up contract asks for.
+
+        Args:
+            model: Path to the script file.
+            file_paths: Optional path or list of paths the script may want to
+                read or index ahead of the first call.
+
+        Returns:
+            True if the script reported that it warmed up, False if it does not
+            implement the mode or reported that it had nothing to do.
+        """
+        cmd = _resolve_interpreter(model)
+        payload = {
+            "mode": "warm_up",
+            "file_path": normalize_file_paths(file_paths),
+            "timeout": self.config.timeout,
+        }
+        try:
+            data = _run_script(cmd, payload, self.config.timeout)
+        except Exception:
+            return False
+        return bool(data.get("warmed_up", True))
 
     def get_embedding(self, model: str, text: str) -> list[float]:
         """Generate a text embedding by spawning the target script in embed mode.

@@ -67,6 +67,34 @@ class BaseProvider(ABC):
         """
         ...
 
+    def warm_up(
+        self,
+        model: str,
+        file_paths: str | list[str] | None = None,
+    ) -> bool:
+        """Pay this provider's one-off costs ahead of the first real call.
+
+        Brings the provider into the state where a subsequent ``call()`` no
+        longer has to pay setup costs it would otherwise charge to whichever
+        request happens to come first: SDK import, client construction, DNS +
+        TCP + TLS handshake, model load, remote file upload.
+
+        Implementations must not consume generation tokens. Where a provider
+        offers no free way to warm up, leaving this default in place is the
+        correct answer, not a gap.
+
+        Args:
+            model: Model identifier to warm up.
+            file_paths: Optional path or list of paths to pre-upload, for
+                providers that keep a remote file store. Ignored by providers
+                that inline attachments into the request.
+
+        Returns:
+            True if something was actually warmed up, False if this provider
+            has nothing to do. Never raises for the "nothing to warm up" case.
+        """
+        return False
+
     def cleanup(self) -> None:
         """Release any remote resources held by this provider.
 

@@ -50,7 +50,7 @@
     },
 
     "cohere": {
-        "url": "https://api.cohere.ai/compatibility/v1",
+        "url": "https://api.cohere.ai/compatibility",
         "timeout": 300,
         "sleep_time": 0
     },

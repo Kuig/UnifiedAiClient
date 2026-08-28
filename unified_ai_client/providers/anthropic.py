@@ -78,6 +78,53 @@ class AnthropicProvider(BaseProvider):
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
+    def _get(self, endpoint: str, timeout: int) -> dict[str, Any]:
+        """HTTP GET against the Anthropic API via urllib.
+
+        Kept separate from ``_post``, which hardcodes the /v1/messages path and
+        sends a JSON body.
+
+        Args:
+            endpoint: API path (e.g. '/v1/models').
+            timeout: Seconds to wait.
+
+        Returns:
+            Parsed JSON response dict.
+
+        Raises:
+            urllib.error.HTTPError: On HTTP error responses.
+            urllib.error.URLError: On connection errors.
+        """
+        url = f"{self.config.url.rstrip('/')}{endpoint}"
+        headers: dict[str, str] = {
+            "x-api-key": self.api_key,
+            "anthropic-version": _ANTHROPIC_VERSION,
+        }
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def warm_up(
+        self,
+        model: str,
+        file_paths: str | list[str] | None = None,
+    ) -> bool:
+        """Open the connection with a free metadata request.
+
+        ``GET /v1/models`` consumes no tokens. It pays the DNS + TCP + TLS
+        handshake and validates the API key.
+
+        Args:
+            model: Unused. Listing models warms the channel regardless.
+            file_paths: Ignored. Anthropic takes attachments inline in the
+                request and keeps no remote file store.
+
+        Returns:
+            Always True.
+        """
+        self._get("/v1/models", self.config.timeout)
+        return True
+
     def _build_user_content(
         self, prompt: str, file_paths: list[str]
     ) -> list[dict[str, Any]]:

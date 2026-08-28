@@ -72,10 +72,18 @@ is being requested:
 |---|---|---|
 | `"generate"` | `call_ai()` | Standard text generation. |
 | `"embed"` | `get_embedding()` | Embedding vector generation. Optional. |
+| `"warm_up"` | `warm_up()` | Prepare for a later call without generating. Optional. |
+| `"preload"` | `preload_model()` | Load a model or resource into memory. Optional. |
 
 Scripts that only implement `"generate"` may treat any other `mode` as an error
 (exit non-zero with a descriptive stderr message). Scripts that also implement
-`"embed"` must branch on this field and handle both payloads.
+`"embed"`, `"warm_up"`, or `"preload"` must branch on this field and handle
+each payload they claim to support.
+
+Only `"generate"` is mandatory. The other three modes are opt-in, and declining
+them costs nothing: `warm_up()` reports that there was nothing to warm up,
+`preload_model()` emits a warning and moves on, and `get_embedding()` raises for
+the caller who asked for something the script cannot do.
 
 ### 2.2 Input: `generate` payload (stdin)
 
@@ -372,6 +380,89 @@ If the script does not support embedding, it must exit with a non-zero return co
 and write a descriptive message to stderr. ScriptProvider will propagate the
 `RuntimeError` to the caller.
 
+### 2.6 Input: `warm_up` payload (stdin, optional)
+
+Sent by `warm_up()`. The purpose is to let the script pay its one-off startup
+costs (loading a model, opening an index, warming a cache) before the first
+`generate` call, so those costs are not charged to whichever request happens to
+run first.
+
+| Field | Type | Always present | Description |
+|---|---|---|---|
+| `mode` | `string` | ✅ Yes | Always `"warm_up"` for this payload. |
+| `file_path` | `array[string]` | ✅ Yes | Files the caller expects to attach later, so the script can read or index them ahead of time. Empty list if none. Never null. |
+| `timeout` | `int` | ✅ Yes | Maximum seconds allowed for the warm-up. |
+
+The script path is not sent: the script already knows where it lives.
+
+**Example input:**
+```json
+{
+    "mode": "warm_up",
+    "file_path": ["/home/user/docs/paper.pdf"],
+    "timeout": 300
+}
+```
+
+### 2.7 Output: `warm_up` response (stdout, optional)
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `warmed_up` | `bool` | No | Whether anything was actually warmed up. Defaults to `true` when omitted. |
+
+**Example output:**
+```json
+{
+    "warmed_up": true
+}
+```
+
+A script that implements the mode but has nothing to do should return
+`{"warmed_up": false}` rather than exiting non-zero. Reserve the non-zero exit
+for "I do not implement this mode at all".
+
+### 2.8 Input: `preload` payload (stdin, optional)
+
+Sent by `preload_model()`. Where `warm_up` is about the channel and the
+attachments, `preload` is about resident memory: it carries the settings a
+model should be loaded with.
+
+| Field | Type | Always present | Description |
+|---|---|---|---|
+| `mode` | `string` | ✅ Yes | Always `"preload"` for this payload. |
+| `keep_alive` | `string` | ✅ Yes | How long the caller wants the model kept resident (e.g. `"15m"`). The script decides what this means. |
+| `context_size` | `int \| null` | ✅ Yes | Context window size in tokens, or null. |
+| `extra_options` | `dict \| null` | ✅ Yes | Script-specific settings, or null. |
+| `timeout` | `int` | ✅ Yes | Maximum seconds allowed for the preload. |
+
+**Example input:**
+```json
+{
+    "mode": "preload",
+    "keep_alive": "30m",
+    "context_size": 8000,
+    "extra_options": null,
+    "timeout": 300
+}
+```
+
+### 2.9 Output: `preload` response (stdout, optional)
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `preloaded` | `bool` | No | Acknowledgement that the preload ran. Not inspected by ScriptProvider, which returns nothing to its caller. |
+
+**Example output:**
+```json
+{
+    "preloaded": true
+}
+```
+
+> [!IMPORTANT]
+> Both modes must print a **valid JSON object** on stdout, even an empty `{}`.
+> Printing nothing is a protocol violation and will be read as a failure.
+
 ---
 
 ## 3. Exit Codes
@@ -521,6 +612,49 @@ def handle_embed(request: dict) -> dict:
     return {"embedding": embedding}
 
 
+def handle_warm_up(request: dict) -> dict:
+    """Handle a warm-up request and return the response dict.
+
+    Remove this function entirely if there is nothing to prepare ahead of time.
+    In that case the 'warm_up' branch in main() should exit non-zero, which the
+    library reads as "nothing to warm up" rather than as an error.
+
+    Args:
+        request: The parsed request dict (contains 'file_path', 'timeout').
+
+    Returns:
+        A response dict with a 'warmed_up' key.
+    """
+    file_paths: list[str] = request.get("file_path") or []
+
+    # Replace with real preparation: load a model, open an index, read the
+    # attachments so they are in the page cache. Do not generate anything.
+    _ = file_paths
+
+    return {"warmed_up": True}
+
+
+def handle_preload(request: dict) -> dict:
+    """Handle a preload request and return the response dict.
+
+    Remove this function entirely if the script holds no resident model.
+
+    Args:
+        request: The parsed request dict (contains 'keep_alive',
+            'context_size', 'extra_options').
+
+    Returns:
+        A response dict with a 'preloaded' key.
+    """
+    keep_alive: str = request.get("keep_alive", "15m")
+    context_size: int | None = request.get("context_size")
+
+    # Replace with a real model load using these settings.
+    _ = (keep_alive, context_size)
+
+    return {"preloaded": True}
+
+
 def main() -> None:
     """Entry point. Reads request from stdin, dispatches on mode, writes response."""
     try:
@@ -531,6 +665,10 @@ def main() -> None:
             response = handle_generate(request)
         elif mode == "embed":
             response = handle_embed(request)
+        elif mode == "warm_up":
+            response = handle_warm_up(request)
+        elif mode == "preload":
+            response = handle_preload(request)
         else:
             print(f"Unsupported mode: '{mode}'", file=sys.stderr)
             sys.exit(1)
@@ -572,6 +710,12 @@ For each pre-existing script to be integrated as a `"script"` provider:
   print statements.
 - [ ] **Respect the timeout** if the script runs long operations (optional but
   recommended).
+- [ ] **Consider `warm_up` and `preload`** if the script pays a startup cost that
+  a first `generate` call would otherwise absorb: loading a model, opening an
+  index, reading large attachments. Both modes are optional and cost nothing to
+  skip, since an unknown mode already exits non-zero and the library treats that
+  as "nothing to do". Implement them only if the script has real work to move
+  out of the first call.
 - [ ] **If the script has its own dependencies:** create a `.venv` in the script's
   directory and install requirements there. ScriptProvider will detect and use it
   automatically. No changes to the calling project's environment are needed.

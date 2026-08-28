@@ -368,6 +368,29 @@ class OllamaProvider(BaseProvider):
 
         self._post("/api/chat", payload, self.config.timeout)
 
+    def warm_up(
+        self,
+        model: str,
+        file_paths: str | list[str] | None = None,
+    ) -> bool:
+        """Load the model into memory via Ollama's own warm-up request.
+
+        Delegates to ``preload_model()``, which posts an empty message list to
+        ``/api/chat``: Ollama's official way to allocate a model without
+        generating anything.
+
+        Args:
+            model: Model identifier to load.
+            file_paths: Ignored. Ollama inlines attachments into the request
+                and keeps no remote file store to populate.
+
+        Returns:
+            Always True: loading the model is always real work.
+        """
+        opts = self.config.extra_options or {}
+        self.preload_model(model, opts.get("keep_alive", "15m"))
+        return True
+
     def get_embedding(self, model: str, text: str) -> list[float]:
         """Generate a text embedding vector using Ollama.
 

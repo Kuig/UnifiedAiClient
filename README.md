@@ -37,7 +37,7 @@ pip install -e /path/to/UnifiedAiClient
 **Production / other machines** — declare in your project's `requirements.txt`:
 
 ```text
-unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.3.2
+unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.4.0
 ```
 
 then run `pip install -r requirements.txt`.
@@ -248,6 +248,41 @@ For providers that do not support preloading (Google, Anthropic, OpenAI, etc.) t
 warm-up part is a no-op, but any provided `context_size` / `extra_options` are still
 registered and will apply to `call_ai()` calls.
 
+### Warm-up (all providers)
+
+Every provider charges some costs exactly once per process: importing an SDK,
+building a client, the DNS and TLS handshake, loading a model, uploading a file.
+Without a warm-up, all of it lands on whichever `call_ai()` happens to run first.
+That first call then looks slow purely because it went first, which matters as
+soon as you are measuring or comparing timings.
+
+```python
+from unified_ai_client import warm_up
+
+warm_up("google", "gemini-2.5-flash", file_paths=["paper.pdf"])
+
+# The upload, the TLS handshake and the client construction are already paid for.
+response = call_ai(
+    provider="google",
+    model="gemini-2.5-flash",
+    prompt="Summarize the attached paper.",
+    file_path=["paper.pdf"],
+)
+```
+
+`warm_up()` is not the same thing as `preload_model()`:
+
+| | `preload_model()` | `warm_up()` |
+|---|---|---|
+| What it prepares | A model in resident memory | The whole channel: client, connection, authentication, and on Google the uploaded files |
+| Where it works | Ollama, and scripts that implement it | Every provider |
+| Also does | Registers `context_size` / `extra_options` for later calls | Nothing persistent beyond the warmed resources |
+
+It never raises. A failed warm-up is a missed optimisation, not an error, so it
+returns `False` and lets the `call_ai()` that follows report the real problem
+through its own retries. It is safe to call on every provider without checking
+first: where there is nothing to warm up, it is a free no-op.
+
 ### Text Embeddings
 
 Generate text embedding vectors using supported providers (`openai`, `ollama`, `mistral`, `cohere`, `xai`, `lmstudio`, `llamacpp`).
@@ -403,7 +438,9 @@ tool calling depends on its training, not the provider.
 
 ### Resource Cleanup
 
-`atexit` cleanup is registered automatically on first call. For eager cleanup:
+`atexit` cleanup is registered automatically on the first `call_ai()` or `warm_up()`,
+whichever comes first, so files uploaded by a warm-up are cleaned up even in a process
+that never reaches a real call. For eager cleanup:
 
 ```python
 from unified_ai_client import cleanup
@@ -519,6 +556,58 @@ def preload_model(
   * `extra_options` (`dict`, optional): Additional provider-specific settings
     (e.g. `{"visual_token_budget": 1120}`). Merged with any previously registered
     settings and persisted via `configure_provider()`.
+
+---
+
+#### `warm_up`
+
+Pays a provider's one-off costs before the first real call, so they are not
+charged to whichever `call_ai()` happens to run first.
+
+```python
+def warm_up(
+    provider: str,
+    model: str,
+    file_paths: str | list[str] | None = None,
+) -> bool:
+```
+
+* **Parameters:**
+  * `provider` (`str`): Provider name (e.g. `"google"`, `"ollama"`).
+  * `model` (`str`): The model identifier to warm up.
+  * `file_paths` (`str | list[str]`, optional): Files to upload ahead of time.
+    Only used by providers that keep a remote file store (currently `google`),
+    and by scripts that choose to act on it. Ignored elsewhere.
+* **Returns:** `True` if something was actually warmed up, `False` if the
+  provider had nothing to do or the warm-up failed.
+
+What each provider does:
+
+| Provider | Strategy | Consumes tokens |
+|---|---|---|
+| `google` | Builds the client, issues a free `models.get` metadata request, uploads `file_paths` | No |
+| `ollama` | Loads the model through Ollama's own warm-up request | No |
+| `lmstudio`, `llamacpp` | Sends a one-token completion | No (see the note below) |
+| `openai`, `mistral`, `cohere`, `meta`, `groq`, `xai` | Free `GET /v1/models` | No |
+| `anthropic` | Free `GET /v1/models` | No |
+| `script` | Sends `mode: "warm_up"` to the script | Depends on the script |
+
+> [!IMPORTANT]
+> LM Studio and llama.cpp are the one exception to "warm-up is free". Both load
+> a model lazily on first inference, so a metadata request would return instantly
+> and leave the load cost exactly where `warm_up()` is meant to remove it. They
+> therefore send a real one-token completion. Against the local servers these
+> providers are built for, this is free. If you have pointed either of them at a
+> paid remote endpoint, that request is billable.
+
+Files uploaded by `warm_up()` go into the same cache `call_ai()` reads from, and
+are deleted by `cleanup()` along with every other uploaded file. Warming up does
+not change the resource lifecycle.
+
+`warm_up()` never raises: a failed warm-up is a missed optimisation, not an
+error, and the `call_ai()` that follows has its own retries and will report the
+real failure. Call `get_provider(...).warm_up(...)` directly if you want the
+exception instead.
 
 ---
 
@@ -696,7 +785,7 @@ context, or previous requests:
 ```
 unified_ai_client/
 ├── __init__.py           # Public API exports
-├── client.py             # call_ai(), configure_provider() router + provider cache
+├── client.py             # call_ai(), warm_up(), configure_provider() router + cache
 ├── models.py             # AiRequest, AiResponse, ProviderConfig dataclasses
 ├── file_utils.py         # classify_file, encode_file_base64, inline_text_attachments, ...
 ├── config.py             # load_secrets(), load_config() (utility)

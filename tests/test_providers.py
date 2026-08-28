@@ -1,13 +1,13 @@
 """Smoke tests for all UnifiedAiClient providers.
 
-Each test is wrapped in try/except so unavailable providers (missing API keys,
-offline servers) produce a SKIP result instead of crashing the suite.
+Tests that need a provider which is not available (missing API key, offline
+server, model that does not support the feature under test) call
+``self.skipTest()`` so the suite reports SKIP instead of failing.
 
 Usage:
-    python tests/test_providers.py          # from project root
-    python test_providers.py                # from tests/ directory
-
-Output: one line per test with PASS / SKIP / FAIL status.
+    python -m unittest discover -s tests     # from project root
+    python tests/test_providers.py           # direct execution
+    python -m unittest tests.test_providers.TestDispatch.test_dispatch_ollama
 """
 from __future__ import annotations
 
@@ -15,8 +15,9 @@ import json
 import os
 import sys
 import tempfile
-import traceback
+import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # ---------------------------------------------------------------------------
 # Ensure the project root is in sys.path so unified_ai_client is importable
@@ -27,31 +28,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-# ---------------------------------------------------------------------------
-# Minimal test runner (no external frameworks required)
-# ---------------------------------------------------------------------------
-
-_results: list[tuple[str, str, str]] = []  # (name, status, detail)
-
-
-def _run(name: str, fn) -> None:  # type: ignore[type-arg]
-    """Execute a single test function and record the result."""
-    try:
-        fn()
-        _results.append((name, "PASS", ""))
-    except SkipTest as exc:
-        _results.append((name, "SKIP", str(exc)))
-    except Exception as exc:
-        detail = traceback.format_exc().strip().splitlines()[-1]
-        _results.append((name, "FAIL", detail))
-
-
-class SkipTest(Exception):
-    """Raise inside a test to mark it as skipped (provider unavailable)."""
-
 
 # ---------------------------------------------------------------------------
-# Helper — create a disposable temp text file
+# Helpers — disposable temp files and Ollama availability probes
 # ---------------------------------------------------------------------------
 
 def _make_text_file(content: str = "Hello from UnifiedAiClient test.") -> str:
@@ -73,299 +52,6 @@ def _make_script(code: str) -> str:
     tmp.close()
     return tmp.name
 
-
-# ---------------------------------------------------------------------------
-# 1. Import tests
-# ---------------------------------------------------------------------------
-
-def test_import_models() -> None:
-    from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig
-    assert AiRequest and AiResponse and ProviderConfig
-
-
-def test_import_file_utils() -> None:
-    from unified_ai_client.file_utils import (
-        classify_file,
-        normalize_file_paths,
-        encode_file_base64,
-        get_mime_type,
-        audio_format_name,
-        format_text_attachment,
-        inline_text_attachments,
-    )
-    assert classify_file
-
-
-def test_import_client() -> None:
-    from unified_ai_client import call_ai, cleanup, preload_model, get_embedding
-    assert call_ai
-
-
-def test_import_providers() -> None:
-    from unified_ai_client.providers.ollama import OllamaProvider
-    from unified_ai_client.providers.google import GoogleProvider
-    from unified_ai_client.providers.anthropic import AnthropicProvider
-    from unified_ai_client.providers.openai import OpenAiProvider
-    from unified_ai_client.providers.mistral import MistralProvider
-    from unified_ai_client.providers.cohere import CohereProvider
-    from unified_ai_client.providers.meta import MetaProvider
-    from unified_ai_client.providers.groq import GroqProvider
-    from unified_ai_client.providers.xai import XAiProvider
-    from unified_ai_client.providers.lmstudio import LmStudioProvider
-    from unified_ai_client.providers.llamacpp import LlamaCppProvider
-    from unified_ai_client.providers.script import ScriptProvider
-    assert all([
-        OllamaProvider, GoogleProvider, AnthropicProvider,
-        OpenAiProvider, MistralProvider, CohereProvider,
-        MetaProvider, GroqProvider, XAiProvider,
-        LmStudioProvider, LlamaCppProvider, ScriptProvider,
-    ])
-
-
-# ---------------------------------------------------------------------------
-# 2. Model construction
-# ---------------------------------------------------------------------------
-
-def test_airequest_construction() -> None:
-    from unified_ai_client.models import AiRequest
-    r = AiRequest(
-        provider="ollama",
-        model="llava",
-        prompt="test",
-        file_path=["a.jpg", "b.txt"],
-    )
-    assert r.file_path == ["a.jpg", "b.txt"]
-    assert not hasattr(r, "image_path"), "Old 'image_path' field must not exist on AiRequest"
-
-
-def test_airesponse_defaults() -> None:
-    from unified_ai_client.models import AiResponse
-    r = AiResponse(text="hello")
-    assert r.reasoning_text == ""
-    assert r.reasoning_tokens == 0
-
-
-# ---------------------------------------------------------------------------
-# 3. File utils unit tests
-# ---------------------------------------------------------------------------
-
-def test_classify_file() -> None:
-    from unified_ai_client.file_utils import classify_file
-    assert classify_file("photo.jpg") == "image"
-    assert classify_file("PHOTO.PNG") == "image"
-    assert classify_file("audio.mp3") == "audio"
-    assert classify_file("audio.wav") == "audio"
-    assert classify_file("doc.pdf") == "document"
-    assert classify_file("notes.md") == "text"
-    assert classify_file("data.csv") == "text"
-    assert classify_file("binary.bin") == "unknown"
-
-
-def test_normalize_file_paths() -> None:
-    from unified_ai_client.file_utils import normalize_file_paths
-    assert normalize_file_paths(None) == []
-    assert normalize_file_paths("a.jpg") == ["a.jpg"]
-    assert normalize_file_paths(["a.jpg", "b.pdf"]) == ["a.jpg", "b.pdf"]
-
-
-def test_inline_text_attachments() -> None:
-    from unified_ai_client.file_utils import inline_text_attachments
-    tmp = _make_text_file("line one\nline two")
-    try:
-        result = inline_text_attachments("My prompt", [tmp])
-        assert "My prompt" in result
-        assert os.path.basename(tmp) in result
-        assert "line one" in result
-        # Prompt must appear only ONCE
-        assert result.count("My prompt") == 1
-    finally:
-        os.unlink(tmp)
-
-
-def test_inline_text_attachments_multiple() -> None:
-    from unified_ai_client.file_utils import inline_text_attachments
-    t1 = _make_text_file("file one content")
-    t2 = _make_text_file("file two content")
-    try:
-        result = inline_text_attachments("My prompt", [t1, t2])
-        assert "file one content" in result
-        assert "file two content" in result
-        # Prompt must appear exactly once regardless of how many files
-        assert result.count("My prompt") == 1
-    finally:
-        os.unlink(t1)
-        os.unlink(t2)
-
-
-def test_audio_format_name() -> None:
-    from unified_ai_client.file_utils import audio_format_name
-    assert audio_format_name("track.mp3") == "mp3"
-    assert audio_format_name("clip.wav") == "wav"
-    assert audio_format_name("sound.flac") == "flac"
-    assert audio_format_name("file.m4a") == "mp4"
-
-
-# ---------------------------------------------------------------------------
-# 4. Config loading — load_secrets (os.environ + secrets.json)
-# ---------------------------------------------------------------------------
-
-def test_load_secrets_from_env_var() -> None:
-    """Environment variables are read by load_secrets() and returned as snake_case keys."""
-    from unified_ai_client.config import load_secrets
-    old = os.environ.get("GOOGLE_API_KEY")
-    try:
-        os.environ["GOOGLE_API_KEY"] = "env-test-key-xyz"
-        result = load_secrets("/nonexistent/path/no_secrets_here")
-        assert result.get("google_api_key") == "env-test-key-xyz"
-    finally:
-        if old is None:
-            os.environ.pop("GOOGLE_API_KEY", None)
-        else:
-            os.environ["GOOGLE_API_KEY"] = old
-
-
-def test_load_secrets_env_wins_over_json() -> None:
-    """os.environ takes priority over secrets.json when both define the same key."""
-    import json as _json
-    from unified_ai_client.config import load_secrets
-    tmp_dir = tempfile.mkdtemp()
-    old = os.environ.get("GOOGLE_API_KEY")
-    try:
-        # secrets.json has one value
-        with open(os.path.join(tmp_dir, "secrets.json"), "w", encoding="utf-8") as f:
-            _json.dump({"google_api_key": "from-secrets-json"}, f)
-        # env var overrides it
-        os.environ["GOOGLE_API_KEY"] = "from-env-var"
-        result = load_secrets(tmp_dir)
-        assert result["google_api_key"] == "from-env-var", "os.environ must win over secrets.json"
-    finally:
-        if old is None:
-            os.environ.pop("GOOGLE_API_KEY", None)
-        else:
-            os.environ["GOOGLE_API_KEY"] = old
-        import shutil
-        shutil.rmtree(tmp_dir)
-
-
-def test_load_secrets_no_sources() -> None:
-    """load_secrets returns empty dict when no secrets.json and no env vars are set."""
-    from unified_ai_client.config import load_secrets
-    old_g = os.environ.pop("GOOGLE_API_KEY", None)
-    old_a = os.environ.pop("ANTHROPIC_API_KEY", None)
-    old_o = os.environ.pop("OPENAI_API_KEY", None)
-    try:
-        result = load_secrets("/nonexistent/path/xyz")
-        assert result == {}
-    finally:
-        if old_g is not None:
-            os.environ["GOOGLE_API_KEY"] = old_g
-        if old_a is not None:
-            os.environ["ANTHROPIC_API_KEY"] = old_a
-        if old_o is not None:
-            os.environ["OPENAI_API_KEY"] = old_o
-
-
-
-# ---------------------------------------------------------------------------
-# 5. Dispatch — get_provider() resolves correct class
-# ---------------------------------------------------------------------------
-
-def test_dispatch_ollama() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.ollama import OllamaProvider
-    p = get_provider("ollama")
-    assert isinstance(p, OllamaProvider)
-
-
-def test_dispatch_google() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.google import GoogleProvider
-    p = get_provider("google")
-    assert isinstance(p, GoogleProvider)
-
-
-def test_dispatch_anthropic() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.anthropic import AnthropicProvider
-    p = get_provider("anthropic")
-    assert isinstance(p, AnthropicProvider)
-
-
-def test_dispatch_openai() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.openai import OpenAiProvider
-    p = get_provider("openai")
-    assert isinstance(p, OpenAiProvider)
-
-
-def test_dispatch_mistral() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.mistral import MistralProvider
-    p = get_provider("mistral")
-    assert isinstance(p, MistralProvider)
-
-
-def test_dispatch_cohere() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.cohere import CohereProvider
-    p = get_provider("cohere")
-    assert isinstance(p, CohereProvider)
-
-
-def test_dispatch_meta() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.meta import MetaProvider
-    p = get_provider("meta")
-    assert isinstance(p, MetaProvider)
-
-
-def test_dispatch_groq() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.groq import GroqProvider
-    p = get_provider("groq")
-    assert isinstance(p, GroqProvider)
-
-
-def test_dispatch_xai() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.xai import XAiProvider
-    p = get_provider("xai")
-    assert isinstance(p, XAiProvider)
-
-
-def test_dispatch_lmstudio() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.lmstudio import LmStudioProvider
-    p = get_provider("lmstudio")
-    assert isinstance(p, LmStudioProvider)
-
-
-def test_dispatch_llamacpp() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.llamacpp import LlamaCppProvider
-    p = get_provider("llamacpp")
-    assert isinstance(p, LlamaCppProvider)
-
-
-def test_dispatch_script() -> None:
-    from unified_ai_client.client import get_provider
-    from unified_ai_client.providers.script import ScriptProvider
-    p = get_provider("script")
-    assert isinstance(p, ScriptProvider)
-
-
-def test_dispatch_invalid() -> None:
-    from unified_ai_client.client import get_provider
-    try:
-        get_provider("nonexistent_provider_xyz")
-        raise AssertionError("Expected ValueError was not raised")
-    except ValueError:
-        pass  # correct
-
-
-# ---------------------------------------------------------------------------
-# 5. Live tests — Ollama (most likely available locally)
-# ---------------------------------------------------------------------------
 
 def _ollama_available() -> bool:
     """Quick check whether Ollama is reachable."""
@@ -397,85 +83,6 @@ def _first_ollama_model() -> str | None:
         return None
 
 
-
-def test_ollama_live_generate() -> None:
-    import urllib.error
-    if not _ollama_available():
-        raise SkipTest("Ollama not reachable at localhost:11434")
-    model = _first_ollama_model()
-    if not model:
-        raise SkipTest("No chat-capable Ollama models installed")
-    from unified_ai_client import call_ai
-    try:
-        response = call_ai(
-            provider="ollama",
-            model=model,
-            prompt="Reply with exactly the word PONG and nothing else.",
-            temperature=0.0,
-            timeout=30,
-        )
-    except Exception as exc:
-        if "400" in str(exc):
-            raise SkipTest(f"Model '{model}' rejected chat request (400) — likely embed-only")
-        raise
-    assert isinstance(response.text, str)
-    assert len(response.text) > 0
-
-
-def test_ollama_live_with_text_file() -> None:
-    if not _ollama_available():
-        raise SkipTest("Ollama not reachable at localhost:11434")
-    model = _first_ollama_model()
-    if not model:
-        raise SkipTest("No chat-capable Ollama models installed")
-    tmp = _make_text_file("The sky is blue.")
-    try:
-        from unified_ai_client import call_ai
-        try:
-            response = call_ai(
-                provider="ollama",
-                model=model,
-                prompt="What colour is mentioned in the attached file? Reply in one word.",
-                file_path=tmp,
-                temperature=0.0,
-                timeout=30,
-            )
-        except Exception as exc:
-            if "400" in str(exc):
-                raise SkipTest(f"Model '{model}' rejected chat request (400) — likely embed-only")
-            raise
-        assert isinstance(response.text, str)
-        assert len(response.text) > 0
-    finally:
-        os.unlink(tmp)
-
-
-def test_ollama_live_thinking() -> None:
-    if not _ollama_available():
-        raise SkipTest("Ollama not reachable at localhost:11434")
-    model = _first_ollama_model()
-    if not model:
-        raise SkipTest("No chat-capable Ollama models installed")
-    from unified_ai_client import call_ai
-    # thinking=True may silently fall back on models that don't support it
-    try:
-        response = call_ai(
-            provider="ollama",
-            model=model,
-            prompt="What is 2+2?",
-            thinking=True,
-            temperature=0.0,
-            timeout=30,
-        )
-    except Exception as exc:
-        if "400" in str(exc):
-            raise SkipTest(f"Model '{model}' rejected chat request (400) — likely embed-only")
-        raise
-    assert isinstance(response.text, str)
-    # reasoning_text may be empty string if model doesn't support thinking — that's fine
-    assert isinstance(response.reasoning_text, str)
-
-
 def _first_ollama_embed_model() -> str | None:
     """Return the first Ollama embedding-capable model available.
 
@@ -497,91 +104,28 @@ def _first_ollama_embed_model() -> str | None:
         return None
 
 
-def test_ollama_live_embedding() -> None:
-    if not _ollama_available():
-        raise SkipTest("Ollama not reachable at localhost:11434")
-    model = _first_ollama_embed_model()
-    if not model:
-        raise SkipTest("No embedding-capable Ollama models installed (need bge-m3, embeddinggemma, nomic-embed-text, or similar)")
-    import urllib.error
-    from unified_ai_client import get_embedding
-    try:
-        vec = get_embedding(provider="ollama", model=model, text="hello world")
-        assert isinstance(vec, list)
-        assert len(vec) > 0
-        assert all(isinstance(x, float) for x in vec)
-    except (RuntimeError, urllib.error.HTTPError) as exc:
-        raise SkipTest(f"Model '{model}' does not support embeddings ({exc})")
+class ProviderRegistryIsolation(unittest.TestCase):
+    """Base class that restores the global provider registries after each test.
 
-
-def test_ollama_live_reasoning_tokens_thinking_true() -> None:
-    """With thinking=True, reasoning_tokens must be > 0 if the model supports thinking.
-
-    Uses the first available chat model.  If the model responds but produces no
-    thinking output (empty reasoning_text and zero reasoning_tokens), the test
-    is skipped — the model does not support the 'think' parameter.
+    ``configure_provider()`` writes into ``client._PROVIDER_CONFIGS`` and
+    invalidates ``client._PROVIDERS``. Tests run in an arbitrary order, so any
+    test that touches those registries must leave them exactly as it found
+    them or it silently changes the outcome of the next one.
     """
-    if not _ollama_available():
-        raise SkipTest("Ollama not reachable at localhost:11434")
-    model = _first_ollama_model()
-    if not model:
-        raise SkipTest("No chat-capable Ollama models installed")
-    from unified_ai_client import call_ai
-    try:
-        response = call_ai(
-            provider="ollama",
-            model=model,
-            prompt="What is 2+2? Think step by step.",
-            thinking=True,
-            temperature=0.0,
-            timeout=300,
-        )
-    except Exception as exc:
-        if "400" in str(exc):
-            raise SkipTest(f"Model '{model}' rejected thinking request (400)")
-        raise
-    if not response.reasoning_text and response.reasoning_tokens == 0:
-        raise SkipTest(f"Model '{model}' produced no thinking output — 'think' not supported")
-    assert isinstance(response.text, str)
-    assert len(response.text) > 0
-    assert response.reasoning_is_summary is False, (
-        "Ollama returns the raw thinking transcript, not a provider-written summary"
-    )
-    assert response.reasoning_tokens > 0, (
-        f"reasoning_tokens must be > 0 when thinking text is present, got {response.reasoning_tokens}"
-    )
 
+    def setUp(self) -> None:
+        super().setUp()
+        from unified_ai_client import client as _client
+        self._saved_configs = dict(_client._PROVIDER_CONFIGS)
+        self._saved_providers = dict(_client._PROVIDERS)
 
-def test_ollama_live_reasoning_tokens_thinking_false() -> None:
-    """With thinking=False, reasoning_tokens must be a non-negative integer.
-
-    Some models produce a small thinking trace even when not asked to —
-    the result must never be negative and must never raise.
-    Uses the first available chat model.
-    """
-    if not _ollama_available():
-        raise SkipTest("Ollama not reachable at localhost:11434")
-    model = _first_ollama_model()
-    if not model:
-        raise SkipTest("No chat-capable Ollama models installed")
-    from unified_ai_client import call_ai
-    try:
-        response = call_ai(
-            provider="ollama",
-            model=model,
-            prompt="What is 2+2?",
-            thinking=False,
-            temperature=0.0,
-            timeout=60,
-        )
-    except Exception as exc:
-        if "400" in str(exc):
-            raise SkipTest(f"Model '{model}' rejected request (400)")
-        raise
-    assert isinstance(response.text, str)
-    assert response.reasoning_tokens >= 0, (
-        f"reasoning_tokens must be >= 0, got {response.reasoning_tokens}"
-    )
+    def tearDown(self) -> None:
+        from unified_ai_client import client as _client
+        _client._PROVIDER_CONFIGS.clear()
+        _client._PROVIDER_CONFIGS.update(self._saved_configs)
+        _client._PROVIDERS.clear()
+        _client._PROVIDERS.update(self._saved_providers)
+        super().tearDown()
 
 
 _ECHO_SCRIPT = '''\
@@ -613,221 +157,634 @@ if __name__ == "__main__":
 '''
 
 
-def test_script_generate() -> None:
-    script = _make_script(_ECHO_SCRIPT)
-    try:
-        from unified_ai_client import call_ai
-        response = call_ai(
-            provider="script",
-            model=script,
-            prompt="Hello",
-            timeout=15,
+# ---------------------------------------------------------------------------
+# 1. Import tests
+# ---------------------------------------------------------------------------
+
+class TestImports(unittest.TestCase):
+    """The public modules and every provider class must be importable."""
+
+    def test_import_models(self) -> None:
+        from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig
+        self.assertTrue(AiRequest and AiResponse and ProviderConfig)
+
+    def test_import_file_utils(self) -> None:
+        from unified_ai_client.file_utils import (
+            classify_file,
+            normalize_file_paths,
+            encode_file_base64,
+            get_mime_type,
+            audio_format_name,
+            format_text_attachment,
+            inline_text_attachments,
         )
-        assert "Echo: Hello" in response.text
-        assert "(files=0)" in response.text
-        assert response.input_tokens == 1
-        assert response.output_tokens == 2
-    finally:
-        os.unlink(script)
+        self.assertTrue(classify_file)
+
+    def test_import_client(self) -> None:
+        from unified_ai_client import call_ai, cleanup, preload_model, get_embedding
+        self.assertTrue(call_ai)
+
+    def test_import_providers(self) -> None:
+        from unified_ai_client.providers.ollama import OllamaProvider
+        from unified_ai_client.providers.google import GoogleProvider
+        from unified_ai_client.providers.anthropic import AnthropicProvider
+        from unified_ai_client.providers.openai import OpenAiProvider
+        from unified_ai_client.providers.mistral import MistralProvider
+        from unified_ai_client.providers.cohere import CohereProvider
+        from unified_ai_client.providers.meta import MetaProvider
+        from unified_ai_client.providers.groq import GroqProvider
+        from unified_ai_client.providers.xai import XAiProvider
+        from unified_ai_client.providers.lmstudio import LmStudioProvider
+        from unified_ai_client.providers.llamacpp import LlamaCppProvider
+        from unified_ai_client.providers.script import ScriptProvider
+        self.assertTrue(all([
+            OllamaProvider, GoogleProvider, AnthropicProvider,
+            OpenAiProvider, MistralProvider, CohereProvider,
+            MetaProvider, GroqProvider, XAiProvider,
+            LmStudioProvider, LlamaCppProvider, ScriptProvider,
+        ]))
 
 
-def test_script_generate_with_file() -> None:
-    script = _make_script(_ECHO_SCRIPT)
-    tmp = _make_text_file("attached content")
-    try:
-        from unified_ai_client import call_ai
-        response = call_ai(
-            provider="script",
-            model=script,
-            prompt="Summarize",
-            file_path=tmp,
-            timeout=15,
+# ---------------------------------------------------------------------------
+# 2. Model construction
+# ---------------------------------------------------------------------------
+
+class TestModels(unittest.TestCase):
+    """Dataclass construction and default values."""
+
+    def test_airequest_construction(self) -> None:
+        from unified_ai_client.models import AiRequest
+        r = AiRequest(
+            provider="ollama",
+            model="llava",
+            prompt="test",
+            file_path=["a.jpg", "b.txt"],
         )
-        assert "(files=1)" in response.text
-    finally:
-        os.unlink(script)
-        os.unlink(tmp)
-
-
-def test_script_generate_with_reasoning() -> None:
-    script = _make_script(_ECHO_SCRIPT)
-    try:
-        from unified_ai_client import call_ai
-        response = call_ai(
-            provider="script",
-            model=script,
-            prompt="Think",
-            thinking=True,
-            timeout=15,
+        self.assertEqual(r.file_path, ["a.jpg", "b.txt"])
+        self.assertFalse(
+            hasattr(r, "image_path"),
+            "Old 'image_path' field must not exist on AiRequest",
         )
-        assert response.reasoning_text == "I thought about it."
-        assert response.reasoning_tokens == 10
-        assert response.reasoning_is_summary is False
-    finally:
-        os.unlink(script)
+
+    def test_airesponse_defaults(self) -> None:
+        from unified_ai_client.models import AiResponse
+        r = AiResponse(text="hello")
+        self.assertEqual(r.reasoning_text, "")
+        self.assertEqual(r.reasoning_tokens, 0)
 
 
-def test_script_embed() -> None:
-    script = _make_script(_ECHO_SCRIPT)
-    try:
-        from unified_ai_client import get_embedding
-        vec = get_embedding(provider="script", model=script, text="hello")
-        assert vec == [0.1, 0.2, 0.3]
-    finally:
-        os.unlink(script)
+# ---------------------------------------------------------------------------
+# 3. File utils unit tests
+# ---------------------------------------------------------------------------
+
+class TestFileUtils(unittest.TestCase):
+    """Classification, path normalisation and text inlining."""
+
+    def test_classify_file(self) -> None:
+        from unified_ai_client.file_utils import classify_file
+        self.assertEqual(classify_file("photo.jpg"), "image")
+        self.assertEqual(classify_file("PHOTO.PNG"), "image")
+        self.assertEqual(classify_file("audio.mp3"), "audio")
+        self.assertEqual(classify_file("audio.wav"), "audio")
+        self.assertEqual(classify_file("doc.pdf"), "document")
+        self.assertEqual(classify_file("notes.md"), "text")
+        self.assertEqual(classify_file("data.csv"), "text")
+        self.assertEqual(classify_file("binary.bin"), "unknown")
+
+    def test_normalize_file_paths(self) -> None:
+        from unified_ai_client.file_utils import normalize_file_paths
+        self.assertEqual(normalize_file_paths(None), [])
+        self.assertEqual(normalize_file_paths("a.jpg"), ["a.jpg"])
+        self.assertEqual(
+            normalize_file_paths(["a.jpg", "b.pdf"]), ["a.jpg", "b.pdf"]
+        )
+
+    def test_inline_text_attachments(self) -> None:
+        from unified_ai_client.file_utils import inline_text_attachments
+        tmp = _make_text_file("line one\nline two")
+        try:
+            result = inline_text_attachments("My prompt", [tmp])
+            self.assertIn("My prompt", result)
+            self.assertIn(os.path.basename(tmp), result)
+            self.assertIn("line one", result)
+            # Prompt must appear only ONCE
+            self.assertEqual(result.count("My prompt"), 1)
+        finally:
+            os.unlink(tmp)
+
+    def test_inline_text_attachments_multiple(self) -> None:
+        from unified_ai_client.file_utils import inline_text_attachments
+        t1 = _make_text_file("file one content")
+        t2 = _make_text_file("file two content")
+        try:
+            result = inline_text_attachments("My prompt", [t1, t2])
+            self.assertIn("file one content", result)
+            self.assertIn("file two content", result)
+            # Prompt must appear exactly once regardless of how many files
+            self.assertEqual(result.count("My prompt"), 1)
+        finally:
+            os.unlink(t1)
+            os.unlink(t2)
+
+    def test_audio_format_name(self) -> None:
+        from unified_ai_client.file_utils import audio_format_name
+        self.assertEqual(audio_format_name("track.mp3"), "mp3")
+        self.assertEqual(audio_format_name("clip.wav"), "wav")
+        self.assertEqual(audio_format_name("sound.flac"), "flac")
+        self.assertEqual(audio_format_name("file.m4a"), "mp4")
 
 
-def test_script_nonzero_exit() -> None:
-    """A script that exits non-zero must raise RuntimeError (not crash silently)."""
-    failing_script = _make_script(
-        "import sys; print('error details', file=sys.stderr); sys.exit(1)\n"
-    )
-    try:
+# ---------------------------------------------------------------------------
+# 4. Config loading — load_secrets (os.environ + secrets.json) and load_config
+# ---------------------------------------------------------------------------
+
+class TestSecrets(unittest.TestCase):
+    """load_secrets() merges os.environ over secrets.json."""
+
+    def test_load_secrets_from_env_var(self) -> None:
+        """Environment variables are read and returned as snake_case keys."""
+        from unified_ai_client.config import load_secrets
+        with patch.dict(os.environ, {"GOOGLE_API_KEY": "env-test-key-xyz"}):
+            result = load_secrets("/nonexistent/path/no_secrets_here")
+        self.assertEqual(result.get("google_api_key"), "env-test-key-xyz")
+
+    def test_load_secrets_env_wins_over_json(self) -> None:
+        """os.environ takes priority over secrets.json when both define a key."""
+        import shutil
+        from unified_ai_client.config import load_secrets
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmp_dir, "secrets.json"), "w", encoding="utf-8") as f:
+                json.dump({"google_api_key": "from-secrets-json"}, f)
+            with patch.dict(os.environ, {"GOOGLE_API_KEY": "from-env-var"}):
+                result = load_secrets(tmp_dir)
+            self.assertEqual(
+                result["google_api_key"],
+                "from-env-var",
+                "os.environ must win over secrets.json",
+            )
+        finally:
+            shutil.rmtree(tmp_dir)
+
+    def test_load_secrets_no_sources(self) -> None:
+        """load_secrets returns an empty dict with no file and no env vars."""
+        from unified_ai_client.config import load_secrets
+        with patch.dict(os.environ, {}, clear=True):
+            result = load_secrets("/nonexistent/path/xyz")
+        self.assertEqual(result, {})
+
+
+class TestConfigLoading(unittest.TestCase):
+    """load_config() maps known fields and sweeps the rest into extra_options."""
+
+    def test_config_dynamic_extra_options(self) -> None:
+        """Unrecognized configuration keys must land in extra_options."""
+        from unified_ai_client.config import load_config
+        from unified_ai_client.models import ProviderConfig
+
+        tmp_config_fd, tmp_config_path = tempfile.mkstemp(suffix=".json")
+        try:
+            config_data = {
+                "google": {
+                    "url": "http://google-api-mock",
+                    "timeout": 45,
+                    "sleep_time": 5,
+                    "disable_safety": True,
+                    "upload_poll_timeout": 20,
+                    "custom_app_setting": "hello_world"
+                }
+            }
+            with os.fdopen(tmp_config_fd, "w", encoding="utf-8") as f:
+                json.dump(config_data, f)
+
+            cfg = load_config(tmp_config_path, ProviderConfig, section="google")
+            self.assertEqual(cfg.url, "http://google-api-mock")
+            self.assertEqual(cfg.timeout, 45)
+            self.assertEqual(cfg.sleep_time, 5)
+            self.assertIsInstance(cfg.extra_options, dict)
+            self.assertIs(cfg.extra_options.get("disable_safety"), True)
+            self.assertEqual(cfg.extra_options.get("upload_poll_timeout"), 20)
+            self.assertEqual(cfg.extra_options.get("custom_app_setting"), "hello_world")
+        finally:
+            os.unlink(tmp_config_path)
+
+
+# ---------------------------------------------------------------------------
+# 5. Dispatch — get_provider() resolves the correct class
+# ---------------------------------------------------------------------------
+
+class TestDispatch(ProviderRegistryIsolation):
+    """get_provider() must return the right adapter for every provider name."""
+
+    def _assert_dispatch(self, name: str, expected_type: type) -> None:
+        from unified_ai_client.client import get_provider
+        self.assertIsInstance(get_provider(name), expected_type)
+
+    def test_dispatch_ollama(self) -> None:
+        from unified_ai_client.providers.ollama import OllamaProvider
+        self._assert_dispatch("ollama", OllamaProvider)
+
+    def test_dispatch_google(self) -> None:
+        from unified_ai_client.providers.google import GoogleProvider
+        self._assert_dispatch("google", GoogleProvider)
+
+    def test_dispatch_anthropic(self) -> None:
+        from unified_ai_client.providers.anthropic import AnthropicProvider
+        self._assert_dispatch("anthropic", AnthropicProvider)
+
+    def test_dispatch_openai(self) -> None:
+        from unified_ai_client.providers.openai import OpenAiProvider
+        self._assert_dispatch("openai", OpenAiProvider)
+
+    def test_dispatch_mistral(self) -> None:
+        from unified_ai_client.providers.mistral import MistralProvider
+        self._assert_dispatch("mistral", MistralProvider)
+
+    def test_dispatch_cohere(self) -> None:
+        from unified_ai_client.providers.cohere import CohereProvider
+        self._assert_dispatch("cohere", CohereProvider)
+
+    def test_dispatch_meta(self) -> None:
+        from unified_ai_client.providers.meta import MetaProvider
+        self._assert_dispatch("meta", MetaProvider)
+
+    def test_dispatch_groq(self) -> None:
+        from unified_ai_client.providers.groq import GroqProvider
+        self._assert_dispatch("groq", GroqProvider)
+
+    def test_dispatch_xai(self) -> None:
+        from unified_ai_client.providers.xai import XAiProvider
+        self._assert_dispatch("xai", XAiProvider)
+
+    def test_dispatch_lmstudio(self) -> None:
+        from unified_ai_client.providers.lmstudio import LmStudioProvider
+        self._assert_dispatch("lmstudio", LmStudioProvider)
+
+    def test_dispatch_llamacpp(self) -> None:
+        from unified_ai_client.providers.llamacpp import LlamaCppProvider
+        self._assert_dispatch("llamacpp", LlamaCppProvider)
+
+    def test_dispatch_script(self) -> None:
+        from unified_ai_client.providers.script import ScriptProvider
+        self._assert_dispatch("script", ScriptProvider)
+
+    def test_dispatch_invalid(self) -> None:
+        from unified_ai_client.client import get_provider
+        with self.assertRaises(ValueError):
+            get_provider("nonexistent_provider_xyz")
+
+
+# ---------------------------------------------------------------------------
+# 6. Live tests — Ollama (most likely available locally)
+# ---------------------------------------------------------------------------
+
+class TestOllamaLive(unittest.TestCase):
+    """End-to-end calls against a local Ollama server."""
+
+    def _require_model(self) -> str:
+        """Skip unless Ollama is reachable and has a chat-capable model."""
+        if not _ollama_available():
+            self.skipTest("Ollama not reachable at localhost:11434")
+        model = _first_ollama_model()
+        if not model:
+            self.skipTest("No chat-capable Ollama models installed")
+        return model
+
+    def test_ollama_live_generate(self) -> None:
+        model = self._require_model()
         from unified_ai_client import call_ai
         try:
-            call_ai(
-                provider="script",
-                model=failing_script,
-                prompt="test",
-                max_retries=1,
-                timeout=10,
+            response = call_ai(
+                provider="ollama",
+                model=model,
+                prompt="Reply with exactly the word PONG and nothing else.",
+                temperature=0.0,
+                timeout=30,
             )
-            raise AssertionError("Expected RuntimeError was not raised")
-        except RuntimeError as exc:
-            assert "error details" in str(exc)
-    finally:
-        os.unlink(failing_script)
+        except Exception as exc:
+            if "400" in str(exc):
+                self.skipTest(
+                    f"Model '{model}' rejected chat request (400), likely embed-only"
+                )
+            raise
+        self.assertIsInstance(response.text, str)
+        self.assertGreater(len(response.text), 0)
 
+    def test_ollama_live_with_text_file(self) -> None:
+        model = self._require_model()
+        tmp = _make_text_file("The sky is blue.")
+        try:
+            from unified_ai_client import call_ai
+            try:
+                response = call_ai(
+                    provider="ollama",
+                    model=model,
+                    prompt="What colour is mentioned in the attached file? Reply in one word.",
+                    file_path=tmp,
+                    temperature=0.0,
+                    timeout=30,
+                )
+            except Exception as exc:
+                if "400" in str(exc):
+                    self.skipTest(
+                        f"Model '{model}' rejected chat request (400), likely embed-only"
+                    )
+                raise
+            self.assertIsInstance(response.text, str)
+            self.assertGreater(len(response.text), 0)
+        finally:
+            os.unlink(tmp)
 
-# ---------------------------------------------------------------------------
-# 6.1 Google provider — offline unit tests
-# ---------------------------------------------------------------------------
+    def test_ollama_live_thinking(self) -> None:
+        model = self._require_model()
+        from unified_ai_client import call_ai
+        # thinking=True may silently fall back on models that don't support it
+        try:
+            response = call_ai(
+                provider="ollama",
+                model=model,
+                prompt="What is 2+2?",
+                thinking=True,
+                temperature=0.0,
+                timeout=30,
+            )
+        except Exception as exc:
+            if "400" in str(exc):
+                self.skipTest(
+                    f"Model '{model}' rejected chat request (400), likely embed-only"
+                )
+            raise
+        self.assertIsInstance(response.text, str)
+        # reasoning_text may be empty if the model doesn't support thinking
+        self.assertIsInstance(response.reasoning_text, str)
 
-def test_google_thinking_config_offline() -> None:
-    """Verify that GoogleProvider correctly builds the thinking configuration.
+    def test_ollama_live_embedding(self) -> None:
+        if not _ollama_available():
+            self.skipTest("Ollama not reachable at localhost:11434")
+        model = _first_ollama_embed_model()
+        if not model:
+            self.skipTest(
+                "No embedding-capable Ollama models installed "
+                "(need bge-m3, embeddinggemma, nomic-embed-text, or similar)"
+            )
+        import urllib.error
+        from unified_ai_client import get_embedding
+        try:
+            vec = get_embedding(provider="ollama", model=model, text="hello world")
+        except (RuntimeError, urllib.error.HTTPError) as exc:
+            self.skipTest(f"Model '{model}' does not support embeddings ({exc})")
+        self.assertIsInstance(vec, list)
+        self.assertGreater(len(vec), 0)
+        self.assertTrue(all(isinstance(x, float) for x in vec))
 
-    It tests that thinking is explicitly minimized/disabled when thinking=False,
-    and configured with the appropriate levels/budgets when thinking=True.
-    """
-    from unified_ai_client.providers.google import GoogleProvider
-    from unified_ai_client.models import ProviderConfig
+    def test_ollama_live_reasoning_tokens_thinking_true(self) -> None:
+        """With thinking=True, reasoning_tokens must be > 0 when a trace exists.
 
-    provider = GoogleProvider(config=ProviderConfig(sleep_time=0), api_key="dummy_key")
-
-    # 1. Test thinking=False (explicitly disabled/minimized)
-    # Gemini 3 models must set thinking_level to MINIMAL
-    cfg_g3_off = provider._build_thinking_config(thinking=False, model_name="gemini-3.5-flash")
-    assert cfg_g3_off is not None
-    assert cfg_g3_off.thinking_level == "MINIMAL"
-    assert cfg_g3_off.include_thoughts is True
-
-    # Gemini 2.5 models must set thinking_budget to 0
-    cfg_g25_off = provider._build_thinking_config(thinking=False, model_name="gemini-2.5-pro")
-    assert cfg_g25_off is not None
-    assert cfg_g25_off.thinking_budget == 0
-    assert cfg_g25_off.include_thoughts is True
-
-    # Other models must set thinking_budget to 0
-    cfg_other_off = provider._build_thinking_config(thinking=False, model_name="gemini-1.5-pro")
-    assert cfg_other_off is not None
-    assert cfg_other_off.thinking_budget == 0
-    assert cfg_other_off.include_thoughts is True
-
-    # 2. Test thinking=True (enabled)
-    # Gemini 3 models must set thinking_level to HIGH
-    cfg_g3_on = provider._build_thinking_config(thinking=True, model_name="gemini-3.5-flash")
-    assert cfg_g3_on is not None
-    assert cfg_g3_on.thinking_level == "HIGH"
-    assert cfg_g3_on.include_thoughts is True
-
-    # Gemini 2.5 models must set thinking_budget to 24576
-    cfg_g25_on = provider._build_thinking_config(thinking=True, model_name="gemini-2.5-pro")
-    assert cfg_g25_on is not None
-    assert cfg_g25_on.thinking_budget == 24576
-    assert cfg_g25_on.include_thoughts is True
-
-    # Other models must set thinking_budget to 1024
-    cfg_other_on = provider._build_thinking_config(thinking=True, model_name="gemini-1.5-pro")
-    assert cfg_other_on is not None
-    assert cfg_other_on.thinking_budget == 1024
-    assert cfg_other_on.include_thoughts is True
-
-    # 3. Test thinking="default" (default settings but capture thoughts)
-    cfg_default = provider._build_thinking_config(thinking="default", model_name="gemini-2.5-pro")
-    assert cfg_default is not None
-    assert cfg_default.include_thoughts is True
-    assert getattr(cfg_default, "thinking_budget", None) is None
-    assert getattr(cfg_default, "thinking_level", None) is None
-
-
-def test_reasoning_is_summary_offline() -> None:
-    """Verify the reasoning_is_summary contract across providers.
-
-    The flag tells consumers whether reasoning_text is the model's raw chain of
-    thought or a summary the provider wrote about it. Google summarises; every
-    other provider returns the raw trace. Consumers that measure trace length or
-    composition cannot compare the two, so the default must be conservative
-    (False = raw) and only Google may flip it.
-    """
-    from unified_ai_client.models import AiResponse
-
-    # Default is raw: a provider that never sets the flag reports a raw trace.
-    assert AiResponse(text="x").reasoning_is_summary is False
-    assert AiResponse(text="x", reasoning_text="raw trace").reasoning_is_summary is False
-
-    # Google sets it from the presence of thought parts, not from request.thinking:
-    # a model may emit thoughts even when thinking was not explicitly requested.
-    google_src = (
-        Path(__file__).parent.parent / "unified_ai_client" / "providers" / "google.py"
-    ).read_text(encoding="utf-8")
-    assert "reasoning_is_summary=bool(reasoning_text)" in google_src
-
-    # Raw-trace providers must not set the flag at all.
-    for name in ("ollama", "anthropic", "openai_compat", "script"):
-        src = (
-            Path(__file__).parent.parent / "unified_ai_client" / "providers" / f"{name}.py"
-        ).read_text(encoding="utf-8")
-        assert "reasoning_is_summary" not in src, (
-            f"{name} returns a raw trace and must leave reasoning_is_summary at its default"
+        If the model responds but produces no thinking output (empty
+        reasoning_text and zero reasoning_tokens) the test is skipped: the model
+        does not support the 'think' parameter.
+        """
+        model = self._require_model()
+        from unified_ai_client import call_ai
+        try:
+            response = call_ai(
+                provider="ollama",
+                model=model,
+                prompt="What is 2+2? Think step by step.",
+                thinking=True,
+                temperature=0.0,
+                timeout=300,
+            )
+        except Exception as exc:
+            if "400" in str(exc):
+                self.skipTest(f"Model '{model}' rejected thinking request (400)")
+            raise
+        if not response.reasoning_text and response.reasoning_tokens == 0:
+            self.skipTest(
+                f"Model '{model}' produced no thinking output, 'think' not supported"
+            )
+        self.assertIsInstance(response.text, str)
+        self.assertGreater(len(response.text), 0)
+        self.assertIs(
+            response.reasoning_is_summary,
+            False,
+            "Ollama returns the raw thinking transcript, not a provider-written summary",
+        )
+        self.assertGreater(
+            response.reasoning_tokens,
+            0,
+            f"reasoning_tokens must be > 0 when thinking text is present, "
+            f"got {response.reasoning_tokens}",
         )
 
+    def test_ollama_live_reasoning_tokens_thinking_false(self) -> None:
+        """With thinking=False, reasoning_tokens must be a non-negative integer.
 
-def test_config_dynamic_extra_options() -> None:
-    """Verify that load_config places unrecognized configuration keys into extra_options."""
-    from unified_ai_client.config import load_config
-    from unified_ai_client.models import ProviderConfig
+        Some models produce a small thinking trace even when not asked to. The
+        result must never be negative and must never raise.
+        """
+        model = self._require_model()
+        from unified_ai_client import call_ai
+        try:
+            response = call_ai(
+                provider="ollama",
+                model=model,
+                prompt="What is 2+2?",
+                thinking=False,
+                temperature=0.0,
+                timeout=60,
+            )
+        except Exception as exc:
+            if "400" in str(exc):
+                self.skipTest(f"Model '{model}' rejected request (400)")
+            raise
+        self.assertIsInstance(response.text, str)
+        self.assertGreaterEqual(
+            response.reasoning_tokens,
+            0,
+            f"reasoning_tokens must be >= 0, got {response.reasoning_tokens}",
+        )
 
-    # Write a temporary config JSON
-    tmp_config_fd, tmp_config_path = tempfile.mkstemp(suffix=".json")
-    try:
-        config_data = {
-            "google": {
-                "url": "http://google-api-mock",
-                "timeout": 45,
-                "sleep_time": 5,
-                "disable_safety": True,
-                "upload_poll_timeout": 20,
-                "custom_app_setting": "hello_world"
-            }
+    def test_ollama_live_tool_calling(self) -> None:
+        """Live Ollama test: gemma4:12b tool calling with get_weather (two-turn).
+
+        The second call must pass the full conversation history including the
+        assistant's intermediate tool_calls turn so the model can link the tool
+        result back to its own request.
+        """
+        from unified_ai_client import call_ai, ToolDefinition, ToolResult
+
+        tools = [
+            ToolDefinition(
+                name="get_weather",
+                description="Returns the current weather for a given city.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city name, e.g. Rome",
+                        },
+                    },
+                    "required": ["location"],
+                },
+            ),
+        ]
+
+        prompt = "What is the weather in Rome right now? Use the get_weather tool."
+
+        try:
+            response = call_ai(
+                provider="ollama",
+                model="gemma4:12b",
+                prompt=prompt,
+                tools=tools,
+                temperature=0.0,
+                timeout=300,
+            )
+        except Exception as exc:
+            self.skipTest(f"Ollama unavailable: {exc}")
+
+        if not response.tool_calls:
+            self.skipTest("gemma4:12b did not produce a tool call, model may not support it")
+
+        tc = response.tool_calls[0]
+        self.assertEqual(tc.name, "get_weather")
+        self.assertIn("location", tc.arguments)
+
+        weather_result = (
+            f"The weather in {tc.arguments['location']} is 22 degrees Celsius and sunny."
+        )
+
+        # Build the conversation history for the second turn:
+        # [user turn 1] -> [assistant turn with tool_calls] -> [tool result]
+        # The assistant message must be in Ollama's format so the model knows
+        # which tool result corresponds to which call.
+        assistant_tool_message = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    },
+                },
+            ],
         }
-        with os.fdopen(tmp_config_fd, "w", encoding="utf-8") as f:
-            json.dump(config_data, f)
 
-        cfg = load_config(tmp_config_path, ProviderConfig, section="google")
-        assert cfg.url == "http://google-api-mock"
-        assert cfg.timeout == 45
-        assert cfg.sleep_time == 5
-        assert isinstance(cfg.extra_options, dict)
-        assert cfg.extra_options.get("disable_safety") is True
-        assert cfg.extra_options.get("upload_poll_timeout") == 20
-        assert cfg.extra_options.get("custom_app_setting") == "hello_world"
-    finally:
-        os.unlink(tmp_config_path)
+        try:
+            final = call_ai(
+                provider="ollama",
+                model="gemma4:12b",
+                prompt=prompt,  # stored in history but not re-appended (tool_results present)
+                messages=[
+                    {"role": "user", "content": prompt},
+                    assistant_tool_message,
+                ],
+                tools=tools,
+                tool_results=[
+                    ToolResult(call_id=tc.id, name=tc.name, content=weather_result),
+                ],
+                temperature=0.0,
+                timeout=300,
+            )
+        except Exception as exc:
+            self.skipTest(f"Ollama second call failed: {exc}")
+
+        self.assertIsInstance(final.text, str)
+        self.assertGreater(len(final.text), 0, "Final response must contain text")
 
 
-def test_script_provider_forwards_new_params() -> None:
-    """Verify that ScriptProvider forwards top_k, top_p, max_tokens, and extra_options in the payload."""
-    script_content = """\
+# ---------------------------------------------------------------------------
+# 7. Script provider
+# ---------------------------------------------------------------------------
+
+class TestScriptProvider(unittest.TestCase):
+    """The subprocess provider and its stdin/stdout JSON protocol."""
+
+    def test_script_generate(self) -> None:
+        script = _make_script(_ECHO_SCRIPT)
+        try:
+            from unified_ai_client import call_ai
+            response = call_ai(
+                provider="script",
+                model=script,
+                prompt="Hello",
+                timeout=15,
+            )
+            self.assertIn("Echo: Hello", response.text)
+            self.assertIn("(files=0)", response.text)
+            self.assertEqual(response.input_tokens, 1)
+            self.assertEqual(response.output_tokens, 2)
+        finally:
+            os.unlink(script)
+
+    def test_script_generate_with_file(self) -> None:
+        script = _make_script(_ECHO_SCRIPT)
+        tmp = _make_text_file("attached content")
+        try:
+            from unified_ai_client import call_ai
+            response = call_ai(
+                provider="script",
+                model=script,
+                prompt="Summarize",
+                file_path=tmp,
+                timeout=15,
+            )
+            self.assertIn("(files=1)", response.text)
+        finally:
+            os.unlink(script)
+            os.unlink(tmp)
+
+    def test_script_generate_with_reasoning(self) -> None:
+        script = _make_script(_ECHO_SCRIPT)
+        try:
+            from unified_ai_client import call_ai
+            response = call_ai(
+                provider="script",
+                model=script,
+                prompt="Think",
+                thinking=True,
+                timeout=15,
+            )
+            self.assertEqual(response.reasoning_text, "I thought about it.")
+            self.assertEqual(response.reasoning_tokens, 10)
+            self.assertIs(response.reasoning_is_summary, False)
+        finally:
+            os.unlink(script)
+
+    def test_script_embed(self) -> None:
+        script = _make_script(_ECHO_SCRIPT)
+        try:
+            from unified_ai_client import get_embedding
+            vec = get_embedding(provider="script", model=script, text="hello")
+            self.assertEqual(vec, [0.1, 0.2, 0.3])
+        finally:
+            os.unlink(script)
+
+    def test_script_nonzero_exit(self) -> None:
+        """A script that exits non-zero must raise RuntimeError, not crash silently."""
+        failing_script = _make_script(
+            "import sys; print('error details', file=sys.stderr); sys.exit(1)\n"
+        )
+        try:
+            from unified_ai_client import call_ai
+            with self.assertRaises(RuntimeError) as ctx:
+                call_ai(
+                    provider="script",
+                    model=failing_script,
+                    prompt="test",
+                    max_retries=1,
+                    timeout=10,
+                )
+            self.assertIn("error details", str(ctx.exception))
+        finally:
+            os.unlink(failing_script)
+
+    def test_script_provider_forwards_new_params(self) -> None:
+        """ScriptProvider must forward top_k, top_p, max_tokens and extra_options."""
+        script_content = """\
 from __future__ import annotations
 import json, sys
 
@@ -843,674 +800,401 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 """
-    script_path = _make_script(script_content)
-    try:
-        from unified_ai_client import call_ai
-        response = call_ai(
-            provider="script",
-            model=script_path,
-            prompt="test",
-            top_k=42,
-            top_p=0.8,
-            max_tokens=150,
-            extra_options={"some_custom_option": "xyz"},
-            timeout=10,
-        )
-        assert "top_k=42" in response.text
-        assert "top_p=0.8" in response.text
-        assert "max_tokens=150" in response.text
-        assert "some_custom_option" in response.text
-    finally:
-        os.unlink(script_path)
-
-
-def test_ollama_provider_options_mapping() -> None:
-    """Verify that OllamaProvider correctly maps config and call parameters."""
-    from unified_ai_client.providers.ollama import OllamaProvider
-    from unified_ai_client.models import ProviderConfig, AiRequest
-
-    # Set up config with extra options
-    config = ProviderConfig(
-        url="http://mock-ollama:11434",
-        extra_options={"context_size": 2048, "keep_alive": "30m", "my_custom_option": 123}
-    )
-    provider = OllamaProvider(config=config)
-
-    # Mock call to _post to intercept the payload
-    intercepted_payload = None
-    def mock_post(endpoint, payload, timeout):
-        nonlocal intercepted_payload
-        intercepted_payload = payload
-        return {
-            "message": {"content": "response", "thinking": ""},
-            "eval_count": 10,
-            "prompt_eval_count": 5
-        }
-    provider._post = mock_post
-
-    request = AiRequest(
-        provider="ollama",
-        model="mock-model",
-        prompt="hello",
-        top_k=50,
-        top_p=0.9,
-        max_tokens=100,
-        extra_options={"my_custom_option": 456, "visual_token_budget": 70}
-    )
-
-    provider.call(request)
-
-    assert intercepted_payload is not None
-    assert intercepted_payload["keep_alive"] == "30m"
-    options = intercepted_payload["options"]
-    assert options["top_k"] == 50
-    assert options["top_p"] == 0.9
-    assert options["num_ctx"] == 2048
-    assert options["num_predict"] == 100
-    assert options["my_custom_option"] == 456
-    assert options["visual_token_budget"] == 70
+        script_path = _make_script(script_content)
+        try:
+            from unified_ai_client import call_ai
+            response = call_ai(
+                provider="script",
+                model=script_path,
+                prompt="test",
+                top_k=42,
+                top_p=0.8,
+                max_tokens=150,
+                extra_options={"some_custom_option": "xyz"},
+                timeout=10,
+            )
+            self.assertIn("top_k=42", response.text)
+            self.assertIn("top_p=0.8", response.text)
+            self.assertIn("max_tokens=150", response.text)
+            self.assertIn("some_custom_option", response.text)
+        finally:
+            os.unlink(script_path)
 
 
 # ---------------------------------------------------------------------------
-# 7. Google (skip if no API key)
+# 8. Ollama provider — offline unit tests
 # ---------------------------------------------------------------------------
 
-def test_google_live_generate() -> None:
-    from unified_ai_client.config import load_secrets
-    secrets = load_secrets(os.getcwd())
-    if not secrets.get("google_api_key"):
-        raise SkipTest("google_api_key not found in secrets.json or environment variables")
-    from unified_ai_client import call_ai
-    response = call_ai(
-        provider="google",
-        model="gemini-2.5-flash",
-        prompt="Reply with exactly the word PONG and nothing else.",
-        temperature=0.0,
-        timeout=30,
-    )
-    assert isinstance(response.text, str)
-    assert len(response.text) > 0
+class TestOllamaOffline(unittest.TestCase):
+    """Payload construction and response parsing, with _post intercepted."""
 
+    def test_ollama_provider_options_mapping(self) -> None:
+        """Config and call parameters must map onto Ollama's options dict."""
+        from unified_ai_client.providers.ollama import OllamaProvider
+        from unified_ai_client.models import ProviderConfig, AiRequest
 
-def test_google_live_with_text_file() -> None:
-    from unified_ai_client.config import load_secrets
-    secrets = load_secrets(os.getcwd())
-    if not secrets.get("google_api_key"):
-        raise SkipTest("google_api_key not found in secrets.json or environment variables")
-    tmp = _make_text_file("The sky is blue.")
-    try:
-        from unified_ai_client import call_ai
-        response = call_ai(
-            provider="google",
-            model="gemini-2.5-flash",
-            prompt="What colour is mentioned in the attached file? Reply in one word.",
-            file_path=tmp,
-            temperature=0.0,
-            timeout=30,
+        config = ProviderConfig(
+            url="http://mock-ollama:11434",
+            extra_options={
+                "context_size": 2048,
+                "keep_alive": "30m",
+                "my_custom_option": 123,
+            },
         )
-        assert isinstance(response.text, str)
-        assert len(response.text) > 0
-    finally:
-        os.unlink(tmp)
+        provider = OllamaProvider(config=config)
 
+        captured_payload: dict = {}
 
-def test_google_live_thinking() -> None:
-    from unified_ai_client.config import load_secrets
-    secrets = load_secrets(os.getcwd())
-    if not secrets.get("google_api_key"):
-        raise SkipTest("google_api_key not found in secrets.json or environment variables")
-    from unified_ai_client import call_ai
-    response = call_ai(
-        provider="google",
-        model="gemini-2.5-flash",
-        prompt="What is 2+2? Think step by step.",
-        thinking=True,
-        temperature=0.0,
-        timeout=60,
-    )
-    assert isinstance(response.text, str)
-    assert isinstance(response.reasoning_text, str)
+        def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+            captured_payload.update(payload)
+            return {
+                "message": {"content": "response", "thinking": ""},
+                "eval_count": 10,
+                "prompt_eval_count": 5,
+            }
 
+        request = AiRequest(
+            provider="ollama",
+            model="mock-model",
+            prompt="hello",
+            top_k=50,
+            top_p=0.9,
+            max_tokens=100,
+            extra_options={"my_custom_option": 456, "visual_token_budget": 70},
+        )
 
-def test_google_live_thinking_default() -> None:
-    from unified_ai_client.config import load_secrets
-    secrets = load_secrets(os.getcwd())
-    if not secrets.get("google_api_key"):
-        raise SkipTest("google_api_key not found in secrets.json or environment variables")
-    from unified_ai_client import call_ai
-    response = call_ai(
-        provider="google",
-        model="gemini-2.5-flash",
-        prompt="What is 2+2? Think step by step.",
-        thinking="default",
-        temperature=0.0,
-        timeout=60,
-    )
-    assert isinstance(response.text, str)
-    assert isinstance(response.reasoning_text, str)
+        with patch.object(provider, "_post", side_effect=fake_post):
+            provider.call(request)
 
+        self.assertEqual(captured_payload["keep_alive"], "30m")
+        options = captured_payload["options"]
+        self.assertEqual(options["top_k"], 50)
+        self.assertEqual(options["top_p"], 0.9)
+        self.assertEqual(options["num_ctx"], 2048)
+        self.assertEqual(options["num_predict"], 100)
+        self.assertEqual(options["my_custom_option"], 456)
+        self.assertEqual(options["visual_token_budget"], 70)
 
-def test_google_live_tool_calling() -> None:
-    """Live Google test: gemini-2.5-flash tool calling with get_weather (two-turn).
+    def test_ollama_tool_payload(self) -> None:
+        """Ollama provider must build tools in OpenAI-compatible format."""
+        from unified_ai_client.providers.ollama import OllamaProvider
+        from unified_ai_client.models import AiRequest, ProviderConfig, ToolDefinition
 
-    The second call passes the full conversation history including the
-    assistant's intermediate tool_calls turn so the provider converts it to
-    function_call Parts and Google can link the result back.
-    """
-    from unified_ai_client.config import load_secrets
-    secrets = load_secrets(os.getcwd())
-    if not secrets.get("google_api_key"):
-        raise SkipTest("google_api_key not found in secrets.json or environment variables")
+        provider = OllamaProvider(ProviderConfig(url="http://localhost:11434"))
 
-    from unified_ai_client import call_ai, ToolDefinition, ToolResult
-
-    tools = [
-        ToolDefinition(
+        tool = ToolDefinition(
             name="get_weather",
-            description="Returns the current weather for a given city.",
+            description="Returns weather.",
             parameters={
                 "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "The city name, e.g. Rome",
-                    },
-                },
+                "properties": {"location": {"type": "string"}},
                 "required": ["location"],
             },
-        ),
-    ]
+        )
+        request = AiRequest(
+            provider="ollama", model="gemma4:12b", prompt="Weather in Rome?",
+            tools=[tool],
+        )
 
-    prompt = "What is the weather in Rome right now? Use the get_weather tool."
+        captured_payload: dict = {}
 
-    response = call_ai(
-        provider="google",
-        model="gemini-2.5-flash",
-        prompt=prompt,
-        tools=tools,
-        temperature=0.0,
-        timeout=60,
-    )
+        def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+            captured_payload.update(payload)
+            return {
+                "message": {"content": "", "tool_calls": []},
+                "eval_count": 0,
+                "prompt_eval_count": 0,
+            }
 
-    if not response.tool_calls:
-        raise SkipTest("gemini-2.5-flash did not produce a tool call")
+        with patch.object(provider, "_post", side_effect=fake_post):
+            provider.call(request)
 
-    tc = response.tool_calls[0]
-    assert tc.name == "get_weather", f"Expected get_weather, got {tc.name!r}"
-    assert "location" in tc.arguments, f"Expected 'location' in arguments, got {tc.arguments}"
+        self.assertIn("tools", captured_payload)
+        self.assertEqual(captured_payload["tools"][0]["type"], "function")
+        self.assertEqual(
+            captured_payload["tools"][0]["function"]["name"], "get_weather"
+        )
 
-    weather_result = f"The weather in {tc.arguments['location']} is 22 degrees Celsius and sunny."
+    def test_ollama_parse_tool_calls(self) -> None:
+        """Ollama provider must parse message.tool_calls."""
+        from unified_ai_client.providers.ollama import OllamaProvider
+        from unified_ai_client.models import AiRequest, ProviderConfig
 
-    assistant_tool_message = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-            {
-                "function": {
-                    "name": tc.name,
-                    "arguments": tc.arguments,
-                },
-            },
-        ],
-    }
+        provider = OllamaProvider(ProviderConfig(url="http://localhost:11434"))
+        request = AiRequest(provider="ollama", model="gemma4:12b", prompt="Weather?")
 
-    final = call_ai(
-        provider="google",
-        model="gemini-2.5-flash",
-        prompt=prompt,
-        messages=[
-            {"role": "user", "content": prompt},
-            assistant_tool_message,
-        ],
-        tools=tools,
-        tool_results=[
-            ToolResult(call_id=tc.id, name=tc.name, content=weather_result),
-        ],
-        temperature=0.0,
-        timeout=60,
-    )
-
-    assert isinstance(final.text, str) and len(final.text) > 0, "Final response must contain text"
-
-
-# ---------------------------------------------------------------------------
-# 8. Anthropic (skip if no API key)
-# ---------------------------------------------------------------------------
-
-def test_anthropic_live_generate() -> None:
-    from unified_ai_client.config import load_secrets
-    secrets = load_secrets(os.getcwd())
-    if not secrets.get("anthropic_api_key"):
-        raise SkipTest("anthropic_api_key not found in secrets.json or environment variables")
-    from unified_ai_client import call_ai
-    response = call_ai(
-        provider="anthropic",
-        model="claude-3-5-haiku-latest",
-        prompt="Reply with exactly the word PONG and nothing else.",
-        temperature=0.0,
-        timeout=30,
-    )
-    assert isinstance(response.text, str)
-
-
-# ---------------------------------------------------------------------------
-# 9. OpenAI (skip if no API key)
-# ---------------------------------------------------------------------------
-
-def test_openai_live_generate() -> None:
-    from unified_ai_client.config import load_secrets
-    secrets = load_secrets(os.getcwd())
-    if not secrets.get("openai_api_key"):
-        raise SkipTest("openai_api_key not found in secrets.json or environment variables")
-    from unified_ai_client import call_ai
-    response = call_ai(
-        provider="openai",
-        model="gpt-4o-mini",
-        prompt="Reply with exactly the word PONG and nothing else.",
-        temperature=0.0,
-        timeout=30,
-    )
-    assert isinstance(response.text, str)
-
-
-# ---------------------------------------------------------------------------
-# 11. Tool Calling Unit Tests
-# ---------------------------------------------------------------------------
-
-def test_import_tool_types() -> None:
-    from unified_ai_client import ToolDefinition, ToolCall, ToolResult
-    assert ToolDefinition and ToolCall and ToolResult
-
-
-def test_tool_definition_construction() -> None:
-    from unified_ai_client import ToolDefinition
-    td = ToolDefinition(
-        name="get_weather",
-        description="Get current weather.",
-        parameters={
-            "type": "object",
-            "properties": {"location": {"type": "string"}},
-            "required": ["location"],
-        },
-    )
-    assert td.name == "get_weather"
-    assert td.parameters["type"] == "object"
-
-
-def test_tool_call_construction() -> None:
-    from unified_ai_client import ToolCall
-    tc = ToolCall(id="call_abc", name="get_weather", arguments={"location": "Rome"})
-    assert tc.id == "call_abc"
-    assert tc.arguments["location"] == "Rome"
-
-
-def test_tool_result_construction() -> None:
-    from unified_ai_client import ToolResult
-    tr = ToolResult(call_id="call_abc", name="get_weather", content="22C, sunny")
-    assert tr.call_id == "call_abc"
-    assert tr.name == "get_weather"
-    assert tr.content == "22C, sunny"
-
-
-def test_airesponse_tool_calls_default() -> None:
-    from unified_ai_client import AiResponse
-    r = AiResponse(text="hello")
-    assert r.tool_calls == []
-
-
-def test_airequest_tools_fields() -> None:
-    from unified_ai_client.models import AiRequest, ToolDefinition, ToolResult
-    td = ToolDefinition(name="f", description="d", parameters={"type": "object", "properties": {}})
-    tr = ToolResult(call_id="c1", name="f", content="result")
-    r = AiRequest(
-        provider="ollama", model="m", prompt="p",
-        tools=[td], tool_results=[tr],
-    )
-    assert r.tools is not None and len(r.tools) == 1
-    assert r.tool_results is not None and len(r.tool_results) == 1
-
-
-def test_openai_compat_tool_payload() -> None:
-    """OpenAI-compat provider must build the correct tools payload."""
-    from unittest.mock import patch
-    from unified_ai_client.providers.openai_compat import OpenAiCompatProvider
-    from unified_ai_client.models import AiRequest, ProviderConfig, ToolDefinition
-
-    config = ProviderConfig(url="http://localhost:8080")
-    provider = OpenAiCompatProvider(config)
-
-    tool = ToolDefinition(
-        name="get_weather",
-        description="Returns current weather.",
-        parameters={"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
-    )
-    request = AiRequest(
-        provider="openai", model="gpt-4o-mini", prompt="Weather in Rome?",
-        tools=[tool],
-    )
-
-    captured_payload: dict = {}
-
-    def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
-        captured_payload.update(payload)
-        return {
-            "choices": [{"message": {"content": "Sunny.", "tool_calls": None}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-        }
-
-    with patch.object(provider, "_post", side_effect=fake_post):
-        resp = provider.call(request)
-
-    assert "tools" in captured_payload
-    assert captured_payload["tools"][0]["type"] == "function"
-    assert captured_payload["tools"][0]["function"]["name"] == "get_weather"
-    assert resp.tool_calls == []
-    assert resp.text == "Sunny."
-
-
-def test_openai_compat_parse_tool_calls() -> None:
-    """OpenAI-compat provider must parse tool calls from the response."""
-    import json
-    from unittest.mock import patch
-    from unified_ai_client.providers.openai_compat import OpenAiCompatProvider
-    from unified_ai_client.models import AiRequest, ProviderConfig, ToolDefinition
-
-    config = ProviderConfig(url="http://localhost:8080")
-    provider = OpenAiCompatProvider(config)
-
-    tool = ToolDefinition(
-        name="get_weather",
-        description="Returns current weather.",
-        parameters={"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
-    )
-    request = AiRequest(
-        provider="openai", model="gpt-4o-mini", prompt="Weather in Rome?",
-        tools=[tool],
-    )
-
-    def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
-        return {
-            "choices": [{
+        def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+            return {
                 "message": {
-                    "content": None,
+                    "content": "",
                     "tool_calls": [
                         {
-                            "id": "call_xyz",
                             "function": {
                                 "name": "get_weather",
-                                "arguments": json.dumps({"location": "Rome"}),
+                                "arguments": {"location": "Rome"},
                             },
                         },
                     ],
                 },
-            }],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-        }
+                "eval_count": 0,
+                "prompt_eval_count": 0,
+            }
 
-    with patch.object(provider, "_post", side_effect=fake_post):
-        resp = provider.call(request)
+        with patch.object(provider, "_post", side_effect=fake_post):
+            resp = provider.call(request)
 
-    assert len(resp.tool_calls) == 1
-    tc = resp.tool_calls[0]
-    assert tc.id == "call_xyz"
-    assert tc.name == "get_weather"
-    assert tc.arguments == {"location": "Rome"}
-    assert resp.text == ""
+        self.assertEqual(len(resp.tool_calls), 1)
+        self.assertEqual(resp.tool_calls[0].name, "get_weather")
+        self.assertEqual(resp.tool_calls[0].arguments, {"location": "Rome"})
 
 
-def test_openai_compat_tool_results_in_messages() -> None:
-    """Tool results must be serialized as role:tool messages."""
-    from unittest.mock import patch
-    from unified_ai_client.providers.openai_compat import OpenAiCompatProvider
-    from unified_ai_client.models import AiRequest, ProviderConfig, ToolResult
+# ---------------------------------------------------------------------------
+# 9. Google provider — offline unit tests
+# ---------------------------------------------------------------------------
 
-    config = ProviderConfig(url="http://localhost:8080")
-    provider = OpenAiCompatProvider(config)
+class TestGoogleOffline(unittest.TestCase):
+    """Thinking configuration built per model family, without network access."""
 
-    request = AiRequest(
-        provider="openai", model="gpt-4o-mini", prompt="What now?",
-        tool_results=[
-            ToolResult(call_id="call_xyz", name="get_weather", content="22C, sunny"),
-        ],
-    )
+    def test_google_thinking_config_offline(self) -> None:
+        """Thinking must be minimised when False and raised when True.
 
-    captured_messages: list = []
+        Gemini 3.x uses thinking_level, Gemini 2.5 uses thinking_budget, and
+        every other model falls back to a small budget.
+        """
+        from unified_ai_client.providers.google import GoogleProvider
+        from unified_ai_client.models import ProviderConfig
 
-    def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
-        captured_messages.extend(payload["messages"])
-        return {
-            "choices": [{"message": {"content": "Great weather!", "tool_calls": None}}],
-            "usage": {"prompt_tokens": 20, "completion_tokens": 5},
-        }
+        provider = GoogleProvider(
+            config=ProviderConfig(sleep_time=0), api_key="dummy_key"
+        )
 
-    with patch.object(provider, "_post", side_effect=fake_post):
-        provider.call(request)
+        # 1. thinking=False (explicitly disabled/minimized)
+        cfg_g3_off = provider._build_thinking_config(
+            thinking=False, model_name="gemini-3.5-flash"
+        )
+        self.assertIsNotNone(cfg_g3_off)
+        self.assertEqual(cfg_g3_off.thinking_level, "MINIMAL")
+        self.assertIs(cfg_g3_off.include_thoughts, True)
 
-    tool_msgs = [m for m in captured_messages if m.get("role") == "tool"]
-    assert len(tool_msgs) == 1
-    assert tool_msgs[0]["tool_call_id"] == "call_xyz"
-    assert tool_msgs[0]["content"] == "22C, sunny"
+        cfg_g25_off = provider._build_thinking_config(
+            thinking=False, model_name="gemini-2.5-pro"
+        )
+        self.assertIsNotNone(cfg_g25_off)
+        self.assertEqual(cfg_g25_off.thinking_budget, 0)
+        self.assertIs(cfg_g25_off.include_thoughts, True)
 
+        cfg_other_off = provider._build_thinking_config(
+            thinking=False, model_name="gemini-1.5-pro"
+        )
+        self.assertIsNotNone(cfg_other_off)
+        self.assertEqual(cfg_other_off.thinking_budget, 0)
+        self.assertIs(cfg_other_off.include_thoughts, True)
 
-def test_anthropic_tool_payload() -> None:
-    """Anthropic provider must build tools in input_schema format."""
-    from unittest.mock import patch
-    from unified_ai_client.providers.anthropic import AnthropicProvider
-    from unified_ai_client.models import AiRequest, ProviderConfig, ToolDefinition
+        # 2. thinking=True (enabled)
+        cfg_g3_on = provider._build_thinking_config(
+            thinking=True, model_name="gemini-3.5-flash"
+        )
+        self.assertIsNotNone(cfg_g3_on)
+        self.assertEqual(cfg_g3_on.thinking_level, "HIGH")
+        self.assertIs(cfg_g3_on.include_thoughts, True)
 
-    config = ProviderConfig(url="https://api.anthropic.com")
-    provider = AnthropicProvider(config, api_key="fake-key")
+        cfg_g25_on = provider._build_thinking_config(
+            thinking=True, model_name="gemini-2.5-pro"
+        )
+        self.assertIsNotNone(cfg_g25_on)
+        self.assertEqual(cfg_g25_on.thinking_budget, 24576)
+        self.assertIs(cfg_g25_on.include_thoughts, True)
 
-    tool = ToolDefinition(
-        name="get_weather",
-        description="Returns weather.",
-        parameters={"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
-    )
-    request = AiRequest(
-        provider="anthropic", model="claude-opus-4-5", prompt="Weather in Rome?",
-        tools=[tool],
-    )
+        cfg_other_on = provider._build_thinking_config(
+            thinking=True, model_name="gemini-1.5-pro"
+        )
+        self.assertIsNotNone(cfg_other_on)
+        self.assertEqual(cfg_other_on.thinking_budget, 1024)
+        self.assertIs(cfg_other_on.include_thoughts, True)
 
-    captured_payload: dict = {}
-
-    def fake_post(payload: dict, timeout: int) -> dict:
-        captured_payload.update(payload)
-        return {
-            "content": [{"type": "text", "text": "Sunny."}],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        }
-
-    with patch.object(provider, "_post", side_effect=fake_post):
-        provider.call(request)
-
-    assert "tools" in captured_payload
-    assert captured_payload["tools"][0]["name"] == "get_weather"
-    assert "input_schema" in captured_payload["tools"][0]
-    assert "parameters" not in captured_payload["tools"][0]
-
-
-def test_anthropic_parse_tool_calls() -> None:
-    """Anthropic provider must parse tool_use content blocks."""
-    from unittest.mock import patch
-    from unified_ai_client.providers.anthropic import AnthropicProvider
-    from unified_ai_client.models import AiRequest, ProviderConfig
-
-    config = ProviderConfig(url="https://api.anthropic.com")
-    provider = AnthropicProvider(config, api_key="fake-key")
-
-    request = AiRequest(
-        provider="anthropic", model="claude-opus-4-5", prompt="Weather?",
-    )
-
-    def fake_post(payload: dict, timeout: int) -> dict:
-        return {
-            "content": [
-                {
-                    "type": "tool_use",
-                    "id": "toolu_01",
-                    "name": "get_weather",
-                    "input": {"location": "Rome"},
-                },
-            ],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        }
-
-    with patch.object(provider, "_post", side_effect=fake_post):
-        resp = provider.call(request)
-
-    assert len(resp.tool_calls) == 1
-    assert resp.tool_calls[0].id == "toolu_01"
-    assert resp.tool_calls[0].name == "get_weather"
-    assert resp.tool_calls[0].arguments == {"location": "Rome"}
+        # 3. thinking="default" (provider defaults, but capture thoughts)
+        cfg_default = provider._build_thinking_config(
+            thinking="default", model_name="gemini-2.5-pro"
+        )
+        self.assertIsNotNone(cfg_default)
+        self.assertIs(cfg_default.include_thoughts, True)
+        self.assertIsNone(getattr(cfg_default, "thinking_budget", None))
+        self.assertIsNone(getattr(cfg_default, "thinking_level", None))
 
 
-def test_ollama_tool_payload() -> None:
-    """Ollama provider must build tools in OpenAI-compatible format."""
-    from unittest.mock import patch
-    from unified_ai_client.providers.ollama import OllamaProvider
-    from unified_ai_client.models import AiRequest, ProviderConfig, ToolDefinition
+class TestReasoningContract(unittest.TestCase):
+    """The reasoning_is_summary flag must stay conservative across providers."""
 
-    config = ProviderConfig(url="http://localhost:11434")
-    provider = OllamaProvider(config)
+    def test_reasoning_is_summary_offline(self) -> None:
+        """Only Google may report a summarised trace.
 
-    tool = ToolDefinition(
-        name="get_weather",
-        description="Returns weather.",
-        parameters={"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
-    )
-    request = AiRequest(
-        provider="ollama", model="gemma4:12b", prompt="Weather in Rome?",
-        tools=[tool],
-    )
+        The flag tells consumers whether reasoning_text is the model's raw chain
+        of thought or a summary the provider wrote about it. Consumers that
+        measure trace length or composition cannot compare the two, so the
+        default must be conservative (False = raw).
+        """
+        from unified_ai_client.models import AiResponse
 
-    captured_payload: dict = {}
+        # Default is raw: a provider that never sets the flag reports a raw trace.
+        self.assertIs(AiResponse(text="x").reasoning_is_summary, False)
+        self.assertIs(
+            AiResponse(text="x", reasoning_text="raw trace").reasoning_is_summary,
+            False,
+        )
 
-    def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
-        captured_payload.update(payload)
-        return {
-            "message": {"content": "", "tool_calls": []},
-            "eval_count": 0,
-            "prompt_eval_count": 0,
-        }
+        # Google sets it from the presence of thought parts, not from
+        # request.thinking: a model may emit thoughts even when thinking was
+        # not explicitly requested.
+        providers_dir = _PROJECT_ROOT / "unified_ai_client" / "providers"
+        google_src = (providers_dir / "google.py").read_text(encoding="utf-8")
+        self.assertIn("reasoning_is_summary=bool(reasoning_text)", google_src)
 
-    with patch.object(provider, "_post", side_effect=fake_post):
-        provider.call(request)
+        # Raw-trace providers must not set the flag at all.
+        for name in ("ollama", "anthropic", "openai_compat", "script"):
+            src = (providers_dir / f"{name}.py").read_text(encoding="utf-8")
+            self.assertNotIn(
+                "reasoning_is_summary",
+                src,
+                f"{name} returns a raw trace and must leave "
+                f"reasoning_is_summary at its default",
+            )
 
-    assert "tools" in captured_payload
-    assert captured_payload["tools"][0]["type"] == "function"
-    assert captured_payload["tools"][0]["function"]["name"] == "get_weather"
 
+# ---------------------------------------------------------------------------
+# 10. Google (skip if no API key)
+# ---------------------------------------------------------------------------
 
-def test_ollama_parse_tool_calls() -> None:
-    """Ollama provider must parse message.tool_calls."""
-    from unittest.mock import patch
-    from unified_ai_client.providers.ollama import OllamaProvider
-    from unified_ai_client.models import AiRequest, ProviderConfig
+class TestGoogleLive(unittest.TestCase):
+    """End-to-end calls against the Google AI API."""
 
-    config = ProviderConfig(url="http://localhost:11434")
-    provider = OllamaProvider(config)
+    def setUp(self) -> None:
+        super().setUp()
+        from unified_ai_client.config import load_secrets
+        if not load_secrets(os.getcwd()).get("google_api_key"):
+            self.skipTest(
+                "google_api_key not found in secrets.json or environment variables"
+            )
 
-    request = AiRequest(
-        provider="ollama", model="gemma4:12b", prompt="Weather?",
-    )
+    def test_google_live_generate(self) -> None:
+        from unified_ai_client import call_ai
+        response = call_ai(
+            provider="google",
+            model="gemini-2.5-flash",
+            prompt="Reply with exactly the word PONG and nothing else.",
+            temperature=0.0,
+            timeout=30,
+        )
+        self.assertIsInstance(response.text, str)
+        self.assertGreater(len(response.text), 0)
 
-    def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
-        return {
-            "message": {
-                "content": "",
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": {"location": "Rome"},
+    def test_google_live_with_text_file(self) -> None:
+        tmp = _make_text_file("The sky is blue.")
+        try:
+            from unified_ai_client import call_ai
+            response = call_ai(
+                provider="google",
+                model="gemini-2.5-flash",
+                prompt="What colour is mentioned in the attached file? Reply in one word.",
+                file_path=tmp,
+                temperature=0.0,
+                timeout=30,
+            )
+            self.assertIsInstance(response.text, str)
+            self.assertGreater(len(response.text), 0)
+        finally:
+            os.unlink(tmp)
+
+    def test_google_live_thinking(self) -> None:
+        from unified_ai_client import call_ai
+        response = call_ai(
+            provider="google",
+            model="gemini-2.5-flash",
+            prompt="What is 2+2? Think step by step.",
+            thinking=True,
+            temperature=0.0,
+            timeout=60,
+        )
+        self.assertIsInstance(response.text, str)
+        self.assertIsInstance(response.reasoning_text, str)
+
+    def test_google_live_thinking_default(self) -> None:
+        from unified_ai_client import call_ai
+        response = call_ai(
+            provider="google",
+            model="gemini-2.5-flash",
+            prompt="What is 2+2? Think step by step.",
+            thinking="default",
+            temperature=0.0,
+            timeout=60,
+        )
+        self.assertIsInstance(response.text, str)
+        self.assertIsInstance(response.reasoning_text, str)
+
+    def test_google_live_tool_calling(self) -> None:
+        """Live Google test: gemini-2.5-flash tool calling (two-turn).
+
+        The second call passes the full conversation history including the
+        assistant's intermediate tool_calls turn so the provider converts it to
+        function_call Parts and Google can link the result back.
+        """
+        from unified_ai_client import call_ai, ToolDefinition, ToolResult
+
+        tools = [
+            ToolDefinition(
+                name="get_weather",
+                description="Returns the current weather for a given city.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city name, e.g. Rome",
                         },
                     },
-                ],
-            },
-            "eval_count": 0,
-            "prompt_eval_count": 0,
-        }
-
-    with patch.object(provider, "_post", side_effect=fake_post):
-        resp = provider.call(request)
-
-    assert len(resp.tool_calls) == 1
-    assert resp.tool_calls[0].name == "get_weather"
-    assert resp.tool_calls[0].arguments == {"location": "Rome"}
-
-
-def test_ollama_live_tool_calling() -> None:
-    """Live Ollama test: gemma4:12b tool calling with get_weather (two-turn).
-
-    The second call must pass the full conversation history including the
-    assistant's intermediate tool_calls turn so the model can link the tool
-    result back to its own request.
-    """
-    from unified_ai_client import call_ai, ToolDefinition, ToolResult
-    from unittest import SkipTest
-
-    tools = [
-        ToolDefinition(
-            name="get_weather",
-            description="Returns the current weather for a given city.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "The city name, e.g. Rome",
-                    },
+                    "required": ["location"],
                 },
-                "required": ["location"],
-            },
-        ),
-    ]
+            ),
+        ]
 
-    prompt = "What is the weather in Rome right now? Use the get_weather tool."
+        prompt = "What is the weather in Rome right now? Use the get_weather tool."
 
-    try:
         response = call_ai(
-            provider="ollama",
-            model="gemma4:12b",
+            provider="google",
+            model="gemini-2.5-flash",
             prompt=prompt,
             tools=tools,
             temperature=0.0,
-            timeout=300,
+            timeout=60,
         )
-    except Exception as exc:
-        raise SkipTest(f"Ollama unavailable: {exc}") from exc
 
-    if not response.tool_calls:
-        raise SkipTest("gemma4:12b did not produce a tool call — model may not support it")
+        if not response.tool_calls:
+            self.skipTest("gemini-2.5-flash did not produce a tool call")
 
-    tc = response.tool_calls[0]
-    assert tc.name == "get_weather", f"Expected get_weather, got {tc.name!r}"
-    assert "location" in tc.arguments, f"Expected 'location' in arguments, got {tc.arguments}"
+        tc = response.tool_calls[0]
+        self.assertEqual(tc.name, "get_weather")
+        self.assertIn("location", tc.arguments)
 
-    weather_result = f"The weather in {tc.arguments['location']} is 22 degrees Celsius and sunny."
+        weather_result = (
+            f"The weather in {tc.arguments['location']} is 22 degrees Celsius and sunny."
+        )
 
-    # Build the conversation history for the second turn:
-    # [user turn 1] → [assistant turn with tool_calls] → [tool result]
-    # The assistant message must be in Ollama's format so the model knows
-    # which tool result corresponds to which call.
-    assistant_tool_message = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-            {
-                "function": {
-                    "name": tc.name,
-                    "arguments": tc.arguments,
+        assistant_tool_message = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    },
                 },
-            },
-        ],
-    }
+            ],
+        }
 
-    try:
         final = call_ai(
-            provider="ollama",
-            model="gemma4:12b",
-            prompt=prompt,  # stored in history but not re-appended (tool_results present)
+            provider="google",
+            model="gemini-2.5-flash",
+            prompt=prompt,
             messages=[
                 {"role": "user", "content": prompt},
                 assistant_tool_message,
@@ -1520,118 +1204,321 @@ def test_ollama_live_tool_calling() -> None:
                 ToolResult(call_id=tc.id, name=tc.name, content=weather_result),
             ],
             temperature=0.0,
-            timeout=300,
+            timeout=60,
         )
-    except Exception as exc:
-        raise SkipTest(f"Ollama second call failed: {exc}") from exc
 
-    assert isinstance(final.text, str) and len(final.text) > 0, "Final response must contain text"
+        self.assertIsInstance(final.text, str)
+        self.assertGreater(len(final.text), 0, "Final response must contain text")
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# 11. Anthropic
 # ---------------------------------------------------------------------------
 
-_TESTS = [
-    # Imports
-    ("import/models", test_import_models),
-    ("import/file_utils", test_import_file_utils),
-    ("import/client", test_import_client),
-    ("import/all_providers", test_import_providers),
-    # Model construction
-    ("model/airequest_construction", test_airequest_construction),
-    ("model/airesponse_defaults", test_airesponse_defaults),
-    # File utils
-    ("file_utils/classify_file", test_classify_file),
-    ("file_utils/normalize_file_paths", test_normalize_file_paths),
-    ("file_utils/inline_text_attachments_single", test_inline_text_attachments),
-    ("file_utils/inline_text_attachments_multiple", test_inline_text_attachments_multiple),
-    ("file_utils/audio_format_name", test_audio_format_name),
-    # Config loading (os.environ + secrets.json)
-    ("config/load_secrets_from_env_var", test_load_secrets_from_env_var),
-    ("config/load_secrets_env_wins_over_json", test_load_secrets_env_wins_over_json),
-    ("config/load_secrets_no_sources", test_load_secrets_no_sources),
-    # Dispatch
-    ("dispatch/ollama", test_dispatch_ollama),
-    ("dispatch/google", test_dispatch_google),
-    ("dispatch/anthropic", test_dispatch_anthropic),
-    ("dispatch/openai", test_dispatch_openai),
-    ("dispatch/mistral", test_dispatch_mistral),
-    ("dispatch/cohere", test_dispatch_cohere),
-    ("dispatch/meta", test_dispatch_meta),
-    ("dispatch/groq", test_dispatch_groq),
-    ("dispatch/xai", test_dispatch_xai),
-    ("dispatch/lmstudio", test_dispatch_lmstudio),
-    ("dispatch/llamacpp", test_dispatch_llamacpp),
-    ("dispatch/script", test_dispatch_script),
-    ("dispatch/invalid_raises", test_dispatch_invalid),
-    # Script provider
-    ("script/generate", test_script_generate),
-    ("script/generate_with_file", test_script_generate_with_file),
-    ("script/generate_with_reasoning", test_script_generate_with_reasoning),
-    ("script/embed", test_script_embed),
-    ("script/nonzero_exit_raises", test_script_nonzero_exit),
-    # Google offline
-    ("google/thinking_config_offline", test_google_thinking_config_offline),
-    ("providers/reasoning_is_summary_offline", test_reasoning_is_summary_offline),
-    ("config/dynamic_extra_options", test_config_dynamic_extra_options),
-    ("script/forwards_new_params", test_script_provider_forwards_new_params),
-    ("ollama/options_mapping", test_ollama_provider_options_mapping),
-    # Ollama live
-    ("ollama_live/generate", test_ollama_live_generate),
-    ("ollama_live/with_text_file", test_ollama_live_with_text_file),
-    ("ollama_live/thinking", test_ollama_live_thinking),
-    ("ollama_live/reasoning_tokens_thinking_true", test_ollama_live_reasoning_tokens_thinking_true),
-    ("ollama_live/reasoning_tokens_thinking_false", test_ollama_live_reasoning_tokens_thinking_false),
-    ("ollama_live/embedding", test_ollama_live_embedding),
-    # Tool calling
-    ("tool_calling/import_types", test_import_tool_types),
-    ("tool_calling/tool_definition", test_tool_definition_construction),
-    ("tool_calling/tool_call", test_tool_call_construction),
-    ("tool_calling/tool_result", test_tool_result_construction),
-    ("tool_calling/airesponse_default", test_airesponse_tool_calls_default),
-    ("tool_calling/airequest_fields", test_airequest_tools_fields),
-    ("tool_calling/openai_compat_payload", test_openai_compat_tool_payload),
-    ("tool_calling/openai_compat_parse", test_openai_compat_parse_tool_calls),
-    ("tool_calling/openai_compat_results", test_openai_compat_tool_results_in_messages),
-    ("tool_calling/anthropic_payload", test_anthropic_tool_payload),
-    ("tool_calling/anthropic_parse", test_anthropic_parse_tool_calls),
-    ("tool_calling/ollama_payload", test_ollama_tool_payload),
-    ("tool_calling/ollama_parse", test_ollama_parse_tool_calls),
-    ("tool_calling/ollama_live", test_ollama_live_tool_calling),
-    # Cloud live (skip if no key)
-    ("google_live/generate", test_google_live_generate),
-    ("google_live/with_text_file", test_google_live_with_text_file),
-    ("google_live/thinking", test_google_live_thinking),
-    ("google_live/thinking_default", test_google_live_thinking_default),
-    ("anthropic_live/generate", test_anthropic_live_generate),
-    ("openai_live/generate", test_openai_live_generate),
-]
+class TestAnthropicOffline(unittest.TestCase):
+    """Anthropic payload construction and response parsing."""
+
+    def _provider(self):
+        from unified_ai_client.providers.anthropic import AnthropicProvider
+        from unified_ai_client.models import ProviderConfig
+        return AnthropicProvider(
+            ProviderConfig(url="https://api.anthropic.com"), api_key="fake-key"
+        )
+
+    def test_anthropic_tool_payload(self) -> None:
+        """Anthropic provider must build tools in input_schema format."""
+        from unified_ai_client.models import AiRequest, ToolDefinition
+
+        provider = self._provider()
+        tool = ToolDefinition(
+            name="get_weather",
+            description="Returns weather.",
+            parameters={
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"],
+            },
+        )
+        request = AiRequest(
+            provider="anthropic", model="claude-opus-4-5", prompt="Weather in Rome?",
+            tools=[tool],
+        )
+
+        captured_payload: dict = {}
+
+        def fake_post(payload: dict, timeout: int) -> dict:
+            captured_payload.update(payload)
+            return {
+                "content": [{"type": "text", "text": "Sunny."}],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+
+        with patch.object(provider, "_post", side_effect=fake_post):
+            provider.call(request)
+
+        self.assertIn("tools", captured_payload)
+        self.assertEqual(captured_payload["tools"][0]["name"], "get_weather")
+        self.assertIn("input_schema", captured_payload["tools"][0])
+        self.assertNotIn("parameters", captured_payload["tools"][0])
+
+    def test_anthropic_parse_tool_calls(self) -> None:
+        """Anthropic provider must parse tool_use content blocks."""
+        from unified_ai_client.models import AiRequest
+
+        provider = self._provider()
+        request = AiRequest(
+            provider="anthropic", model="claude-opus-4-5", prompt="Weather?"
+        )
+
+        def fake_post(payload: dict, timeout: int) -> dict:
+            return {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_01",
+                        "name": "get_weather",
+                        "input": {"location": "Rome"},
+                    },
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+
+        with patch.object(provider, "_post", side_effect=fake_post):
+            resp = provider.call(request)
+
+        self.assertEqual(len(resp.tool_calls), 1)
+        self.assertEqual(resp.tool_calls[0].id, "toolu_01")
+        self.assertEqual(resp.tool_calls[0].name, "get_weather")
+        self.assertEqual(resp.tool_calls[0].arguments, {"location": "Rome"})
 
 
-def main() -> None:
-    """Run all tests and print a summary."""
-    print(f"\nUnifiedAiClient — provider smoke tests ({len(_TESTS)} tests)\n")
-    print(f"{'Test':<52} {'Status':<6}  Detail")
-    print("-" * 80)
+class TestAnthropicLive(unittest.TestCase):
+    """End-to-end call against the Anthropic API."""
 
-    for name, fn in _TESTS:
-        _run(name, fn)
+    def test_anthropic_live_generate(self) -> None:
+        from unified_ai_client.config import load_secrets
+        if not load_secrets(os.getcwd()).get("anthropic_api_key"):
+            self.skipTest(
+                "anthropic_api_key not found in secrets.json or environment variables"
+            )
+        from unified_ai_client import call_ai
+        response = call_ai(
+            provider="anthropic",
+            model="claude-3-5-haiku-latest",
+            prompt="Reply with exactly the word PONG and nothing else.",
+            temperature=0.0,
+            timeout=30,
+        )
+        self.assertIsInstance(response.text, str)
 
-    for name, status, detail in _results:
-        icon = {"PASS": "[PASS]", "SKIP": "[SKIP]", "FAIL": "[FAIL]"}.get(status, "?")
-        suffix = f"  {detail}" if detail else ""
-        print(f"{icon} {name:<50} {status}{suffix}")
 
-    print("-" * 80)
-    passed = sum(1 for _, s, _ in _results if s == "PASS")
-    skipped = sum(1 for _, s, _ in _results if s == "SKIP")
-    failed = sum(1 for _, s, _ in _results if s == "FAIL")
-    print(f"\n  PASS {passed}  SKIP {skipped}  FAIL {failed}\n")
+# ---------------------------------------------------------------------------
+# 12. OpenAI-compatible providers
+# ---------------------------------------------------------------------------
 
-    if failed > 0:
-        sys.exit(1)
+class TestOpenAiCompatOffline(unittest.TestCase):
+    """Payload construction and response parsing for the shared base class."""
+
+    def _provider(self):
+        from unified_ai_client.providers.openai_compat import OpenAiCompatProvider
+        from unified_ai_client.models import ProviderConfig
+        return OpenAiCompatProvider(ProviderConfig(url="http://localhost:8080"))
+
+    def test_openai_compat_tool_payload(self) -> None:
+        """OpenAI-compat provider must build the correct tools payload."""
+        from unified_ai_client.models import AiRequest, ToolDefinition
+
+        provider = self._provider()
+        tool = ToolDefinition(
+            name="get_weather",
+            description="Returns current weather.",
+            parameters={
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"],
+            },
+        )
+        request = AiRequest(
+            provider="openai", model="gpt-4o-mini", prompt="Weather in Rome?",
+            tools=[tool],
+        )
+
+        captured_payload: dict = {}
+
+        def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+            captured_payload.update(payload)
+            return {
+                "choices": [{"message": {"content": "Sunny.", "tool_calls": None}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+
+        with patch.object(provider, "_post", side_effect=fake_post):
+            resp = provider.call(request)
+
+        self.assertIn("tools", captured_payload)
+        self.assertEqual(captured_payload["tools"][0]["type"], "function")
+        self.assertEqual(
+            captured_payload["tools"][0]["function"]["name"], "get_weather"
+        )
+        self.assertEqual(resp.tool_calls, [])
+        self.assertEqual(resp.text, "Sunny.")
+
+    def test_openai_compat_parse_tool_calls(self) -> None:
+        """OpenAI-compat provider must parse tool calls from the response."""
+        from unified_ai_client.models import AiRequest, ToolDefinition
+
+        provider = self._provider()
+        tool = ToolDefinition(
+            name="get_weather",
+            description="Returns current weather.",
+            parameters={
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"],
+            },
+        )
+        request = AiRequest(
+            provider="openai", model="gpt-4o-mini", prompt="Weather in Rome?",
+            tools=[tool],
+        )
+
+        def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+            return {
+                "choices": [{
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_xyz",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": json.dumps({"location": "Rome"}),
+                                },
+                            },
+                        ],
+                    },
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+
+        with patch.object(provider, "_post", side_effect=fake_post):
+            resp = provider.call(request)
+
+        self.assertEqual(len(resp.tool_calls), 1)
+        tc = resp.tool_calls[0]
+        self.assertEqual(tc.id, "call_xyz")
+        self.assertEqual(tc.name, "get_weather")
+        self.assertEqual(tc.arguments, {"location": "Rome"})
+        self.assertEqual(resp.text, "")
+
+    def test_openai_compat_tool_results_in_messages(self) -> None:
+        """Tool results must be serialized as role:tool messages."""
+        from unified_ai_client.models import AiRequest, ToolResult
+
+        provider = self._provider()
+        request = AiRequest(
+            provider="openai", model="gpt-4o-mini", prompt="What now?",
+            tool_results=[
+                ToolResult(call_id="call_xyz", name="get_weather", content="22C, sunny"),
+            ],
+        )
+
+        captured_messages: list = []
+
+        def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+            captured_messages.extend(payload["messages"])
+            return {
+                "choices": [{"message": {"content": "Great weather!", "tool_calls": None}}],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 5},
+            }
+
+        with patch.object(provider, "_post", side_effect=fake_post):
+            provider.call(request)
+
+        tool_msgs = [m for m in captured_messages if m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 1)
+        self.assertEqual(tool_msgs[0]["tool_call_id"], "call_xyz")
+        self.assertEqual(tool_msgs[0]["content"], "22C, sunny")
+
+
+class TestOpenAiLive(unittest.TestCase):
+    """End-to-end call against the OpenAI API."""
+
+    def test_openai_live_generate(self) -> None:
+        from unified_ai_client.config import load_secrets
+        if not load_secrets(os.getcwd()).get("openai_api_key"):
+            self.skipTest(
+                "openai_api_key not found in secrets.json or environment variables"
+            )
+        from unified_ai_client import call_ai
+        response = call_ai(
+            provider="openai",
+            model="gpt-4o-mini",
+            prompt="Reply with exactly the word PONG and nothing else.",
+            temperature=0.0,
+            timeout=30,
+        )
+        self.assertIsInstance(response.text, str)
+
+
+# ---------------------------------------------------------------------------
+# 13. Tool calling data types
+# ---------------------------------------------------------------------------
+
+class TestToolTypes(unittest.TestCase):
+    """The public tool-calling dataclasses and their defaults."""
+
+    def test_import_tool_types(self) -> None:
+        from unified_ai_client import ToolDefinition, ToolCall, ToolResult
+        self.assertTrue(ToolDefinition and ToolCall and ToolResult)
+
+    def test_tool_definition_construction(self) -> None:
+        from unified_ai_client import ToolDefinition
+        td = ToolDefinition(
+            name="get_weather",
+            description="Get current weather.",
+            parameters={
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"],
+            },
+        )
+        self.assertEqual(td.name, "get_weather")
+        self.assertEqual(td.parameters["type"], "object")
+
+    def test_tool_call_construction(self) -> None:
+        from unified_ai_client import ToolCall
+        tc = ToolCall(id="call_abc", name="get_weather", arguments={"location": "Rome"})
+        self.assertEqual(tc.id, "call_abc")
+        self.assertEqual(tc.arguments["location"], "Rome")
+
+    def test_tool_result_construction(self) -> None:
+        from unified_ai_client import ToolResult
+        tr = ToolResult(call_id="call_abc", name="get_weather", content="22C, sunny")
+        self.assertEqual(tr.call_id, "call_abc")
+        self.assertEqual(tr.name, "get_weather")
+        self.assertEqual(tr.content, "22C, sunny")
+
+    def test_airesponse_tool_calls_default(self) -> None:
+        from unified_ai_client import AiResponse
+        self.assertEqual(AiResponse(text="hello").tool_calls, [])
+
+    def test_airequest_tools_fields(self) -> None:
+        from unified_ai_client.models import AiRequest, ToolDefinition, ToolResult
+        td = ToolDefinition(
+            name="f", description="d",
+            parameters={"type": "object", "properties": {}},
+        )
+        tr = ToolResult(call_id="c1", name="f", content="result")
+        r = AiRequest(
+            provider="ollama", model="m", prompt="p",
+            tools=[td], tool_results=[tr],
+        )
+        self.assertIsNotNone(r.tools)
+        self.assertEqual(len(r.tools), 1)
+        self.assertIsNotNone(r.tool_results)
+        self.assertEqual(len(r.tool_results), 1)
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main()

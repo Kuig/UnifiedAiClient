@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import logging
 import os
 import threading
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any
 
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolDefinition, ToolResult
 from unified_ai_client.providers.base import BaseProvider
+
+_log = logging.getLogger("unified_ai_client.client")
 
 # --- Thread-safe programmatic provider configuration registry ---
 # Populated via configure_provider(). Takes priority over file-based config.
@@ -392,6 +395,68 @@ def preload_model(
     # get_provider after configure_provider so it picks up the new config
     prov = get_provider(provider)
     prov.preload_model(model, keep_alive, context_size=context_size, extra_options=extra_options)
+
+
+def warm_up(
+    provider: str,
+    model: str,
+    file_paths: str | list[str] | None = None,
+) -> bool:
+    """Pay a provider's one-off costs before the first real call.
+
+    Without this, the setup costs a provider charges once per process (SDK
+    import, client construction, DNS + TCP + TLS handshake, model load, remote
+    file upload) all land on whichever ``call_ai()`` happens to run first. That
+    request then looks slow purely because it went first, which matters when
+    the timings are being measured and compared.
+
+    What each provider actually does:
+
+    +-------------------------+------------------------------------------------+
+    | ``google``              | Builds the client, issues a free metadata GET, |
+    |                         | and uploads ``file_paths`` into the same cache |
+    |                         | ``call_ai()`` reads and ``cleanup()`` clears.  |
+    | ``ollama``              | Loads the model via Ollama's own warm-up call. |
+    | ``lmstudio``,           | Sends a one-token completion, because these    |
+    | ``llamacpp``            | servers load the model on first inference.     |
+    | ``openai``, ``mistral``,| Free ``GET /v1/models``: opens the connection  |
+    | ``cohere``, ``meta``,   | and validates the key without consuming        |
+    | ``groq``, ``xai``,      | tokens.                                        |
+    | ``anthropic``           |                                                |
+    | ``script``              | Sends ``mode: "warm_up"``; scripts that do not |
+    |                         | implement it simply report nothing to do.      |
+    +-------------------------+------------------------------------------------+
+
+    No provider consumes generation tokens here. The one caveat is
+    ``lmstudio`` / ``llamacpp``, where the warm-up is a real (if tiny)
+    inference request: free against a local server, billable if those providers
+    have been pointed at a paid remote endpoint.
+
+    This function never raises. A failed warm-up is a missed optimisation, not
+    an error: the ``call_ai()`` that follows has its own retries and will
+    report the real failure. Call ``get_provider(...).warm_up(...)`` directly
+    if you want the exception instead.
+
+    Args:
+        provider: Provider name (e.g. ``'google'``, ``'ollama'``).
+        model: Model identifier to warm up.
+        file_paths: Optional path or list of paths to pre-upload. Only used by
+            providers that keep a remote file store (currently ``google``) and
+            by scripts that choose to act on it.
+
+    Returns:
+        True if something was actually warmed up, False if this provider had
+        nothing to do or the warm-up failed.
+    """
+    # Registered here too: a process that only ever calls warm_up() would
+    # otherwise leave files uploaded to Google behind on exit.
+    _register_cleanup()
+
+    try:
+        return get_provider(provider).warm_up(model, file_paths)
+    except Exception as exc:
+        _log.warning("Warm-up failed for provider '%s' (%s): %s", provider, model, exc)
+        return False
 
 
 def get_embedding(

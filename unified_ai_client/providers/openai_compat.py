@@ -78,50 +78,70 @@ class OpenAiCompatProvider(BaseProvider):
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    def _build_file_content_blocks(self, file_paths: list[str]) -> list[dict[str, Any]]:
-        """Build content blocks for a list of file paths.
-
-        Default: images → image_url base64 block; everything else → inlined
-        as text and returned as a single text block. Subclasses (OpenAiProvider)
-        override this to add native audio and PDF content blocks.
+    def _get(self, endpoint: str, timeout: int) -> dict[str, Any]:
+        """HTTP GET against the OpenAI-compatible endpoint via urllib.
 
         Args:
-            file_paths: List of file paths to process.
+            endpoint: API path (e.g. '/v1/models').
+            timeout: Seconds to wait.
 
         Returns:
-            List of content block dicts in OpenAI format. Empty list if no
-            files are provided.
+            Parsed JSON response dict.
+
+        Raises:
+            urllib.error.HTTPError: On HTTP error responses.
+            urllib.error.URLError: On connection errors.
+            json.JSONDecodeError: On unparseable response.
         """
-        if not file_paths:
-            return []
+        url = f"{self.config.url.rstrip('/')}{endpoint}"
+        headers: dict[str, str] = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
 
-        image_blocks: list[dict[str, Any]] = []
-        text_files: list[str] = []
+    def _warm_up_completion(self, model: str) -> None:
+        """Send a one-token completion to force a lazy server to load the model.
 
-        for fp in file_paths:
-            ft = classify_file(fp)
-            if ft == "image":
-                mime = get_mime_type(fp)
-                b64 = encode_file_base64(fp)
-                _log.info(
-                    "File '%s' encoded as base64 image_url block",
-                    os.path.basename(fp),
-                )
-                image_blocks.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{b64}"},
-                })
-            else:
-                _log.info(
-                    "File '%s' (%s) will be inlined as text",
-                    os.path.basename(fp),
-                    classify_file(fp),
-                )
-                text_files.append(fp)
+        Only meaningful for local servers that defer the model load until the
+        first inference. Do not call this against a paid remote endpoint: the
+        request is small but it is still billable inference.
 
-        # Text files become one aggregated text block; images become image_url blocks
-        # Return image blocks only (caller prepends the text prompt separately)
-        return image_blocks  # text_files handled by _build_user_content
+        Args:
+            model: Model identifier to load.
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": "."}],
+            "max_tokens": 1,
+            "temperature": 0.0,
+            "stream": False,
+        }
+        self._post("/v1/chat/completions", payload, self.config.timeout)
+
+    def warm_up(
+        self,
+        model: str,
+        file_paths: str | list[str] | None = None,
+    ) -> bool:
+        """Open the connection with a free metadata request.
+
+        ``GET /v1/models`` costs nothing and consumes no tokens, so it is safe
+        on paid endpoints. It pays the DNS + TCP + TLS handshake and validates
+        the API key. It does not load the model: subclasses backed by a local
+        server that loads lazily override this with a minimal completion.
+
+        Args:
+            model: Unused. Listing models warms the channel regardless.
+            file_paths: Ignored. These providers inline attachments into the
+                request and keep no remote file store.
+
+        Returns:
+            Always True: the connection is always worth opening early.
+        """
+        self._get("/v1/models", self.config.timeout)
+        return True
 
     def _build_user_content(
         self, prompt: str, file_paths: list[str]
