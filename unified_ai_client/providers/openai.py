@@ -30,6 +30,10 @@ class OpenAiProvider(OpenAiCompatProvider):
 
     DEFAULT_URL: str = "https://api.openai.com"
 
+    REQUIRES_API_KEY: bool = True
+    SECRETS_KEY: str = "openai_api_key"
+    REASONING_PARAM: str | None = "reasoning_effort"
+
     def _build_user_content(
         self, prompt: str, file_paths: list[str]
     ) -> str | list[dict[str, Any]]:

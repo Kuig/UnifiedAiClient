@@ -11,3 +11,6 @@ class MetaProvider(OpenAiCompatProvider):
     """
 
     DEFAULT_URL: str = "https://api.llama-api.com"
+
+    REQUIRES_API_KEY: bool = True
+    SECRETS_KEY: str = "meta_api_key"

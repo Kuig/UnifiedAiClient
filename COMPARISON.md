@@ -17,7 +17,7 @@ for the same use case: calling LLM providers through a unified interface.
 | **Multimodal — PDF** | ✅ Google, OpenAI, Anthropic | ✅ | ❌ | ✅ |
 | **Text embeddings** | ✅ `get_embedding()` | ✅ | ❌ | ✅ |
 | **Tool / function calling** | ✅ all providers | ✅ | ✅ | ✅ |
-| **Thinking / reasoning** | ✅ Google, Anthropic, Ollama | ✅ (transparent) | ❌ explicit | ❌ explicit |
+| **Thinking / reasoning** | ✅ Google, Anthropic, Ollama, OpenAI, Mistral, Groq, xAI | ✅ (transparent) | ❌ explicit | ❌ explicit |
 | **Ollama VRAM-aware preloading** | ✅ `preload_model()` | ❌ | ❌ | — |
 | **Provider warm-up (zero-token)** | ✅ `warm_up()`, all providers | ❌ | ❌ | ❌ |
 | **Normalised response object** | ✅ `text`, `input_tokens`, `output_tokens`, `reasoning_tokens`, `reasoning_text`, `tool_calls` | ✅ `ModelResponse` | ❌ (provider-native) | ❌ (provider-native) |

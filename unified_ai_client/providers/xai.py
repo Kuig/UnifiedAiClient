@@ -11,3 +11,7 @@ class XAiProvider(OpenAiCompatProvider):
     """
 
     DEFAULT_URL: str = "https://api.x.ai"
+
+    REQUIRES_API_KEY: bool = True
+    SECRETS_KEY: str = "xai_api_key"
+    REASONING_PARAM: str | None = "reasoning_effort"

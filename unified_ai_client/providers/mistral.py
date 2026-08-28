@@ -11,3 +11,7 @@ class MistralProvider(OpenAiCompatProvider):
     """
 
     DEFAULT_URL: str = "https://api.mistral.ai"
+
+    REQUIRES_API_KEY: bool = True
+    SECRETS_KEY: str = "mistral_api_key"
+    REASONING_PARAM: str | None = "reasoning_effort"

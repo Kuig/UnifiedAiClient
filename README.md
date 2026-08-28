@@ -92,6 +92,17 @@ export GOOGLE_API_KEY=your-google-api-key-here
 
 > **Add `secrets.json` to each consuming project's `.gitignore`** to avoid leaking credentials.
 
+A cloud provider called without its key raises `ValueError` naming the key it wants, rather
+than sending an unauthenticated request. The one exception is when you set an explicit `url`
+via `configure_provider()`: that means you have pointed the adapter somewhere other than the
+vendor's own endpoint, so no credential is required. This is what makes it possible to drive
+a local OpenAI-compatible server through the `openai` adapter:
+
+```python
+configure_provider("openai", url="http://localhost:11434")   # Ollama's /v1 endpoint
+call_ai(provider="openai", model="gemma4:12b", prompt="...")  # no OpenAI key needed
+```
+
 ### Provider settings — `configure_provider()`
 
 Controls server URLs, timeouts, rate-limit delays, and provider-specific options such
@@ -194,7 +205,7 @@ Supported file types per provider:
 | Provider | Images | Audio | Text files | PDFs |
 |---|---|---|---|---|
 | `google` | ✅ Upload | ✅ Upload | ✅ Upload | ✅ Upload |
-| `ollama` | ✅ base64 | ✅ base64 (multimodal models) | ✅ Inlined | ❌ Not supported |
+| `ollama` | ✅ base64 | ✅ base64 (multimodal models) | ✅ Inlined | ⚠️ Inlined as text, with a warning |
 | `openai` | ✅ base64 | ✅ base64 | ✅ Inlined | ✅ base64 |
 | `anthropic` | ✅ base64 | ❌ Not supported | ✅ Inlined | ✅ base64 |
 | `mistral` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
@@ -218,10 +229,47 @@ print(response.text)          # Final answer
 print(response.reasoning_text)  # Thinking process
 ```
 
+`thinking` takes three values: `True`, `False`, and `"default"` (the default), which
+leaves the decision to the provider. Here is what each provider actually does with them:
+
+| Provider | `True` | `False` | `"default"` |
+|---|---|---|---|
+| `google` | `thinking_level` on Gemini 3.x, `thinking_budget` on 2.5 | minimised explicitly | provider default, thoughts still captured |
+| `ollama` | sends `think: true` | sends `think: false` | field omitted |
+| `anthropic` | `{"type": "adaptive"}` on Claude 4.6 and later, `{"type": "enabled", "budget_tokens": N}` below | `{"type": "disabled"}` on 4.6 and later; below that the field is omitted, which is already the off state | field omitted |
+| `openai`, `mistral`, `groq`, `xai` | `reasoning_effort: "high"` | `reasoning_effort: "none"` | field omitted |
+| `cohere`, `meta`, `lmstudio`, `llamacpp` | no reasoning control in the API; the value is ignored | ignored | ignored |
+
+> [!IMPORTANT]
+> On `openai`, `mistral`, `groq` and `xai`, `reasoning_effort` is only sent when you pass
+> `True` or `False` explicitly. This matters because a **non-reasoning model rejects the
+> parameter outright**: asking `gpt-4o` to think returns an error rather than silently
+> doing nothing. Leaving `thinking` at `"default"` never sends the field, so ordinary
+> models keep working untouched.
+
 > [!NOTE]
-> * **Supported Providers**: `google` (Gemini 2.5/3.x), `ollama` (via `think` option), and `anthropic` (adaptive thinking) support explicit control over the `thinking` parameter (`True` or `False`).
-> * **OpenAI-Compatible Providers**: `openai`, `mistral`, `cohere`, `meta`, `groq`, `xai`, `lmstudio`, and `llamacpp` do not support explicit API control over thinking. For these providers, the parameter always behaves as `"default"` (leaving control to the model/server).
-> * **Reasoning Extraction**: Regardless of the `thinking` parameter value, `reasoning_text` will always be populated if the model returns a reasoning trace (e.g. `reasoning_content` for OpenAI or `thinking` blocks parsed by Ollama/Anthropic/Google).
+> **Why the parameter is this coarse.** `thinking` is deliberately a quick, universal
+> lever: three values that mean the same thing everywhere, so you can switch provider
+> without rewriting the call. That universality is exactly why it cannot express what
+> each provider offers on its own, such as Anthropic's `output_config.effort`, the
+> intermediate `reasoning_effort` levels, Groq's `reasoning_format`, or an exact
+> `thinking_budget` on Google. Those go through `extra_options`, which is merged into the
+> payload last and therefore always overrides the mapping above:
+>
+> ```python
+> call_ai(provider="openai", model="o3", prompt="...", thinking=True,
+>         extra_options={"reasoning_effort": "medium"})   # wins over "high"
+> ```
+>
+> It is the same split described in [Design Concepts](#design-concepts-caching-and-lifecycle):
+> the unified surface covers what every provider shares, `extra_options` covers the rest.
+
+> [!NOTE]
+> **Reasoning extraction** is independent of all this. `reasoning_text` is populated
+> whenever the model returns a trace, whatever `thinking` was set to (`reasoning_content`
+> for the OpenAI-compatible providers, `thinking` blocks for Ollama, Anthropic and
+> Google). Check `reasoning_is_summary` before comparing traces across providers: Google
+> returns a summary of its reasoning, the others return the raw text.
 
 ### Model Pre-loading (Ollama only)
 
@@ -285,7 +333,20 @@ first: where there is nothing to warm up, it is a free no-op.
 
 ### Text Embeddings
 
-Generate text embedding vectors using supported providers (`openai`, `ollama`, `mistral`, `cohere`, `xai`, `lmstudio`, `llamacpp`).
+Generate text embedding vectors. Every provider implements this except `anthropic`,
+which offers no embeddings API of its own and points at a third-party service:
+
+| Provider | Endpoint used |
+|---|---|
+| `google` | `embed_content` via the SDK (`task_type` and `output_dimensionality` through `configure_provider()`) |
+| `ollama` | `/api/embed` |
+| `openai`, `mistral`, `cohere`, `meta`, `groq`, `xai`, `lmstudio`, `llamacpp` | `/v1/embeddings` |
+| `script` | `mode: "embed"` in the [script protocol](LLM_Behaviour_Interface.md) |
+| `anthropic` | not available, raises `NotImplementedError` |
+
+Implementing the call is not the same as the endpoint being served: whether a given
+cloud provider exposes embeddings, and for which models, is up to that provider. Use a
+model documented as an embedding model for the provider you picked.
 
 Example using local Ollama model:
 
@@ -486,7 +547,7 @@ def call_ai(
 ```
 
 * **Parameters:**
-  * `provider` (`str`): The name of the AI provider (`"ollama"`, `"google"`, `"openai"`, `"anthropic"`, `"lmstudio"`, `"llamacpp"`, `"script"`).
+  * `provider` (`str`): The name of the AI provider (`"google"`, `"anthropic"`, `"openai"`, `"mistral"`, `"cohere"`, `"meta"`, `"groq"`, `"xai"`, `"ollama"`, `"lmstudio"`, `"llamacpp"`, `"script"`).
   * `model` (`str`): The target model identifier (or script path for `"script"` provider).
   * `prompt` (`str`): The user prompt.
   * `system_prompt` (`str | None`, optional): System instructions. Defaults to `None`.

@@ -151,14 +151,17 @@ def get_provider(provider_name: str) -> BaseProvider:
         secrets = load_secrets(os.getcwd())
 
         # 3. Extract API credentials from secrets
-        api_key_google = secrets.get("google_api_key")
-        api_key_anthropic = secrets.get("anthropic_api_key")
-        api_key_openai = secrets.get("openai_api_key")
-        api_key_mistral = secrets.get("mistral_api_key")
-        api_key_cohere = secrets.get("cohere_api_key")
-        api_key_meta = secrets.get("meta_api_key")
-        api_key_groq = secrets.get("groq_api_key")
-        api_key_xai = secrets.get("xai_api_key")
+        # `or ""` keeps a missing key from arriving as None where the
+        # provider signatures declare a str: an unset header value makes
+        # urllib fail with a type error instead of a missing-key message.
+        api_key_google = secrets.get("google_api_key") or ""
+        api_key_anthropic = secrets.get("anthropic_api_key") or ""
+        api_key_openai = secrets.get("openai_api_key") or ""
+        api_key_mistral = secrets.get("mistral_api_key") or ""
+        api_key_cohere = secrets.get("cohere_api_key") or ""
+        api_key_meta = secrets.get("meta_api_key") or ""
+        api_key_groq = secrets.get("groq_api_key") or ""
+        api_key_xai = secrets.get("xai_api_key") or ""
 
         # 4. Instantiate provider adapter
         if provider_name == "ollama":

@@ -153,13 +153,17 @@ class ProviderConfig:
     Unrecognized keys from config.json are collected into extra_options.
 
     Attributes:
-        url: Base URL for the provider's API endpoint.
+        url: Base URL for the provider's API endpoint. ``None`` means "use the
+            provider's own ``DEFAULT_URL``", which is how each provider finds
+            its standard endpoint without this dataclass having to know them.
+            An explicit value is always honoured as given, including one that
+            happens to match another provider's default.
         timeout: Maximum seconds to wait for a response.
         sleep_time: Seconds to sleep before each API call. Used for cloud
             provider rate limiting. Defaults to 0 (no sleep).
         extra_options: Dictionary of provider-specific configuration options.
     """
-    url: str = "http://localhost:11434"
+    url: str | None = None
     timeout: int = 300
     sleep_time: int = 0
     extra_options: dict = field(default_factory=dict)

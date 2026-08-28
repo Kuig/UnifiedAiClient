@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -34,12 +35,21 @@ class AnthropicProvider(BaseProvider):
     - Audio: not natively supported; fallback to text inline with warning.
     - Text files: inlined via inline_text_attachments().
 
-    Thinking: enabled via 'thinking: {type: "adaptive"}' in the request
-    payload. Reasoning text is extracted from 'type: "thinking"' content
-    blocks in the response.
+    Thinking: the request shape depends on the model generation, see
+    _build_thinking_payload(). Reasoning text is extracted from
+    'type: "thinking"' content blocks in the response.
     """
 
     DEFAULT_URL: str = "https://api.anthropic.com"
+
+    REQUIRES_API_KEY: bool = True
+    SECRETS_KEY: str = "anthropic_api_key"
+
+    # Claude 4.6 is where adaptive thinking was introduced. Below it only the
+    # fixed-budget form is accepted; from 4.7 on only the adaptive one is.
+    _ADAPTIVE_SINCE: tuple[int, int] = (4, 6)
+    # Anthropic's documented floor for budget_tokens.
+    _MIN_THINKING_BUDGET: int = 1024
 
     def __init__(self, config: ProviderConfig, api_key: str = "") -> None:
         """Initialize the Anthropic provider.
@@ -49,9 +59,103 @@ class AnthropicProvider(BaseProvider):
             api_key: Anthropic API key from secrets.json as 'anthropic_api_key'.
         """
         self.config = config
-        self.api_key = api_key
-        if self.config.url == "http://localhost:11434":
-            self.config.url = self.DEFAULT_URL
+        self.api_key = api_key or ""
+        self.base_url = (config.url or self.DEFAULT_URL).rstrip("/")
+
+    def _require_api_key(self) -> None:
+        """Fail early and clearly when the API key is missing.
+
+        Only enforced when talking to Anthropic's own endpoint. A caller who
+        set an explicit url has pointed the adapter at something else, such as
+        a local proxy, which may well need no credentials.
+
+        Checked at request time rather than in ``__init__`` because
+        ``get_provider()`` instantiates providers eagerly, before it is known
+        whether the caller will ever send a request.
+
+        Raises:
+            ValueError: If no API key was supplied.
+        """
+        if not self.api_key and self.config.url is None:
+            raise ValueError(
+                f"Missing API key for provider 'anthropic'. "
+                f"Add '{self.SECRETS_KEY}' to secrets.json "
+                f"or set {self.SECRETS_KEY.upper()}."
+            )
+
+    @staticmethod
+    def _model_version(model: str) -> tuple[int, int] | None:
+        """Extract the (major, minor) generation from a Claude model name.
+
+        The version sits in different places depending on the naming era:
+        'claude-3-5-haiku-latest' puts it before the role, 'claude-opus-4-5'
+        after it, and 'claude-opus-5' carries no minor at all. Taking the first
+        numeric group and its optional companion handles all three.
+
+        Args:
+            model: Model identifier as passed to call_ai().
+
+        Returns:
+            A (major, minor) tuple, or None if no version could be read.
+        """
+        match = re.search(r"(\d+)(?:-(\d+))?", model)
+        if not match:
+            return None
+        major = int(match.group(1))
+        minor = int(match.group(2)) if match.group(2) else 0
+        return major, minor
+
+    def _uses_adaptive_thinking(self, model: str) -> bool:
+        """Whether this model takes the adaptive thinking form.
+
+        Sending the wrong form is a hard 400 in either direction, so the
+        distinction matters: models below 4.6 reject 'adaptive', and models
+        from 4.7 on reject 'budget_tokens'.
+
+        An unrecognisable name is treated as adaptive. Guessing towards the
+        newer form breaks only models on their way out, where guessing towards
+        the older one would break every current model.
+
+        Args:
+            model: Model identifier as passed to call_ai().
+
+        Returns:
+            True for the adaptive form, False for the fixed-budget form.
+        """
+        version = self._model_version(model)
+        if version is None:
+            return True
+        return version >= self._ADAPTIVE_SINCE
+
+    def _build_thinking_payload(
+        self, thinking: bool | str, model: str, max_tokens: int
+    ) -> dict[str, Any] | None:
+        """Build the 'thinking' field for the request, or None to omit it.
+
+        Args:
+            thinking: True, False, or "default" as passed to call_ai().
+            model: Model identifier, which decides the accepted form.
+            max_tokens: Resolved output cap. Anthropic requires
+                ``budget_tokens`` to stay below it.
+
+        Returns:
+            The dict to send as ``thinking``, or None to leave it out entirely.
+        """
+        if thinking == "default" or thinking is None:
+            return None
+
+        adaptive = self._uses_adaptive_thinking(model)
+
+        if thinking:
+            if adaptive:
+                return {"type": "adaptive"}
+            # budget_tokens must stay under max_tokens, and above the floor.
+            budget = max(self._MIN_THINKING_BUDGET, max_tokens // 2)
+            return {"type": "enabled", "budget_tokens": budget}
+
+        # thinking=False. Older models have no 'disabled' form: for them
+        # thinking is off unless explicitly enabled, so omitting is correct.
+        return {"type": "disabled"} if adaptive else None
 
     def _post(self, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
         """HTTP POST to the Anthropic /v1/messages endpoint.
@@ -66,8 +170,10 @@ class AnthropicProvider(BaseProvider):
         Raises:
             urllib.error.HTTPError: On HTTP error responses.
             urllib.error.URLError: On connection errors.
+            ValueError: If no API key is set.
         """
-        url = f"{self.config.url.rstrip('/')}/v1/messages"
+        self._require_api_key()
+        url = f"{self.base_url}/v1/messages"
         headers: dict[str, str] = {
             "Content-Type": "application/json",
             "x-api-key": self.api_key,
@@ -94,8 +200,10 @@ class AnthropicProvider(BaseProvider):
         Raises:
             urllib.error.HTTPError: On HTTP error responses.
             urllib.error.URLError: On connection errors.
+            ValueError: If no API key is set.
         """
-        url = f"{self.config.url.rstrip('/')}{endpoint}"
+        self._require_api_key()
+        url = f"{self.base_url}{endpoint}"
         headers: dict[str, str] = {
             "x-api-key": self.api_key,
             "anthropic-version": _ANTHROPIC_VERSION,
@@ -300,8 +408,11 @@ class AnthropicProvider(BaseProvider):
                 ],
             })
 
-        if request.thinking is True:
-            payload["thinking"] = {"type": "adaptive"}
+        thinking_payload = self._build_thinking_payload(
+            request.thinking, request.model, max_tokens
+        )
+        if thinking_payload is not None:
+            payload["thinking"] = thinking_payload
 
         resp = self._post(payload, request.timeout)
 
@@ -369,5 +480,6 @@ class AnthropicProvider(BaseProvider):
             NotImplementedError: Always.
         """
         raise NotImplementedError(
-            "Anthropic does not support text embeddings via the Messages API."
+            "Anthropic offers no embeddings API of its own and recommends a "
+            "third-party provider. Use another provider for embeddings."
         )

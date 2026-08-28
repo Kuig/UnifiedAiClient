@@ -12,3 +12,6 @@ class CohereProvider(OpenAiCompatProvider):
     """
 
     DEFAULT_URL: str = "https://api.cohere.ai/compatibility"
+
+    REQUIRES_API_KEY: bool = True
+    SECRETS_KEY: str = "cohere_api_key"

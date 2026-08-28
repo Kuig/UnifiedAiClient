@@ -32,6 +32,8 @@ class OllamaProvider(BaseProvider):
     - PDFs: treated as text (inline attempt). A warning is logged.
     """
 
+    DEFAULT_URL: str = "http://localhost:11434"
+
     def __init__(self, config: ProviderConfig) -> None:
         """Initialize the Ollama provider.
 
@@ -39,6 +41,7 @@ class OllamaProvider(BaseProvider):
             config: ProviderConfig instance containing connection details.
         """
         self.config = config
+        self.base_url = (config.url or self.DEFAULT_URL).rstrip("/")
 
     def _post(
         self, endpoint: str, payload: dict[str, Any], timeout: int
@@ -57,7 +60,7 @@ class OllamaProvider(BaseProvider):
             urllib.error.HTTPError: On HTTP errors.
             urllib.error.URLError: On network connection issues.
         """
-        url = f"{self.config.url.rstrip('/')}{endpoint}"
+        url = f"{self.base_url}{endpoint}"
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url,

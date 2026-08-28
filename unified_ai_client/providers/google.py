@@ -449,16 +449,40 @@ class GoogleProvider(BaseProvider):
         return True
 
     def get_embedding(self, model: str, text: str) -> list[float]:
-        """Text embeddings are not supported on the Google provider.
+        """Generate a text embedding vector using the Google AI API.
+
+        ``task_type`` and ``output_dimensionality`` can be set through
+        ``configure_provider()``; both are optional and Google applies its own
+        defaults when they are absent.
 
         Args:
-            model: Model identifier. Unused.
-            text: Input text. Unused.
+            model: Embedding model name (e.g. ``'gemini-embedding-001'``).
+            text: The text to embed.
+
+        Returns:
+            List of floats representing the embedding vector.
 
         Raises:
-            NotImplementedError: Always.
+            RuntimeError: If the API returns no embedding.
         """
-        raise NotImplementedError("Google provider does not support text embeddings.")
+        opts = self.config.extra_options or {}
+        config_kwargs: dict[str, Any] = {}
+        if "task_type" in opts:
+            config_kwargs["task_type"] = opts["task_type"]
+        if "output_dimensionality" in opts:
+            config_kwargs["output_dimensionality"] = opts["output_dimensionality"]
+
+        client = self._get_client()
+        response = client.models.embed_content(
+            model=model,
+            contents=text,
+            config=types.EmbedContentConfig(**config_kwargs) if config_kwargs else None,
+        )
+
+        embeddings = getattr(response, "embeddings", None)
+        if not embeddings:
+            raise RuntimeError("No embeddings returned by the Google AI API.")
+        return [float(x) for x in embeddings[0].values]
 
     def cleanup(self) -> None:
         """Delete all uploaded files from Google remote cloud cache."""

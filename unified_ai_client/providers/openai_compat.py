@@ -40,6 +40,17 @@ class OpenAiCompatProvider(BaseProvider):
 
     DEFAULT_URL: str = "http://localhost:8080"
 
+    # Whether a missing API key is an error. False for local servers, where
+    # running without credentials is the normal case.
+    REQUIRES_API_KEY: bool = False
+    # Key name in secrets.json, used to build a useful error message.
+    SECRETS_KEY: str = ""
+    # Payload field this provider uses to control reasoning, or None when it
+    # has no such control. Only sent when the caller sets `thinking` to True
+    # or False: a non-reasoning model rejects the parameter outright, so
+    # "default" must leave it out.
+    REASONING_PARAM: str | None = None
+
     def __init__(self, config: ProviderConfig, api_key: str = "") -> None:
         """Initialize the provider.
 
@@ -48,10 +59,36 @@ class OpenAiCompatProvider(BaseProvider):
             api_key: Optional Bearer token for Authorization header.
         """
         self.config = config
-        self.api_key = api_key
-        # Apply default URL if the config still holds the Ollama placeholder
-        if self.config.url == "http://localhost:11434":
-            self.config.url = self.DEFAULT_URL
+        self.api_key = api_key or ""
+        # An unset url means "use this provider's own endpoint". An explicit
+        # one is honoured as given, even if it matches another provider's
+        # default: pointing this adapter at a local OpenAI-compatible server
+        # is a legitimate thing to do.
+        self.base_url = (config.url or self.DEFAULT_URL).rstrip("/")
+
+    def _require_api_key(self) -> None:
+        """Fail early and clearly when a required API key is missing.
+
+        Only enforced when talking to this provider's own cloud endpoint. A
+        caller who set an explicit url has pointed the adapter somewhere else,
+        which is a supported thing to do: aiming the OpenAI adapter at a local
+        Ollama or LM Studio server that serves /v1/chat/completions needs no
+        credentials, and demanding one would make that impossible.
+
+        Checked here rather than in ``__init__`` because ``get_provider()``
+        instantiates providers eagerly, before it is known whether the caller
+        will ever send a request. ``GoogleProvider`` defers the same check to
+        its lazy client getter for the same reason.
+
+        Raises:
+            ValueError: If this provider needs a key and none was supplied.
+        """
+        if self.REQUIRES_API_KEY and not self.api_key and self.config.url is None:
+            raise ValueError(
+                f"Missing API key for provider '{self.SECRETS_KEY.removesuffix('_api_key')}'. "
+                f"Add '{self.SECRETS_KEY}' to secrets.json "
+                f"or set {self.SECRETS_KEY.upper()}."
+            )
 
     def _post(self, endpoint: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
         """HTTP POST to the OpenAI-compatible endpoint via urllib.
@@ -68,8 +105,10 @@ class OpenAiCompatProvider(BaseProvider):
             urllib.error.HTTPError: On HTTP error responses.
             urllib.error.URLError: On connection errors.
             json.JSONDecodeError: On unparseable response.
+            ValueError: If this provider requires an API key and none is set.
         """
-        url = f"{self.config.url.rstrip('/')}{endpoint}"
+        self._require_api_key()
+        url = f"{self.base_url}{endpoint}"
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -92,8 +131,10 @@ class OpenAiCompatProvider(BaseProvider):
             urllib.error.HTTPError: On HTTP error responses.
             urllib.error.URLError: On connection errors.
             json.JSONDecodeError: On unparseable response.
+            ValueError: If this provider requires an API key and none is set.
         """
-        url = f"{self.config.url.rstrip('/')}{endpoint}"
+        self._require_api_key()
+        url = f"{self.base_url}{endpoint}"
         headers: dict[str, str] = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -295,7 +336,18 @@ class OpenAiCompatProvider(BaseProvider):
         if top_p is not None:
             payload["top_p"] = top_p
 
-        # Populate payload from other opts
+        # Reasoning control, only when the caller asked for it explicitly.
+        # "default" (the call_ai default) sends nothing, which keeps plain
+        # non-reasoning models working: they reject the parameter outright.
+        if (
+            self.REASONING_PARAM
+            and request.thinking != "default"
+            and request.thinking is not None
+        ):
+            payload[self.REASONING_PARAM] = "high" if request.thinking else "none"
+
+        # Populate payload from other opts. This runs last so extra_options
+        # can override the mapping above with a provider-specific value.
         for k, v in opts.items():
             if k not in ("max_tokens", "temperature", "top_k", "top_p", "timeout", "sleep_time", "keep_alive"):
                 payload[k] = v
