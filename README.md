@@ -1,10 +1,12 @@
 # UnifiedAiClient
 
 `UnifiedAiClient` is a shared Python library providing a unified AI provider abstraction.
-It routes all AI calls through a single `call_ai()` interface, hiding provider-specific 
+It routes all AI calls through a single `call_ai()` interface, hiding provider-specific
 encoding, upload, retry, and error-handling details from consuming projects.
 
-See [COMPARISON.md](COMPARISON.md) for a feature-by-feature comparison with other libraries.
+The only runtime dependency is `google-genai`, and only the Google adapter imports it.
+Every other provider speaks HTTP through the standard library. See
+[COMPARISON.md](COMPARISON.md) for a feature-by-feature comparison with other libraries.
 
 Supported providers:
 
@@ -22,6 +24,21 @@ Supported providers:
 | `"lmstudio"` | Local | OpenAI-compatible API via `urllib` |
 | `"llamacpp"` | Local | OpenAI-compatible API via `urllib` |
 | `"script"` | External | Subprocess runner with JSON stdin/stdout protocol |
+
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/api.md](docs/api.md) | Full API reference: every public function, dataclass and exception. |
+| [docs/configuration.md](docs/configuration.md) | Key-by-key reference for credentials and provider settings. |
+| [docs/multimodal.md](docs/multimodal.md) | Attaching files, the per-provider support matrix, and how unsupported files are refused. |
+| [docs/reasoning.md](docs/reasoning.md) | The `thinking` parameter, what each provider does with it, and reading the trace back. |
+| [docs/tool-calling.md](docs/tool-calling.md) | Defining tools, the two-turn exchange, provider compatibility. |
+| [docs/warm-up.md](docs/warm-up.md) | `warm_up()`, `preload_model()` and `cleanup()`: preparing a provider and releasing what it holds. |
+| [docs/script-protocol.md](docs/script-protocol.md) | The JSON stdin/stdout contract any script must satisfy to act as a provider. |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Internal design: the codemap, the layer boundaries, and the invariants. |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development install, the test suite, and how to add a provider. |
+| [COMPARISON.md](COMPARISON.md) | How this library compares with LiteLLM, aisuite and the OpenAI SDK. |
 
 ---
 
@@ -49,90 +66,34 @@ then run `pip install -r requirements.txt`.
 All configuration is **optional**. The library falls back to built-in defaults when
 nothing is provided.
 
-### API credentials: environment variables and/or `secrets.json`
+**Credentials** for cloud providers come from environment variables, or from a
+`secrets.json` in your project's working directory. Environment variables win:
 
-Only API keys for cloud providers belong here. Server URLs for local providers (Ollama,
-LM Studio, llama.cpp) are **not** credentials; register them via `configure_provider()`.
-
-**Precedence** (highest → lowest):
-1. Environment variables (`os.environ`): shell, Docker, CI/CD
-2. `secrets.json` in the consuming project's root: for local development
-
-Supported keys (see [`secrets.json.example`](secrets.json.example) and [`.env.example`](.env.example)):
-
-| `secrets.json` key    | Environment variable  |
-|-----------------------|-----------------------|
-| `google_api_key`      | `GOOGLE_API_KEY`      |
-| `anthropic_api_key`   | `ANTHROPIC_API_KEY`   |
-| `openai_api_key`      | `OPENAI_API_KEY`      |
-| `mistral_api_key`     | `MISTRAL_API_KEY`     |
-| `cohere_api_key`      | `COHERE_API_KEY`      |
-| `meta_api_key`        | `META_API_KEY` or `LLAMA_API_KEY` |
-| `groq_api_key`        | `GROQ_API_KEY`        |
-| `xai_api_key`         | `XAI_API_KEY`         |
-
-**Via environment variables** (shell / CI/CD / Docker):
 ```bash
 export GOOGLE_API_KEY=your-google-api-key-here
 ```
 
-**Via `secrets.json`** (copy from [`secrets.json.example`](secrets.json.example)):
 ```json
 {
     "google_api_key": "your-google-api-key-here",
-    "anthropic_api_key": "your-anthropic-api-key-here",
-    "openai_api_key": "your-openai-api-key-here",
-    "mistral_api_key": "your-mistral-api-key-here",
-    "cohere_api_key": "your-cohere-api-key-here",
-    "meta_api_key": "your-llama-api-key-here",
-    "groq_api_key": "your-groq-api-key-here",
-    "xai_api_key": "your-xai-api-key-here"
+    "anthropic_api_key": "your-anthropic-api-key-here"
 }
 ```
 
 > **Add `secrets.json` to each consuming project's `.gitignore`** to avoid leaking credentials.
 
-A cloud provider called without its key raises `ValueError` naming the key it wants, rather
-than sending an unauthenticated request. The one exception is when you set an explicit `url`
-via `configure_provider()`: that means you have pointed the adapter somewhere other than the
-vendor's own endpoint, so no credential is required. This is what makes it possible to drive
-a local OpenAI-compatible server through the `openai` adapter:
-
-```python
-configure_provider("openai", url="http://localhost:11434")   # Ollama's /v1 endpoint
-call_ai(provider="openai", model="gemma4:12b", prompt="...")  # no OpenAI key needed
-```
-
-### Provider settings: `configure_provider()`
-
-Controls server URLs, timeouts, rate-limit delays, and provider-specific options such
-as `context_size` or `visual_token_budget`. Call this once at application startup for
-any setting that should not change per-call:
+**Everything else** is infrastructure, registered once at startup. Server URLs for local
+providers are not credentials and belong here:
 
 ```python
 from unified_ai_client import configure_provider
 
-# Ollama on a remote host with a custom context window
-configure_provider(
-    "ollama",
-    url="http://192.168.1.5:11434",
-    timeout=240,
-    context_size=8000,
-    visual_token_budget=1120,
-)
-
-# Google with rate-limiting delay
+configure_provider("ollama", url="http://192.168.1.5:11434", timeout=240, context_size=8000)
 configure_provider("google", sleep_time=3)
 ```
 
-If `configure_provider()` is never called, built-in defaults are used automatically
-(Ollama: `http://localhost:11434`, timeout 300 s; cloud providers: their standard
-endpoints). Per-call overrides via `extra_options` in `call_ai()` always take
-precedence over values registered here.
-
-Known top-level fields: `url`, `timeout`, `sleep_time`. Everything else is treated as
-a provider-specific setting and forwarded to the API payload (e.g. `context_size` →
-`num_ctx` in Ollama, `max_tokens` → `max_output_tokens` in cloud providers).
+Every credential key, every registrable setting and every built-in default is listed in
+[docs/configuration.md](docs/configuration.md).
 
 ---
 
@@ -177,21 +138,15 @@ print(response.text)
 print(f"Tokens used: In={response.input_tokens}, Out={response.output_tokens}")
 ```
 
+The library holds no conversation state: your project owns the history and passes it in
+`messages` on every call.
+
 ### Multimodal Input (Files)
 
-Pass a local file path (or list of paths) via `file_path`. The library handles the
-encoding and upload for you, choosing the native mechanism each provider offers:
+Pass a local file path, or a list of paths, via `file_path`. The library handles the
+encoding and upload, choosing the native mechanism each provider offers:
 
 ```python
-# Single image
-response = call_ai(
-    provider="ollama",
-    model="gemma4:e2b",
-    prompt="Describe this diagram.",
-    file_path="C:/docs/figures/diagram.png",
-)
-
-# Multiple files (image + text document)
 response = call_ai(
     provider="google",
     model="gemini-2.5-pro",
@@ -200,81 +155,10 @@ response = call_ai(
 )
 ```
 
-Supported file types per provider:
-
-| Provider | Images | Audio | Text files | PDFs |
-|---|---|---|---|---|
-| `google` | ✅ Upload | ✅ Upload | ✅ Upload | ✅ Upload |
-| `openai` | ✅ base64 | ✅ base64 | ✅ Inlined | ✅ base64 |
-| `anthropic` | ✅ base64 | ❌ Raises | ✅ Inlined | ✅ base64 |
-| `llamacpp` | ✅ base64 | ✅ base64 | ✅ Inlined | ❌ Raises |
-| `ollama` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `mistral` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `cohere` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `meta` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `groq` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `xai` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `lmstudio` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `script` | Path passed | Path passed | Path passed | Path passed |
-
-**Text files are always accepted, everything else must be native.** No provider
-exposes a dedicated block type for a `.md` or a `.csv`, so text attachments are
-wrapped in a delimited block and prepended to the prompt. Google is the exception:
-it uploads text through the Files API alongside every other attachment, because
-Gemini reads those files natively. Every other kind of file needs a native
-mechanism, and where the provider has none, the call raises `UnsupportedFileError`
-rather than sending something the model cannot read:
-
-```python
-call_ai(provider="groq", model="...", prompt="Transcribe this.", file_path="talk.mp3")
-# UnsupportedFileError: Provider 'groq' cannot accept audio files: 'talk.mp3'.
-# Accepted: image, text.
-```
-
-The alternative, which earlier versions did, is to read the file as text anyway and
-substitute a placeholder when that fails. The model then answers as though it had
-received the recording, and nothing in the response says otherwise. A refused call
-is recoverable; a confident answer about a file the model never saw is not.
-
-Three consequences worth knowing:
-
-- Files are validated **before** any of them is encoded or uploaded, so one bad path
-  in a list fails immediately instead of after the others have been sent.
-- A missing file raises `MissingFileError`, a `FileNotFoundError` subclass. Neither it
-  nor `UnsupportedFileError` is retried: both would fail identically on every attempt,
-  so the error surfaces at once instead of after the backoff budget.
-- Unrecognised file types raise rather than being guessed at as text. Read such a
-  file yourself and pass the content in `prompt`.
-
-The `script` provider is exempt: it receives raw paths and decides for itself, since
-only the script knows what it can open.
-
-#### What counts as a text file
-
-Classification is by extension, covering the usual source, markup, data and config
-formats: `.txt`, `.md`, `.csv`, `.json`, `.jsonl`, `.yaml`, `.toml`, `.xml`, `.svg`,
-`.html`, `.py`, `.js`, `.jsx`, `.ts`, `.tsx`, `.vue`, `.svelte`, `.css`, `.scss`,
-`.c`, `.h`, `.cpp`, `.hpp`, `.cs`, `.java`, `.kt`, `.go`, `.rs`, `.rb`, `.php`,
-`.swift`, `.dart`, `.sh`, `.ps1`, `.sql`, `.proto`, `.graphql`, `.tf`, `.patch`, and
-others in the same vein.
-
-Files whose name is their type are recognised too, matched case-insensitively:
-`Dockerfile`, `Makefile`, `LICENSE`, `README`, `CHANGELOG`, `.gitignore`, `.env`,
-`.editorconfig`, `.dockerignore` and similar. A suffixed variant such as
-`Dockerfile.dev` is not recognised and raises.
-
-`.svg` is treated as text rather than as an image on purpose: no provider accepts SVG
-in an image block, and the markup is more useful to the model than a refusal.
-
-> **Note:** `.env` files and similar config are inlined verbatim, secrets included.
-> Nothing is scanned or redacted, so check what a file holds before attaching it.
-
-**Ollama and audio.** Ollama serves audio-capable models such as Gemma 4 `e2b`, but
-its native `/api/chat` endpoint, which this adapter uses, has no field to carry
-audio; putting it in `images[]` is silently ignored. Reaching those models needs
-Ollama's OpenAI-compatible endpoint, which costs the `/api/chat` options this adapter
-depends on (`context_size`, `keep_alive`, native thinking). Until that is wired up,
-audio to `ollama` raises. This is a limitation of the adapter, not of Ollama.
+Text files are always accepted. Everything else must have a native mechanism on the
+target provider, and where there is none the call raises `UnsupportedFileError` rather
+than sending something the model cannot read. Which provider accepts what, and why a
+refusal beats a guess, is in [docs/multimodal.md](docs/multimodal.md).
 
 ### Thinking / Reasoning
 
@@ -285,111 +169,36 @@ response = call_ai(
     prompt="What is the best sorting algorithm and why?",
     thinking=True,
 )
-print(response.text)          # Final answer
+print(response.text)            # Final answer
 print(response.reasoning_text)  # Thinking process
 ```
 
-`thinking` takes three values: `True`, `False`, and `"default"` (the default), which
-leaves the decision to the provider. Here is what each provider actually does with them:
+`thinking` takes `True`, `False`, or `"default"`, which leaves the decision to the
+provider. What each provider does with those three values, and why the parameter is
+deliberately this coarse, is in [docs/reasoning.md](docs/reasoning.md).
 
-| Provider | `True` | `False` | `"default"` |
-|---|---|---|---|
-| `google` | `thinking_level` on Gemini 3.x, `thinking_budget` on 2.5 | minimised explicitly | provider default, thoughts still captured |
-| `ollama` | sends `think: true` | sends `think: false` | field omitted |
-| `anthropic` | `{"type": "adaptive"}` on Claude 4.6 and later, `{"type": "enabled", "budget_tokens": N}` below | `{"type": "disabled"}` on 4.6 and later; below that the field is omitted, which is already the off state | field omitted |
-| `openai`, `mistral`, `groq`, `xai` | `reasoning_effort: "high"` | `reasoning_effort: "none"` | field omitted |
-| `cohere`, `meta`, `lmstudio`, `llamacpp` | no reasoning control in the API; the value is ignored | ignored | ignored |
+### Tool Calling
 
-> [!IMPORTANT]
-> On `openai`, `mistral`, `groq` and `xai`, `reasoning_effort` is only sent when you pass
-> `True` or `False` explicitly. This matters because a **non-reasoning model rejects the
-> parameter outright**: asking `gpt-4o` to think returns an error rather than silently
-> doing nothing. Leaving `thinking` at `"default"` never sends the field, so ordinary
-> models keep working untouched.
+The library provides transport-level tool calling: it passes your `ToolDefinition` list to
+the model and returns any `ToolCall` the model requests. The execution loop stays yours.
+All providers support it. The two-turn exchange is worked through in
+[docs/tool-calling.md](docs/tool-calling.md).
 
-> [!NOTE]
-> **Why the parameter is this coarse.** `thinking` is deliberately a quick, universal
-> lever: three values that mean the same thing everywhere, so you can switch provider
-> without rewriting the call. That universality is exactly why it cannot express what
-> each provider offers on its own, such as Anthropic's `output_config.effort`, the
-> intermediate `reasoning_effort` levels, Groq's `reasoning_format`, or an exact
-> `thinking_budget` on Google. Those go through `extra_options`, which is merged into the
-> payload last and therefore always overrides the mapping above:
->
-> ```python
-> call_ai(provider="openai", model="o3", prompt="...", thinking=True,
->         extra_options={"reasoning_effort": "medium"})   # wins over "high"
-> ```
->
-> It is the same split described in [Design Concepts](#design-concepts-caching-and-lifecycle):
-> the unified surface covers what every provider shares, `extra_options` covers the rest.
+### Warm-up and Preloading
 
-> [!NOTE]
-> **Reasoning extraction** is independent of all this. `reasoning_text` is populated
-> whenever the model returns a trace, whatever `thinking` was set to (`reasoning_content`
-> for the OpenAI-compatible providers, `thinking` blocks for Ollama, Anthropic and
-> Google). Check `reasoning_is_summary` before comparing traces across providers: Google
-> returns a summary of its reasoning, the others return the raw text.
-
-### Model Pre-loading (Ollama only)
-
-Pre-loads a model into GPU/CPU memory and registers its settings so they
-propagate automatically into all subsequent `call_ai()` calls:
-
-```python
-from unified_ai_client import preload_model
-
-preload_model(
-    provider="ollama",
-    model="gemma4:e2b",
-    keep_alive="15m",
-    context_size=8000,                       # allocates VRAM with correct num_ctx
-    extra_options={"visual_token_budget": 1120},  # any other provider-specific setting
-)
-```
-
-Passing `context_size` here (rather than in each `call_ai()` call) is important:
-Ollama allocates the context window once at preload time. If a different `num_ctx`
-value arrives at the first `call_ai()`, Ollama reloads the model and reallocates VRAM.
-
-For providers that do not support preloading (Google, Anthropic, OpenAI, etc.) the
-warm-up part is a no-op, but any provided `context_size` / `extra_options` are still
-registered and will apply to `call_ai()` calls.
-
-### Warm-up (all providers)
-
-Every provider charges some costs exactly once per process: importing an SDK,
-building a client, the DNS and TLS handshake, loading a model, uploading a file.
-Without a warm-up, all of it lands on whichever `call_ai()` happens to run first.
-That first call then looks slow purely because it went first, which matters as
-soon as you are measuring or comparing timings.
+Every provider charges some costs once per process: an SDK import, a TLS handshake, a
+model load, a file upload. Without a warm-up, all of it lands on whichever `call_ai()`
+runs first.
 
 ```python
 from unified_ai_client import warm_up
 
 warm_up("google", "gemini-2.5-flash", file_paths=["paper.pdf"])
-
-# The upload, the TLS handshake and the client construction are already paid for.
-response = call_ai(
-    provider="google",
-    model="gemini-2.5-flash",
-    prompt="Summarize the attached paper.",
-    file_path=["paper.pdf"],
-)
 ```
 
-`warm_up()` is not the same thing as `preload_model()`:
-
-| | `preload_model()` | `warm_up()` |
-|---|---|---|
-| What it prepares | A model in resident memory | The whole channel: client, connection, authentication, and on Google the uploaded files |
-| Where it works | Ollama, and scripts that implement it | Every provider |
-| Also does | Registers `context_size` / `extra_options` for later calls | Nothing persistent beyond the warmed resources |
-
-It never raises. A failed warm-up is a missed optimisation, not an error, so it
-returns `False` and lets the `call_ai()` that follows report the real problem
-through its own retries. It is safe to call on every provider without checking
-first: where there is nothing to warm up, it is a free no-op.
+`warm_up()` works on every provider and never raises. On Ollama, `preload_model()` also
+pins the model in VRAM with the right context window. Both, plus the `cleanup()` that
+releases what they upload, are covered in [docs/warm-up.md](docs/warm-up.md).
 
 ### Text Embeddings
 
@@ -401,42 +210,26 @@ which offers no embeddings API of its own and points at a third-party service:
 | `google` | `embed_content` via the SDK (`task_type` and `output_dimensionality` through `configure_provider()`) |
 | `ollama` | `/api/embed` |
 | `openai`, `mistral`, `cohere`, `meta`, `groq`, `xai`, `lmstudio`, `llamacpp` | `/v1/embeddings` |
-| `script` | `mode: "embed"` in the [script protocol](LLM_Behaviour_Interface.md) |
+| `script` | `mode: "embed"` in the [script protocol](docs/script-protocol.md) |
 | `anthropic` | not available, raises `NotImplementedError` |
 
 Implementing the call is not the same as the endpoint being served: whether a given
 cloud provider exposes embeddings, and for which models, is up to that provider. Use a
 model documented as an embedding model for the provider you picked.
 
-Example using local Ollama model:
-
 ```python
 from unified_ai_client import get_embedding
 
-vector = get_embedding(
-    provider="ollama",
-    model="bge-m3",
-    text="I like rusty spoons.",
-)
+vector = get_embedding(provider="ollama", model="bge-m3", text="I like rusty spoons.")
 print(f"Embedding vector length: {len(vector)}")
 print(f"First 5 coordinates: {vector[:5]}")
-```
 
-Example using Mistral cloud model:
-
-```python
-from unified_ai_client import get_embedding
-
-vector = get_embedding(
-    provider="mistral",
-    model="mistral-embed",
-    text="I like rusty spoons.",
-)
+vector = get_embedding(provider="mistral", model="mistral-embed", text="I like rusty spoons.")
 ```
 
 ### Script Provider
 
-Run any script implementing the [`LLM_Behaviour_Interface.md`](LLM_Behaviour_Interface.md) interface:
+Run any script implementing the [script protocol](docs/script-protocol.md):
 
 ```python
 response = call_ai(
@@ -446,508 +239,8 @@ response = call_ai(
 )
 ```
 
-### Tool Calling (Function Calling)
-
-The library provides minimal, transport-level tool calling support. It passes
-tool definitions to the model and returns any tool calls the model requests.
-The **execution loop** is the consumer's responsibility.
-
-#### Defining Tools
-
-```python
-from unified_ai_client import call_ai, ToolDefinition, ToolCall, ToolResult
-
-tools = [
-    ToolDefinition(
-        name="get_weather",
-        description="Returns the current weather for a given city.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "location": {
-                    "type": "string",
-                    "description": "The city name, e.g. Rome",
-                },
-            },
-            "required": ["location"],
-        },
-    ),
-]
-```
-
-#### Two-Turn Example
-
-```python
-prompt = "What is the weather in Rome right now? Use the get_weather tool."
-
-# Turn 1: model may respond with tool calls
-response = call_ai(
-    provider="ollama",
-    model="gemma4:12b",
-    prompt=prompt,
-    tools=tools,
-    temperature=0.0,
-)
-
-if response.tool_calls:
-    # Execute the tool (consumer's responsibility)
-    results = []
-    for tc in response.tool_calls:
-        if tc.name == "get_weather":
-            content = f"The weather in {tc.arguments['location']} is 22°C and sunny."
-        else:
-            content = "Tool not found."
-        results.append(ToolResult(call_id=tc.id, name=tc.name, content=content))
-
-    # Build the conversation history for turn 2.
-    # The assistant's intermediate message (with tool_calls) must be included
-    # so the model can link the tool result back to its own request.
-    #
-    # IMPORTANT: this format is always the same regardless of the provider.
-    # The library converts it internally to each provider's native format:
-    #   - Anthropic  →  tool_use content blocks
-    #   - Google     →  function_call Parts
-    #   - Ollama / OpenAI-compat  →  OpenAI-style tool_calls (passed through)
-    assistant_msg = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [{"function": {"name": tc.name, "arguments": tc.arguments}} for tc in response.tool_calls],
-    }
-
-    # Turn 2: pass full history in messages + tool_results.
-    # When tool_results are provided, the library does NOT re-append the
-    # current prompt as a new user message; the consumer controls the history.
-    final = call_ai(
-        provider="ollama",
-        model="gemma4:12b",
-        prompt=prompt,           # passed for reference but not re-appended
-        messages=[
-            {"role": "user", "content": prompt},
-            assistant_msg,
-        ],
-        tools=tools,
-        tool_results=results,
-        temperature=0.0,
-    )
-    print(final.text)  # "The weather in Rome is 22°C and sunny."
-else:
-    print(response.text)  # Model answered directly without tools
-```
-
-#### Provider Compatibility
-
-All providers support tool calling. Whether a specific model will actually use
-tool calling depends on its training, not the provider.
-
-| Provider | Tool Calling | Notes |
-|---|---|---|
-| `google` | ✅ | `FunctionDeclaration` / `function_call` parts |
-| `anthropic` | ✅ | `input_schema` format / `tool_use` content blocks |
-| `openai` | ✅ | Standard OpenAI format |
-| `mistral` | ✅ | Inherited from `openai_compat` |
-| `cohere` | ✅ | Inherited from `openai_compat` |
-| `meta` | ✅ | Inherited from `openai_compat` |
-| `groq` | ✅ | Inherited from `openai_compat` |
-| `xai` | ✅ | Inherited from `openai_compat` |
-| `lmstudio` | ✅ | Inherited from `openai_compat` |
-| `llamacpp` | ✅ | Inherited from `openai_compat` |
-| `ollama` | ✅ | OpenAI-compatible format via `/api/chat` |
-| `script` | ✅ | Extended JSON protocol (see `LLM_Behaviour_Interface.md`) |
-
-> [!NOTE]
-> For `ollama`, tool calling requires models specifically trained for it (e.g. `gemma4`, `qwen3`, `llama3.1`). The library sends the tool definitions regardless; if the model ignores them, `AiResponse.tool_calls` will be empty and you will receive a plain text response.
-
 ### Resource Cleanup
 
-`atexit` cleanup is registered automatically on the first `call_ai()` or `warm_up()`,
-whichever comes first, so files uploaded by a warm-up are cleaned up even in a process
-that never reaches a real call. For eager cleanup:
-
-```python
-from unified_ai_client import cleanup
-
-try:
-    response = call_ai(...)
-finally:
-    cleanup()   # Deletes uploaded Google AI files
-```
-
----
-
-## API Reference
-
-### Functions
-
-#### `call_ai`
-The primary function to execute text generation requests across any provider.
-
-```python
-def call_ai(
-    provider: str,
-    model: str,
-    prompt: str,
-    *,
-    system_prompt: str | None = None,
-    messages: list[dict] | None = None,
-    file_path: str | list[str] | None = None,
-    temperature: float = 0.7,
-    thinking: bool | str = "default",
-    format_json: bool = False,
-    timeout: int = 300,
-    max_retries: int = 3,
-    retry_base_delay: float = 5.0,
-    top_k: int = 64,
-    top_p: float = 0.95,
-    max_tokens: int | None = None,
-    sleep_time: int | None = None,
-    extra_options: dict | None = None,
-    tools: list[ToolDefinition] | None = None,
-    tool_results: list[ToolResult] | None = None,
-) -> AiResponse:
-```
-
-* **Parameters:**
-  * `provider` (`str`): The name of the AI provider (`"google"`, `"anthropic"`, `"openai"`, `"mistral"`, `"cohere"`, `"meta"`, `"groq"`, `"xai"`, `"ollama"`, `"lmstudio"`, `"llamacpp"`, `"script"`).
-  * `model` (`str`): The target model identifier (or script path for `"script"` provider).
-  * `prompt` (`str`): The user prompt.
-  * `system_prompt` (`str | None`, optional): System instructions. Defaults to `None`.
-  * `messages` (`list[dict] | None`, optional): A list of previous chat messages in the format `[{"role": "user" | "assistant", "content": "..."}]`. Messages can also include an optional `"files"` key containing a list of local file paths. Defaults to `None`.
-  * `file_path` (`str | list[str] | None`, optional): Local file path(s) to attach for multimodal prompts. Accepts images, audio, PDFs, and text files, subject to what the target provider supports; see [Multimodal Input](#multimodal-input-files). Raises `UnsupportedFileError` if the provider cannot carry a given file, and `MissingFileError` (a `FileNotFoundError`) if a path does not exist. Defaults to `None`.
-  * `temperature` (`float`, optional): Sampling temperature. Defaults to `0.7`.
-  * `thinking` (`bool | str`, optional): Enables extended reasoning/thinking mode (`True`/`False`), or delegates to the provider's default behavior (`"default"`). Defaults to `"default"`.
-  * `format_json` (`bool`, optional): Forces the model to respond in valid JSON format. Defaults to `False`.
-  * `timeout` (`int`, optional): Network timeout in seconds. Defaults to `300`.
-  * `max_retries` (`int`, optional): Number of retry attempts on network/rate-limit failures. Defaults to `3`.
-  * `retry_base_delay` (`float`, optional): Initial backoff delay for exponential retries in seconds. Defaults to `5.0`.
-  * `top_k` (`int`, optional): Sampling parameter top_k. Defaults to `64`.
-  * `top_p` (`float`, optional): Sampling parameter top_p. Defaults to `0.95`.
-  * `max_tokens` (`int | None`, optional): Maximum number of tokens in the response. Maps to `num_predict`, `max_output_tokens`, etc. Defaults to `None`.
-  * `sleep_time` (`int | None`, optional): Pre-call rate limit sleep delay in seconds. Defaults to `None` (falls back to config `sleep_time`).
-  * `extra_options` (`dict | None`, optional): Optional dict of arbitrary provider-specific options merged into the API payload at call time. Override any config-level defaults for the same key. Defaults to `None`.
-  * `tools` (`list[ToolDefinition] | None`, optional): Tool definitions the model may call. When provided, the model may respond with `AiResponse.tool_calls` instead of (or in addition to) text. Defaults to `None`.
-  * `tool_results` (`list[ToolResult] | None`, optional): Results of previously requested tool calls. Pass these on the follow-up call to continue the conversation after executing the tools. Defaults to `None`.
-* **Returns:** `AiResponse` dataclass containing response text, token metrics, optional reasoning text, and any tool calls requested by the model.
-
----
-
-#### `get_embedding`
-Generates a numerical embedding vector for the provided text.
-
-```python
-def get_embedding(
-    provider: str,
-    model: str,
-    text: str,
-) -> list[float]:
-```
-
-* **Parameters:**
-  * `provider` (`str`): The AI provider supporting embeddings (e.g., `"ollama"`).
-  * `model` (`str`): The embedding model name (e.g., `"bge-m3"`).
-  * `text` (`str`): The input text to embed.
-* **Returns:** A list of float numbers (`list[float]`) representing the high-dimensional vector.
-
----
-
-#### `preload_model`
-Pre-loads a model into system memory and registers its settings for all
-subsequent `call_ai()` calls. Currently only Ollama performs an actual warm-up;
-all other providers treat the warm-up as a no-op but still register the settings.
-
-```python
-def preload_model(
-    provider: str,
-    model: str,
-    keep_alive: str = "15m",
-    context_size: int | None = None,
-    extra_options: dict | None = None,
-) -> None:
-```
-
-* **Parameters:**
-  * `provider` (`str`): Provider name (e.g. `"ollama"`).
-  * `model` (`str`): The model identifier to preload.
-  * `keep_alive` (`str`, optional): How long to keep the model resident in memory
-    (e.g. `"15m"`, `"1h"`, `"0"`). Defaults to `"15m"`. Ollama-specific.
-  * `context_size` (`int`, optional): Context window size in tokens. Ollama maps
-    this to `num_ctx` in the API payload. Registered via `configure_provider()`
-    so it persists across all `call_ai()` calls without needing to be repeated.
-    Pass it **here** rather than in per-call `extra_options` to prevent Ollama
-    from reloading the model with a different context window mid-session.
-  * `extra_options` (`dict`, optional): Additional provider-specific settings
-    (e.g. `{"visual_token_budget": 1120}`). Merged with any previously registered
-    settings and persisted via `configure_provider()`.
-
----
-
-#### `warm_up`
-
-Pays a provider's one-off costs before the first real call, so they are not
-charged to whichever `call_ai()` happens to run first.
-
-```python
-def warm_up(
-    provider: str,
-    model: str,
-    file_paths: str | list[str] | None = None,
-) -> bool:
-```
-
-* **Parameters:**
-  * `provider` (`str`): Provider name (e.g. `"google"`, `"ollama"`).
-  * `model` (`str`): The model identifier to warm up.
-  * `file_paths` (`str | list[str]`, optional): Files to upload ahead of time.
-    Only used by providers that keep a remote file store (currently `google`),
-    and by scripts that choose to act on it. Ignored elsewhere.
-* **Returns:** `True` if something was actually warmed up, `False` if the
-  provider had nothing to do or the warm-up failed.
-
-What each provider does:
-
-| Provider | Strategy | Consumes tokens |
-|---|---|---|
-| `google` | Builds the client, issues a free `models.get` metadata request, uploads `file_paths` | No |
-| `ollama` | Loads the model through Ollama's own warm-up request | No |
-| `lmstudio`, `llamacpp` | Sends a one-token completion | No (see the note below) |
-| `openai`, `mistral`, `cohere`, `meta`, `groq`, `xai` | Free `GET /v1/models` | No |
-| `anthropic` | Free `GET /v1/models` | No |
-| `script` | Sends `mode: "warm_up"` to the script | Depends on the script |
-
-> [!IMPORTANT]
-> LM Studio and llama.cpp are the one exception to "warm-up is free". Both load
-> a model lazily on first inference, so a metadata request would return instantly
-> and leave the load cost exactly where `warm_up()` is meant to remove it. They
-> therefore send a real one-token completion. Against the local servers these
-> providers are built for, this is free. If you have pointed either of them at a
-> paid remote endpoint, that request is billable.
-
-Files uploaded by `warm_up()` go into the same cache `call_ai()` reads from, and
-are deleted by `cleanup()` along with every other uploaded file. Warming up does
-not change the resource lifecycle.
-
-`warm_up()` never raises: a failed warm-up is a missed optimisation, not an
-error, and the `call_ai()` that follows has its own retries and will report the
-real failure. Call `get_provider(...).warm_up(...)` directly if you want the
-exception instead.
-
----
-
-#### `configure_provider`
-Registers or updates provider-specific configuration programmatically. Calls are
-**merge-based**: only the fields explicitly passed are updated; previously
-registered values for other fields are preserved.
-
-Known top-level fields (`url`, `timeout`, `sleep_time`) are stored as typed
-attributes on `ProviderConfig`. All other keyword arguments are collected into
-`extra_options` and forwarded as provider-specific settings (e.g. `context_size`
-→ `num_ctx` in Ollama payloads, `visual_token_budget`, `disable_safety`, etc.).
-
-Thread-safe. Concurrent calls for different provider names are fully safe.
-Calling it for the same name from multiple threads is safe but last-writer-wins.
-
-```python
-def configure_provider(name: str, **kwargs) -> None:
-```
-
-* **Parameters:**
-  * `name` (`str`): The provider name (e.g. `"ollama"`, `"google"`).
-  * `**kwargs`: Configuration values. Known fields: `url`, `timeout`, `sleep_time`.
-    All other keys go into `extra_options` as provider-specific settings.
-
-```python
-# Examples
-from unified_ai_client import configure_provider
-
-configure_provider("ollama",
-                   url="http://192.168.1.5:11434",
-                   timeout=240,
-                   context_size=8000,
-                   visual_token_budget=1120)
-configure_provider("google", sleep_time=3)
-```
-
----
-
-#### `silence_sdks`
-Suppresses verbose debug and info log messages from downstream provider SDKs (such as `google_genai`, `httpx`, and `httpcore`).
-
-```python
-def silence_sdks() -> None:
-```
-
----
-
-#### `cleanup`
-Triggers remote and local resource purging across all active cached providers. For example, it deletes uploaded Gemini files from the Google remote cloud cache to release quota. It is automatically registered to run at process exit via `atexit`, but can be called manually.
-
-```python
-def cleanup() -> None:
-```
-
----
-
-#### `load_secrets`
-Loads API credentials from environment variables or a local JSON file. Environment variables take priority over JSON.
-
-```python
-def load_secrets(
-    project_root: str,
-    filename: str = "secrets.json",
-) -> dict[str, str]:
-```
-
-* **Parameters:**
-  * `project_root` (`str`): The root directory of the project.
-  * `filename` (`str`, optional): The name of the secrets JSON file. Defaults to `"secrets.json"`.
-* **Returns:** A dictionary of loaded credentials.
-
----
-
-#### `load_config`
-Loads configurations from a JSON file into a dataclass type, handling defaults and dynamic option collecting.
-
-```python
-def load_config(
-    config_path: str,
-    dataclass_type: type[Any],
-    section: str | None = None,
-) -> Any:
-```
-
-* **Parameters:**
-  * `config_path` (`str`): The path to the configuration JSON file.
-  * `dataclass_type` (`type`): The dataclass type to load configuration into.
-  * `section` (`str | None`, optional): A subsection key to load from the JSON. Defaults to `None`.
-* **Returns:** An instance of `dataclass_type`.
-
----
-
-### Dataclasses
-
-#### `AiResponse`
-The standard response object returned by `call_ai()`.
-
-* **Fields:**
-  * `text` (`str`): The final generated response text.
-  * `input_tokens` (`int`): The number of prompt/input tokens consumed. Defaults to `0`.
-  * `output_tokens` (`int`): The number of completion/output tokens generated. Defaults to `0`.
-  * `reasoning_tokens` (`int`): The number of tokens spent on internal reasoning/thinking. Defaults to `0`.
-  * `reasoning_text` (`str`): The full reasoning/thinking transcript if produced by the model. Defaults to `""`.
-  * `reasoning_is_summary` (`bool`): `True` when `reasoning_text` is a summary the provider generated from the model's actual chain of thought, rather than the raw trace. Defaults to `False`.
-  * `tool_calls` (`list[ToolCall]`): Tool calls requested by the model. Empty list if the model responded with text directly. Defaults to `[]`.
-
----
-
-#### `ToolDefinition`
-Describes a function the model can call.
-
-* **Fields:**
-  * `name` (`str`): Unique function name (must be a valid identifier).
-  * `description` (`str`): Human-readable description of what the tool does and when to use it.
-  * `parameters` (`dict`): JSON Schema object describing the function's parameters (type `"object"` with `"properties"`).
-
----
-
-#### `ToolCall`
-A tool call requested by the model, found in `AiResponse.tool_calls`.
-
-* **Fields:**
-  * `id` (`str`): Provider-assigned identifier. Pass back in `ToolResult.call_id`.
-  * `name` (`str`): Name of the tool function to execute.
-  * `arguments` (`dict`): Parsed argument dictionary for the tool function.
-
----
-
-#### `ToolResult`
-The result of a tool execution, passed back to `call_ai()` via `tool_results`.
-
-* **Fields:**
-  * `call_id` (`str`): The `id` of the `ToolCall` this result corresponds to.
-  * `name` (`str`): Name of the tool function that was executed (required by some providers for result routing).
-  * `content` (`str`): String result of the tool execution.
-
-### Exceptions
-
-Importable from `unified_ai_client`. Both are raised while the request is being
-assembled, before anything is sent, and neither is retried: a deterministic failure
-would repeat identically on every attempt.
-
-#### `UnsupportedFileError`
-Raised when a file is passed to a provider that has no way to transmit it, for
-example audio to `anthropic` or a PDF to `groq`. The message names the path, the
-detected type, and what the provider does accept. Subclasses `ValueError`.
-
-#### `MissingFileError`
-Raised when an attachment path does not exist. Subclasses `FileNotFoundError`, so
-existing handlers keep working.
-
-#### `FileDecodeError`
-Raised when a file classified as text cannot be decoded as UTF-8, meaning its
-content does not match its extension. Subclasses `ValueError`.
-
----
-
-## Design Concepts: Caching and Lifecycle
-
-`UnifiedAiClient` utilises a hybrid architectural design that separates stateful
-infrastructure configuration from stateless call parameters.
-
-### 1. General Settings (Stateful Configuration)
-The Python client is **stateful** regarding its connection infrastructure. Provider
-instances are created and cached inside the global module scope upon their first
-invocation:
-* Settings like `url`, network `timeout`, rate-limiting `sleep_time`, and
-  provider-specific options such as `context_size` are registered once via
-  `configure_provider()` at application startup.
-* Local settings like Ollama's `context_size` (`num_ctx`) are configuration-level
-  settings because changing them dynamically at call-time would force local model
-  reloads or re-allocation of GPU VRAM.
-* API credentials (API keys) loaded from `secrets.json` or system variables are cached.
-* Thread-safe singletons avoid unnecessary config loading and connection
-  re-initialisation on high-frequency requests.
-
-### 2. Call-Time Parameters (Stateless Requests)
-The conversation logic is **stateless**. `UnifiedAiClient` does not track chat history,
-context, or previous requests:
-* Parameters like `temperature`, `top_k`, `top_p`, `max_tokens` (mapped automatically
-  to `num_predict`, `max_output_tokens`, etc.), and JSON formatting flags can be
-  modified per-call in `call_ai()`.
-* Consuming projects maintain their own state (e.g. accumulating message history in
-  `messages`) and must pass the full history to each call.
-* Call-time overrides can be passed via the `extra_options` dictionary to customise
-  behaviour temporarily. They take precedence over values registered via
-  `configure_provider()` for the same key.
-
----
-
-## Architecture
-
-```
-unified_ai_client/
-├── __init__.py           # Public API exports
-├── client.py             # call_ai(), warm_up(), configure_provider() router + cache
-├── models.py             # AiRequest, AiResponse, ProviderConfig dataclasses
-├── file_utils.py         # classify_file, validate_files, encode_file_base64, ...
-├── exceptions.py         # UnsupportedFileError, MissingFileError, FileDecodeError
-├── config.py             # load_secrets(), load_config() (utility)
-├── retry.py              # Exponential backoff
-├── silence.py            # silence_sdks()
-└── providers/
-    ├── base.py           # BaseProvider ABC
-    ├── google.py         # Google AI (Gemini): upload caching, thinking, cleanup
-    ├── ollama.py         # Ollama: urllib, images[], context_size
-    ├── openai_compat.py  # Base for OpenAI-compatible APIs
-    ├── openai.py         # OpenAI: native audio + PDF blocks
-    ├── anthropic.py      # Anthropic: urllib, image/document blocks, thinking
-    ├── mistral.py        # Mistral (OpenAI-compatible)
-    ├── cohere.py         # Cohere (OpenAI-compatible)
-    ├── meta.py           # Meta / Llama API (OpenAI-compatible)
-    ├── groq.py           # Groq (OpenAI-compatible)
-    ├── xai.py            # xAI (OpenAI-compatible)
-    ├── lmstudio.py       # LM Studio (OpenAI-compatible)
-    ├── llamacpp.py       # llama.cpp: OpenAI-compatible, native audio
-    └── script.py         # External script via stdin/stdout JSON
-```
-
-All code follows PEP 8, Google-style docstrings, `from __future__ import annotations`,
-and modern type hints throughout.
+`cleanup()` deletes files uploaded to a remote provider. It is registered with `atexit` on
+the first `call_ai()` or `warm_up()`, so you normally never call it; see
+[docs/warm-up.md](docs/warm-up.md) for eager cleanup.

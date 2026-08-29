@@ -42,11 +42,10 @@ correct context window size (`num_ctx`) before the first call, preventing Ollama
 silently reloading the model mid-session when a different `num_ctx` arrives. No other
 library in this comparison exposes this control.
 
-**Script provider.** Any script that implements the
-[`LLM_Behaviour_Interface`](LLM_Behaviour_Interface.md) JSON stdin/stdout protocol can
-be used as a drop-in backend. This makes it straightforward to mock models in tests,
-wrap local binaries, or route calls to custom inference pipelines, all without changing
-the calling code.
+**Script provider.** Any script that implements the JSON stdin/stdout
+[script protocol](docs/script-protocol.md) can be used as a drop-in backend. This makes
+it straightforward to mock models in tests, wrap local binaries, or route calls to custom
+inference pipelines, all without changing the calling code.
 
 **Clean tool calling separation.** Tool definitions, tool call responses, and tool
 results are three distinct typed dataclasses (`ToolDefinition`, `ToolCall`,
