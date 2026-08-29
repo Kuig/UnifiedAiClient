@@ -9,6 +9,12 @@ from unified_ai_client.client import (
     get_provider,
 )
 from unified_ai_client.config import load_secrets, load_config
+from unified_ai_client.exceptions import (
+    NonRetryableError,
+    UnsupportedFileError,
+    MissingFileError,
+    FileDecodeError,
+)
 from unified_ai_client.silence import silence_sdks
 from unified_ai_client.models import AiResponse, AiRequest, ProviderConfig, ToolDefinition, ToolCall, ToolResult
 from unified_ai_client.providers.base import BaseProvider
@@ -24,6 +30,10 @@ __all__ = [
     "load_secrets",
     "load_config",
     "silence_sdks",
+    "NonRetryableError",
+    "UnsupportedFileError",
+    "MissingFileError",
+    "FileDecodeError",
     "AiResponse",
     "AiRequest",
     "ProviderConfig",

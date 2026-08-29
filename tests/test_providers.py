@@ -251,6 +251,51 @@ class TestFileUtils(unittest.TestCase):
         self.assertEqual(classify_file("data.csv"), "text")
         self.assertEqual(classify_file("binary.bin"), "unknown")
 
+    def test_classify_file_covers_common_source_and_config_types(self) -> None:
+        """Anything landing in 'unknown' is now refused, so coverage matters."""
+        from unified_ai_client.file_utils import classify_file
+        for name in (
+            "Service.cs", "widget.tsx", "app.jsx", "theme.scss", "Card.vue",
+            "records.jsonl", "diagram.svg", "fix.patch", "api.proto",
+            "schema.graphql", "main.tf", "build.gradle", "util.hpp",
+            "worker.dart", "analysis.jl", "settings.conf", "local.env",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(classify_file(name), "text")
+
+    def test_classify_file_recognises_extensionless_names(self) -> None:
+        """A Dockerfile has no extension but is plainly text."""
+        from unified_ai_client.file_utils import classify_file
+        for name in (
+            "Dockerfile", "Makefile", "LICENSE", "README", "CHANGELOG",
+            ".gitignore", ".dockerignore", ".editorconfig", ".env",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(classify_file(name), "text")
+
+    def test_extensionless_names_match_case_insensitively(self) -> None:
+        from unified_ai_client.file_utils import classify_file
+        for name in ("dockerfile", "DOCKERFILE", "makefile", "license"):
+            with self.subTest(name=name):
+                self.assertEqual(classify_file(name), "text")
+
+    def test_classify_file_still_refuses_genuine_unknowns(self) -> None:
+        """The wider list must not quietly turn into 'everything is text'."""
+        from unified_ai_client.file_utils import classify_file
+        for name in (
+            "archive.zip", "sheet.xlsx", "report.docx", "lib.so", "app.exe",
+            "Dockerfile.dev", "notes",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(classify_file(name), "unknown")
+
+    def test_full_paths_classify_by_basename(self) -> None:
+        """The name lookup must not be confused by parent directories."""
+        from unified_ai_client.file_utils import classify_file
+        self.assertEqual(classify_file("/srv/app/Dockerfile"), "text")
+        self.assertEqual(classify_file(os.path.join("repo", ".gitignore")), "text")
+        self.assertEqual(classify_file(os.path.join("src", "Service.cs")), "text")
+
     def test_normalize_file_paths(self) -> None:
         from unified_ai_client.file_utils import normalize_file_paths
         self.assertEqual(normalize_file_paths(None), [])

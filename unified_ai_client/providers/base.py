@@ -14,6 +14,31 @@ class BaseProvider(ABC):
     ensuring complete provider agnosticism.
     """
 
+    SUPPORTED_FILE_TYPES: frozenset[str] = frozenset()
+    """File classes this provider can transmit natively.
+
+    Values come from ``classify_file()``: ``'image'``, ``'audio'``,
+    ``'document'``. ``'text'`` is deliberately absent, and never declared: text
+    files are inlined into the prompt by every provider rather than carried in a
+    native block, so ``validate_files()`` accepts them unconditionally.
+
+    The empty default means "nothing but text", which is the safe answer for a
+    provider whose capabilities have not been established.
+    """
+
+    @property
+    def provider_name(self) -> str:
+        """The registry name this adapter is reached by.
+
+        Derived from the class name so error messages can name the provider the
+        caller actually passed to ``call_ai()`` without every subclass having to
+        repeat it: ``LmStudioProvider`` becomes ``'lmstudio'``.
+
+        Returns:
+            The lower-case provider name.
+        """
+        return type(self).__name__.removesuffix("Provider").lower()
+
     @abstractmethod
     def call(self, request: AiRequest) -> AiResponse:
         """Execute an AI inference call.

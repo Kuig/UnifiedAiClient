@@ -37,7 +37,7 @@ association on Windows).
    interpreter is used:
    - Windows: `.venv/Scripts/python.exe`
    - Unix / macOS: `.venv/bin/python`
-2. If no local `.venv` is found, `sys.executable` is used — the same interpreter
+2. If no local `.venv` is found, `sys.executable` is used: the same interpreter
    that UnifiedAiClient is running under (same virtual environment, same installed
    packages).
 
@@ -200,14 +200,14 @@ the assistant's intermediate turn with `tool_calls`. This allows the model to li
 tool result back to its own request.
 
 When `tool_results` is non-null, the library does **not** append the current `prompt`
-as a new user message — the prompt is present in `messages` already.
+as a new user message, because the prompt is present in `messages` already.
 
 > **Note on `messages` format:** The `tool_calls` structure in assistant messages is
 > always the same OpenAI-style `{"function": {"name": ..., "arguments": {...}}}` format,
 > regardless of which provider the consumer is targeting. For native providers
 > (Anthropic, Google, OpenAI-compat, Ollama), the library converts this format
 > internally to the provider's native representation before the API call.
-> For the `script` provider, messages are passed through as-is — the script receives
+> For the `script` provider, messages are passed through as-is, so the script receives
 > this exact format and is responsible for handling it.
 
 ```json
@@ -346,7 +346,7 @@ be an empty string.
 
 > **Note on `reasoning_text`**: This field contains the model's thinking/reasoning process if produced. While thinking is explicitly requested via the `thinking` flag, some models may generate thoughts even when `thinking=false`. If reasoning is not supported or not produced, return `""` or omit the field. The thinking transcript is always returned to the caller via `AiResponse.reasoning_text` if present.
 
-### 2.4 Input: `embed` payload (stdin) — optional
+### 2.4 Input: `embed` payload (stdin), optional
 
 Sent by `get_embedding()`. The payload is intentionally minimal:
 
@@ -363,7 +363,7 @@ Sent by `get_embedding()`. The payload is intentionally minimal:
 }
 ```
 
-### 2.5 Output: `embed` response (stdout) — optional
+### 2.5 Output: `embed` response (stdout), optional
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -488,7 +488,7 @@ a `json.JSONDecodeError` in ScriptProvider.
 
 ## 5. Timeout
 
-The `timeout` field in the request JSON is informational — it tells the script how long
+The `timeout` field in the request JSON is informational: it tells the script how long
 UnifiedAiClient is willing to wait. `subprocess.run()` enforces this same timeout at
 the OS level: if the script does not exit within `timeout` seconds, the process is
 killed and a `subprocess.TimeoutExpired` exception is raised.
@@ -511,7 +511,12 @@ The following fields are passed for completeness but many scripts will not use t
   script cannot guarantee JSON output, it may ignore this flag.
 - `file_path`: List of file paths. Scripts that do not support multimodal input
   should ignore this field. Scripts that support it are responsible for reading and
-  processing the files themselves — the library passes raw paths, not encoded data.
+  processing the files themselves: the library passes raw paths, not encoded data.
+  Paths are **not filtered by type**. Other providers refuse a file they cannot
+  transmit, but only the script knows what it can open, so every path the caller
+  supplied arrives as given, including ones the script may not handle. Validate what
+  you receive, and report an unusable attachment through the normal error channel
+  rather than answering as though you had read it.
 - `temperature`: A hint for output randomness. Deterministic scripts may ignore it.
 
 ---

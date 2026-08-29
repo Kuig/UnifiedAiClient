@@ -5,6 +5,12 @@ import logging
 import mimetypes
 import os
 
+from unified_ai_client.exceptions import (
+    FileDecodeError,
+    MissingFileError,
+    UnsupportedFileError,
+)
+
 _log = logging.getLogger("unified_ai_client.file_utils")
 
 # ---------------------------------------------------------------------------
@@ -18,18 +24,43 @@ _AUDIO_EXTS: frozenset[str] = frozenset({
     ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus",
 })
 _TEXT_EXTS: frozenset[str] = frozenset({
-    ".txt", ".md", ".csv", ".json", ".py", ".html", ".htm",
-    ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".log",
-    ".js", ".ts", ".css", ".sql", ".sh", ".bat", ".ps1",
-    ".r", ".java", ".c", ".cpp", ".h", ".rs", ".go",
-    ".rb", ".php", ".swift", ".kt", ".scala", ".lua",
-    ".tex", ".rst", ".adoc", ".tsv",
+    ".txt", ".md", ".markdown", ".mdx", ".csv", ".tsv", ".json",
+    ".jsonl", ".ndjson", ".html", ".htm", ".xml", ".svg",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".log",
+    ".env", ".properties",
+    ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".vue", ".svelte", ".css", ".scss", ".sass", ".less",
+    ".sql", ".sh", ".bat", ".ps1", ".pl", ".r", ".jl",
+    ".java", ".kt", ".scala", ".groovy", ".gradle",
+    ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hh", ".hxx",
+    ".cs", ".rs", ".go", ".rb", ".php", ".swift", ".dart", ".lua",
+    ".proto", ".graphql", ".gql", ".tf", ".cmake",
+    ".patch", ".diff",
+    ".tex", ".bib", ".rst", ".adoc",
 })
 _DOCUMENT_EXTS: frozenset[str] = frozenset({".pdf"})
 
+# Files whose name *is* their type. Matched before the extension lookup because
+# os.path.splitext() finds nothing usable in either 'Dockerfile' or '.gitignore':
+# the first has no extension, the second is read as one with an empty name.
+_TEXT_FILENAMES: frozenset[str] = frozenset({
+    "dockerfile", "containerfile", "makefile", "gnumakefile",
+    "rakefile", "gemfile", "procfile", "vagrantfile", "justfile",
+    "license", "readme", "changelog", "authors", "notice",
+    ".gitignore", ".gitattributes", ".dockerignore", ".editorconfig", ".env",
+})
+
 
 def classify_file(path: str) -> str:
-    """Classify a file by its extension.
+    """Classify a file by its name and extension.
+
+    The classification decides how a file reaches the model: images, audio and
+    PDFs become native content blocks where the provider supports them, text is
+    inlined into the prompt, and 'unknown' is refused rather than guessed at.
+
+    Well-known extensionless names ('Dockerfile', 'Makefile', '.gitignore') are
+    recognised by basename, case-insensitively. A suffixed variant such as
+    'Dockerfile.dev' is not: it classifies as unknown.
 
     Args:
         path: Path to the file.
@@ -37,6 +68,9 @@ def classify_file(path: str) -> str:
     Returns:
         One of: 'image', 'audio', 'text', 'document', 'unknown'.
     """
+    if os.path.basename(path).lower() in _TEXT_FILENAMES:
+        return "text"
+
     ext = os.path.splitext(path)[1].lower()
     if ext in _IMAGE_EXTS:
         return "image"
@@ -63,6 +97,62 @@ def normalize_file_paths(file_path: str | list[str] | None) -> list[str]:
     if isinstance(file_path, str):
         return [file_path]
     return list(file_path)
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+
+def validate_files(
+    paths: list[str],
+    provider_name: str,
+    supported: frozenset[str],
+) -> None:
+    """Reject attachments a provider cannot transmit, before the request is built.
+
+    Every path is checked before any of them is read or encoded, so a rejected
+    attachment costs nothing even when it is listed after large ones.
+
+    ``'text'`` is always accepted: no provider exposes a native block for a
+    ``.md`` or ``.csv``, so those are inlined into the prompt instead (Google
+    uploads them, which reaches the same place by a different route). Every
+    other class must be one the provider declares, otherwise the file would be
+    silently dropped or fed through as unreadable text, and the model would
+    answer as though it had received it.
+
+    Args:
+        paths: Local file paths to check.
+        provider_name: Provider name, used in the error message.
+        supported: File classes this provider can transmit natively, from
+            ``BaseProvider.SUPPORTED_FILE_TYPES``.
+
+    Raises:
+        MissingFileError: If a path does not exist or is not a regular file.
+            A ``FileNotFoundError`` subclass, so existing handlers still catch it.
+        UnsupportedFileError: If a file's class is neither ``'text'`` nor one
+            the provider supports.
+    """
+    for path in paths:
+        if not os.path.isfile(path):
+            raise MissingFileError(f"Attachment not found: '{path}'")
+
+        file_type = classify_file(path)
+        if file_type == "text" or file_type in supported:
+            continue
+
+        accepted = ", ".join(sorted(supported | {"text"})) or "text"
+        if file_type == "unknown":
+            detail = (
+                f"Unrecognised file type: '{path}'. Provider "
+                f"'{provider_name}' accepts: {accepted}."
+            )
+        else:
+            detail = (
+                f"Provider '{provider_name}' cannot accept {file_type} files: "
+                f"'{path}'. Accepted: {accepted}."
+            )
+        raise UnsupportedFileError(detail)
 
 
 # ---------------------------------------------------------------------------
@@ -148,12 +238,21 @@ def format_text_attachment(file_path: str) -> str:
 
     Returns:
         A formatted string block with file header, content, and footer.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        FileDecodeError: If the file is not valid UTF-8. Substituting
+            placeholder text here would reach the model as though it were the
+            file's real content.
     """
     filename = os.path.basename(file_path)
     try:
         content = read_text_file(file_path)
-    except Exception:
-        content = "[File could not be read as text]"
+    except UnicodeDecodeError as exc:
+        raise FileDecodeError(
+            f"Text attachment '{file_path}' is not valid UTF-8. "
+            f"Its extension suggests text, but its content is not."
+        ) from exc
     _log.info(
         "File '%s' formatted as text attachment (%d chars)",
         filename,

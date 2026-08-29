@@ -11,6 +11,7 @@ from unified_ai_client.file_utils import (
     encode_file_base64,
     inline_text_attachments,
     normalize_file_paths,
+    validate_files,
 )
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
@@ -25,14 +26,18 @@ class OllamaProvider(BaseProvider):
     dependencies like the official 'ollama' Python library.
 
     File handling:
-    - Images and audio: encoded as base64 and sent in the 'images' field.
-      Ollama uses this single field for all multimodal data (images and audio
-      for models like Gemma4).
+    - Images: encoded as base64 and sent in the 'images' field.
     - Text files: inlined into the prompt using inline_text_attachments().
-    - PDFs: treated as text (inline attempt). A warning is logged.
+    - Audio and PDFs: rejected. /api/chat has no field for either. Ollama does
+      serve audio-capable models, but reaching them needs its OpenAI-compatible
+      endpoint, which this adapter does not use.
     """
 
     DEFAULT_URL: str = "http://localhost:11434"
+
+    # /api/chat carries attachments in images[] and nothing else. Audio-capable
+    # models exist, but reaching them needs the OpenAI-compatible endpoint.
+    SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image"})
 
     def __init__(self, config: ProviderConfig) -> None:
         """Initialize the Ollama provider.
@@ -76,9 +81,11 @@ class OllamaProvider(BaseProvider):
     ) -> tuple[str, list[str]]:
         """Process a list of file paths for an Ollama message.
 
-        Separates files by type:
-        - Images and audio: base64-encoded for the 'images' field.
-        - Text/document/unknown: inlined into the prompt.
+        Images are base64-encoded into the 'images' field; text files are
+        inlined into the prompt. Anything else is rejected: /api/chat carries no
+        other kind of attachment, so a file placed in images[] that is not an
+        image is read as a corrupt image or ignored outright, and the model
+        answers as though nothing had been attached.
 
         Args:
             file_paths: List of file paths to process.
@@ -86,25 +93,20 @@ class OllamaProvider(BaseProvider):
 
         Returns:
             A tuple of (modified_prompt, list_of_base64_strings).
+
+        Raises:
+            FileNotFoundError: If an attachment does not exist.
+            UnsupportedFileError: If an attachment is neither an image nor text.
         """
+        validate_files(file_paths, self.provider_name, self.SUPPORTED_FILE_TYPES)
+
         multimodal_data: list[str] = []
         text_files: list[str] = []
 
         for fp in file_paths:
-            ft = classify_file(fp)
-            if ft in ("image", "audio"):
-                _log.info(
-                    "Ollama: encoding '%s' (%s) as base64 multimodal data",
-                    fp,
-                    ft,
-                )
+            if classify_file(fp) == "image":
+                _log.info("Ollama: encoding '%s' as base64 image data", fp)
                 multimodal_data.append(encode_file_base64(fp))
-            elif ft == "document":
-                _log.warning(
-                    "Ollama: PDF '%s' not natively supported — attempting text inline",
-                    fp,
-                )
-                text_files.append(fp)
             else:
                 text_files.append(fp)
 

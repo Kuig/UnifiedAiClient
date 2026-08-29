@@ -16,6 +16,10 @@ class LlamaCppProvider(OpenAiCompatProvider):
 
     DEFAULT_URL: str = "http://localhost:8080"
 
+    # llama-server routes an input_audio block through miniaudio (mp3, wav,
+    # flac), so this is the one local provider that takes audio directly.
+    SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "audio"})
+
     def warm_up(
         self,
         model: str,

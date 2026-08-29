@@ -11,7 +11,7 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-from unified_ai_client.file_utils import normalize_file_paths
+from unified_ai_client.file_utils import normalize_file_paths, validate_files
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
 
@@ -26,6 +26,10 @@ class GoogleProvider(BaseProvider):
     session, rate-limit delaying, safety filters, thinking configuration
     variants, and rigorous file cleanup on termination.
     """
+
+    # The Files API accepts every class the library can classify, so uploads are
+    # never refused locally.
+    SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "audio", "document"})
 
     def __init__(self, config: ProviderConfig, api_key: str | None = None) -> None:
         """Initialize the Google provider.
@@ -205,7 +209,14 @@ class GoogleProvider(BaseProvider):
 
         Returns:
             List of types.Part objects referencing the uploaded files.
+
+        Raises:
+            FileNotFoundError: If an attachment does not exist. Checked up front
+                so a bad path fails before earlier files are uploaded and have
+                to be cleaned up again.
         """
+        validate_files(file_paths, self.provider_name, self.SUPPORTED_FILE_TYPES)
+
         parts = []
         for fp in file_paths:
             ref = self._upload_file(fp, upload_poll_timeout)

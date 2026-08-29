@@ -83,6 +83,10 @@ class ScriptProvider(BaseProvider):
       2. If no local .venv is found, sys.executable is used.
 
     Each call_ai() invocation spawns a fresh subprocess (stateless model).
+
+    Attachments are not validated here. The script receives raw paths and is the
+    only party that knows what it can open, so refusing a type on its behalf
+    would be guesswork.
     """
 
     def __init__(self, config: ProviderConfig) -> None:

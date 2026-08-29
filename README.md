@@ -34,7 +34,7 @@ Supported providers:
 pip install -e /path/to/UnifiedAiClient
 ```
 
-**Production / other machines** — declare in your project's `requirements.txt`:
+**Production / other machines**: declare in your project's `requirements.txt`:
 
 ```text
 unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.4.0
@@ -49,14 +49,14 @@ then run `pip install -r requirements.txt`.
 All configuration is **optional**. The library falls back to built-in defaults when
 nothing is provided.
 
-### API credentials — environment variables and/or `secrets.json`
+### API credentials: environment variables and/or `secrets.json`
 
 Only API keys for cloud providers belong here. Server URLs for local providers (Ollama,
-LM Studio, llama.cpp) are **not** credentials — register them via `configure_provider()`.
+LM Studio, llama.cpp) are **not** credentials; register them via `configure_provider()`.
 
 **Precedence** (highest → lowest):
-1. Environment variables (`os.environ`) — shell, Docker, CI/CD
-2. `secrets.json` in the consuming project's root — for local development
+1. Environment variables (`os.environ`): shell, Docker, CI/CD
+2. `secrets.json` in the consuming project's root: for local development
 
 Supported keys (see [`secrets.json.example`](secrets.json.example) and [`.env.example`](.env.example)):
 
@@ -103,7 +103,7 @@ configure_provider("openai", url="http://localhost:11434")   # Ollama's /v1 endp
 call_ai(provider="openai", model="gemma4:12b", prompt="...")  # no OpenAI key needed
 ```
 
-### Provider settings — `configure_provider()`
+### Provider settings: `configure_provider()`
 
 Controls server URLs, timeouts, rate-limit delays, and provider-specific options such
 as `context_size` or `visual_token_budget`. Call this once at application startup for
@@ -179,8 +179,8 @@ print(f"Tokens used: In={response.input_tokens}, Out={response.output_tokens}")
 
 ### Multimodal Input (Files)
 
-Pass a local file path (or list of paths) via `file_path`. The library handles all
-encoding, upload, and fallback logic depending on provider and file type:
+Pass a local file path (or list of paths) via `file_path`. The library handles the
+encoding and upload for you, choosing the native mechanism each provider offers:
 
 ```python
 # Single image
@@ -205,16 +205,76 @@ Supported file types per provider:
 | Provider | Images | Audio | Text files | PDFs |
 |---|---|---|---|---|
 | `google` | ✅ Upload | ✅ Upload | ✅ Upload | ✅ Upload |
-| `ollama` | ✅ base64 | ✅ base64 (multimodal models) | ✅ Inlined | ⚠️ Inlined as text, with a warning |
 | `openai` | ✅ base64 | ✅ base64 | ✅ Inlined | ✅ base64 |
-| `anthropic` | ✅ base64 | ❌ Not supported | ✅ Inlined | ✅ base64 |
-| `mistral` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
-| `cohere` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
-| `meta` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
-| `groq` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
-| `xai` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
-| `lmstudio` / `llamacpp` | ✅ base64 | ❌ Not supported | ✅ Inlined | ❌ Not supported |
+| `anthropic` | ✅ base64 | ❌ Raises | ✅ Inlined | ✅ base64 |
+| `llamacpp` | ✅ base64 | ✅ base64 | ✅ Inlined | ❌ Raises |
+| `ollama` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `mistral` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `cohere` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `meta` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `groq` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `xai` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `lmstudio` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
 | `script` | Path passed | Path passed | Path passed | Path passed |
+
+**Text files are always accepted, everything else must be native.** No provider
+exposes a dedicated block type for a `.md` or a `.csv`, so text attachments are
+wrapped in a delimited block and prepended to the prompt. Google is the exception:
+it uploads text through the Files API alongside every other attachment, because
+Gemini reads those files natively. Every other kind of file needs a native
+mechanism, and where the provider has none, the call raises `UnsupportedFileError`
+rather than sending something the model cannot read:
+
+```python
+call_ai(provider="groq", model="...", prompt="Transcribe this.", file_path="talk.mp3")
+# UnsupportedFileError: Provider 'groq' cannot accept audio files: 'talk.mp3'.
+# Accepted: image, text.
+```
+
+The alternative, which earlier versions did, is to read the file as text anyway and
+substitute a placeholder when that fails. The model then answers as though it had
+received the recording, and nothing in the response says otherwise. A refused call
+is recoverable; a confident answer about a file the model never saw is not.
+
+Three consequences worth knowing:
+
+- Files are validated **before** any of them is encoded or uploaded, so one bad path
+  in a list fails immediately instead of after the others have been sent.
+- A missing file raises `MissingFileError`, a `FileNotFoundError` subclass. Neither it
+  nor `UnsupportedFileError` is retried: both would fail identically on every attempt,
+  so the error surfaces at once instead of after the backoff budget.
+- Unrecognised file types raise rather than being guessed at as text. Read such a
+  file yourself and pass the content in `prompt`.
+
+The `script` provider is exempt: it receives raw paths and decides for itself, since
+only the script knows what it can open.
+
+#### What counts as a text file
+
+Classification is by extension, covering the usual source, markup, data and config
+formats: `.txt`, `.md`, `.csv`, `.json`, `.jsonl`, `.yaml`, `.toml`, `.xml`, `.svg`,
+`.html`, `.py`, `.js`, `.jsx`, `.ts`, `.tsx`, `.vue`, `.svelte`, `.css`, `.scss`,
+`.c`, `.h`, `.cpp`, `.hpp`, `.cs`, `.java`, `.kt`, `.go`, `.rs`, `.rb`, `.php`,
+`.swift`, `.dart`, `.sh`, `.ps1`, `.sql`, `.proto`, `.graphql`, `.tf`, `.patch`, and
+others in the same vein.
+
+Files whose name is their type are recognised too, matched case-insensitively:
+`Dockerfile`, `Makefile`, `LICENSE`, `README`, `CHANGELOG`, `.gitignore`, `.env`,
+`.editorconfig`, `.dockerignore` and similar. A suffixed variant such as
+`Dockerfile.dev` is not recognised and raises.
+
+`.svg` is treated as text rather than as an image on purpose: no provider accepts SVG
+in an image block, and the markup is more useful to the model than a refusal.
+
+> **Note:** `.env` files and similar config are inlined verbatim, secrets included.
+> Nothing is scanned or redacted, so check what a file holds before attaching it.
+
+**Ollama and audio.** Ollama serves audio-capable models such as Gemma 4 `e2b`, but
+its native `/api/chat` endpoint, which this adapter uses, has no field to carry
+audio; putting it in `images[]` is silently ignored. Reaching those models needs
+Ollama's OpenAI-compatible endpoint, which costs the `/api/chat` options this adapter
+depends on (`context_size`, `keep_alive`, native thinking). Until that is wired up,
+audio to `ollama` raises. This is a limitation of the adapter, not of Ollama.
 
 ### Thinking / Reasoning
 
@@ -456,7 +516,7 @@ if response.tool_calls:
 
     # Turn 2: pass full history in messages + tool_results.
     # When tool_results are provided, the library does NOT re-append the
-    # current prompt as a new user message — the consumer controls the history.
+    # current prompt as a new user message; the consumer controls the history.
     final = call_ai(
         provider="ollama",
         model="gemma4:12b",
@@ -552,7 +612,7 @@ def call_ai(
   * `prompt` (`str`): The user prompt.
   * `system_prompt` (`str | None`, optional): System instructions. Defaults to `None`.
   * `messages` (`list[dict] | None`, optional): A list of previous chat messages in the format `[{"role": "user" | "assistant", "content": "..."}]`. Messages can also include an optional `"files"` key containing a list of local file paths. Defaults to `None`.
-  * `file_path` (`str | list[str] | None`, optional): Local file path(s) to attach for multimodal prompts. Supports images, audio, PDFs, and text files. Defaults to `None`.
+  * `file_path` (`str | list[str] | None`, optional): Local file path(s) to attach for multimodal prompts. Accepts images, audio, PDFs, and text files, subject to what the target provider supports; see [Multimodal Input](#multimodal-input-files). Raises `UnsupportedFileError` if the provider cannot carry a given file, and `MissingFileError` (a `FileNotFoundError`) if a path does not exist. Defaults to `None`.
   * `temperature` (`float`, optional): Sampling temperature. Defaults to `0.7`.
   * `thinking` (`bool | str`, optional): Enables extended reasoning/thinking mode (`True`/`False`), or delegates to the provider's default behavior (`"default"`). Defaults to `"default"`.
   * `format_json` (`bool`, optional): Forces the model to respond in valid JSON format. Defaults to `False`.
@@ -806,6 +866,25 @@ The result of a tool execution, passed back to `call_ai()` via `tool_results`.
   * `name` (`str`): Name of the tool function that was executed (required by some providers for result routing).
   * `content` (`str`): String result of the tool execution.
 
+### Exceptions
+
+Importable from `unified_ai_client`. Both are raised while the request is being
+assembled, before anything is sent, and neither is retried: a deterministic failure
+would repeat identically on every attempt.
+
+#### `UnsupportedFileError`
+Raised when a file is passed to a provider that has no way to transmit it, for
+example audio to `anthropic` or a PDF to `groq`. The message names the path, the
+detected type, and what the provider does accept. Subclasses `ValueError`.
+
+#### `MissingFileError`
+Raised when an attachment path does not exist. Subclasses `FileNotFoundError`, so
+existing handlers keep working.
+
+#### `FileDecodeError`
+Raised when a file classified as text cannot be decoded as UTF-8, meaning its
+content does not match its extension. Subclasses `ValueError`.
+
 ---
 
 ## Design Concepts: Caching and Lifecycle
@@ -848,24 +927,25 @@ unified_ai_client/
 ├── __init__.py           # Public API exports
 ├── client.py             # call_ai(), warm_up(), configure_provider() router + cache
 ├── models.py             # AiRequest, AiResponse, ProviderConfig dataclasses
-├── file_utils.py         # classify_file, encode_file_base64, inline_text_attachments, ...
+├── file_utils.py         # classify_file, validate_files, encode_file_base64, ...
+├── exceptions.py         # UnsupportedFileError, MissingFileError, FileDecodeError
 ├── config.py             # load_secrets(), load_config() (utility)
 ├── retry.py              # Exponential backoff
 ├── silence.py            # silence_sdks()
 └── providers/
     ├── base.py           # BaseProvider ABC
-    ├── google.py         # Google AI (Gemini) — upload caching, thinking, cleanup
-    ├── ollama.py         # Ollama — urllib, images[], audio, context_size
+    ├── google.py         # Google AI (Gemini): upload caching, thinking, cleanup
+    ├── ollama.py         # Ollama: urllib, images[], context_size
     ├── openai_compat.py  # Base for OpenAI-compatible APIs
-    ├── openai.py         # OpenAI — native audio + PDF blocks
-    ├── anthropic.py      # Anthropic — urllib, image/document blocks, thinking
-    ├── mistral.py        # Mistral — OpenAI-compatible
-    ├── cohere.py         # Cohere — OpenAI-compatible
-    ├── meta.py           # Meta (Llama API) — OpenAI-compatible
-    ├── groq.py           # Groq — OpenAI-compatible
-    ├── xai.py            # xAI — OpenAI-compatible
-    ├── lmstudio.py       # LM Studio — OpenAI-compatible
-    ├── llamacpp.py       # llama.cpp — OpenAI-compatible
+    ├── openai.py         # OpenAI: native audio + PDF blocks
+    ├── anthropic.py      # Anthropic: urllib, image/document blocks, thinking
+    ├── mistral.py        # Mistral (OpenAI-compatible)
+    ├── cohere.py         # Cohere (OpenAI-compatible)
+    ├── meta.py           # Meta / Llama API (OpenAI-compatible)
+    ├── groq.py           # Groq (OpenAI-compatible)
+    ├── xai.py            # xAI (OpenAI-compatible)
+    ├── lmstudio.py       # LM Studio (OpenAI-compatible)
+    ├── llamacpp.py       # llama.cpp: OpenAI-compatible, native audio
     └── script.py         # External script via stdin/stdout JSON
 ```
 

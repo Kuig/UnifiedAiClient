@@ -11,9 +11,11 @@ Usage:
 """
 from __future__ import annotations
 
+import base64
 import importlib
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -440,6 +442,440 @@ class TestGoogleEmbeddingsLive(unittest.TestCase):
         self.assertIsInstance(vector, list)
         self.assertGreater(len(vector), 0)
         self.assertTrue(all(isinstance(x, float) for x in vector))
+
+
+# ---------------------------------------------------------------------------
+# 6. File handling: what each provider accepts, and how it refuses the rest
+# ---------------------------------------------------------------------------
+
+def _make_file(suffix: str, data: bytes = b"x") -> str:
+    """Write a temp file with the given extension and return its path."""
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    tmp.write(data)
+    tmp.close()
+    return tmp.name
+
+
+class FileFixtureCase(unittest.TestCase):
+    """Base class that cleans up the temp files a test creates."""
+
+    def setUp(self) -> None:
+        self._paths: list[str] = []
+
+    def tearDown(self) -> None:
+        for path in self._paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def make(self, suffix: str, data: bytes = b"x") -> str:
+        path = _make_file(suffix, data)
+        self._paths.append(path)
+        return path
+
+
+class TestFileSupportMatrix(FileFixtureCase):
+    """Every provider declares what it can carry, and refuses the rest.
+
+    The table is the specification: each provider maps to the file classes it
+    can transmit natively. 'text' is deliberately absent everywhere, being
+    inlined into the prompt rather than carried in a native block.
+    """
+
+    _SUPPORT = {
+        "google": ("google", "GoogleProvider", {"image", "audio", "document"}),
+        "openai": ("openai", "OpenAiProvider", {"image", "audio", "document"}),
+        "anthropic": ("anthropic", "AnthropicProvider", {"image", "document"}),
+        "llamacpp": ("llamacpp", "LlamaCppProvider", {"image", "audio"}),
+        "ollama": ("ollama", "OllamaProvider", {"image"}),
+        "mistral": ("mistral", "MistralProvider", {"image"}),
+        "cohere": ("cohere", "CohereProvider", {"image"}),
+        "meta": ("meta", "MetaProvider", {"image"}),
+        "groq": ("groq", "GroqProvider", {"image"}),
+        "xai": ("xai", "XAiProvider", {"image"}),
+        "lmstudio": ("lmstudio", "LmStudioProvider", {"image"}),
+    }
+
+    _SAMPLE = {"image": ".png", "audio": ".mp3", "document": ".pdf"}
+
+    def test_declared_support_matches_the_table(self) -> None:
+        for name, (module, class_name, expected) in self._SUPPORT.items():
+            with self.subTest(provider=name):
+                cls = _provider_class(module, class_name)
+                self.assertEqual(set(cls.SUPPORTED_FILE_TYPES), expected)
+
+    def test_unsupported_classes_raise(self) -> None:
+        """The refusal must name the file and the provider, not just fail."""
+        from unified_ai_client.exceptions import UnsupportedFileError
+        from unified_ai_client.file_utils import validate_files
+
+        for name, (_, _, supported) in self._SUPPORT.items():
+            for file_type, suffix in self._SAMPLE.items():
+                if file_type in supported:
+                    continue
+                with self.subTest(provider=name, file_type=file_type):
+                    path = self.make(suffix)
+                    with self.assertRaises(UnsupportedFileError) as ctx:
+                        validate_files([path], name, frozenset(supported))
+                    message = str(ctx.exception)
+                    self.assertIn(path, message)
+                    self.assertIn(name, message)
+
+    def test_supported_classes_pass(self) -> None:
+        from unified_ai_client.file_utils import validate_files
+
+        for name, (_, _, supported) in self._SUPPORT.items():
+            for file_type in supported:
+                with self.subTest(provider=name, file_type=file_type):
+                    path = self.make(self._SAMPLE[file_type])
+                    self.assertIsNone(
+                        validate_files([path], name, frozenset(supported))
+                    )
+
+    def test_text_is_accepted_everywhere(self) -> None:
+        """No provider has a native text block, so inlining must stay open."""
+        from unified_ai_client.file_utils import validate_files
+
+        for name, (_, _, supported) in self._SUPPORT.items():
+            with self.subTest(provider=name):
+                path = self.make(".md", b"# notes")
+                self.assertIsNone(
+                    validate_files([path], name, frozenset(supported))
+                )
+
+    def test_unknown_extensions_raise(self) -> None:
+        """An unrecognised file is refused rather than guessed at as text."""
+        from unified_ai_client.exceptions import UnsupportedFileError
+        from unified_ai_client.file_utils import validate_files
+
+        path = self.make(".bin", bytes([0, 1, 2]))
+        with self.assertRaises(UnsupportedFileError):
+            validate_files([path], "groq", frozenset({"image"}))
+
+    def test_a_missing_file_is_reported_before_anything_is_read(self) -> None:
+        from unified_ai_client.file_utils import validate_files
+
+        good = self.make(".png")
+        with self.assertRaises(FileNotFoundError):
+            validate_files([good, "no-such-file.png"], "groq", frozenset({"image"}))
+
+    def test_script_validates_nothing(self) -> None:
+        """The script owns its own type policy; the library must not guess."""
+        cls = _provider_class("script", "ScriptProvider")
+        self.assertEqual(set(cls.SUPPORTED_FILE_TYPES), set())
+
+
+class TestUnsupportedFilesAreNotRetried(FileFixtureCase):
+    """A rejected attachment must fail at once, not after the backoff budget."""
+
+    def test_with_retry_reraises_immediately(self) -> None:
+        from unified_ai_client.exceptions import UnsupportedFileError
+        from unified_ai_client.retry import with_retry
+
+        calls = {"n": 0}
+
+        def always_unsupported() -> None:
+            calls["n"] += 1
+            raise UnsupportedFileError("nope")
+
+        with self.assertRaises(UnsupportedFileError):
+            with_retry(always_unsupported, max_retries=3, base_delay=0.01)
+        self.assertEqual(calls["n"], 1)
+
+    def test_a_bad_attachment_fails_call_ai_without_backoff(self) -> None:
+        """The end-to-end path, not just the validator.
+
+        Validating in the right place is not enough: the error also has to be
+        one with_retry() declines to retry. Raising a plain FileNotFoundError
+        here cost three backoff rounds before the caller heard about a path that
+        was never going to appear.
+        """
+        import time
+        from unified_ai_client import call_ai
+        from unified_ai_client.exceptions import UnsupportedFileError
+
+        cases = (
+            ("missing path", "no-such-file.png", FileNotFoundError),
+            ("unsupported type", self.make(".mp3"), UnsupportedFileError),
+        )
+        for label, path, expected in cases:
+            with self.subTest(case=label):
+                started = time.monotonic()
+                with self.assertRaises(expected):
+                    call_ai(
+                        provider="groq",
+                        model="irrelevant",
+                        prompt="hi",
+                        file_path=path,
+                        max_retries=3,
+                        retry_base_delay=5.0,
+                    )
+                self.assertLess(
+                    time.monotonic() - started,
+                    2.0,
+                    "attachment errors must surface immediately, not after backoff",
+                )
+
+    def test_ordinary_failures_are_still_retried(self) -> None:
+        """The non-retry path must not disable retrying in general."""
+        from unified_ai_client.retry import with_retry
+
+        calls = {"n": 0}
+
+        def flaky() -> str:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("transient")
+            return "ok"
+
+        self.assertEqual(with_retry(flaky, max_retries=3, base_delay=0.01), "ok")
+        self.assertEqual(calls["n"], 3)
+
+
+class TestTextAttachmentDecoding(FileFixtureCase):
+    """A text attachment that is not text must not become placeholder prose."""
+
+    def test_undecodable_text_file_raises(self) -> None:
+        from unified_ai_client.exceptions import FileDecodeError
+        from unified_ai_client.file_utils import format_text_attachment
+
+        path = self.make(".txt", bytes([0xFF, 0xFE, 0x00, 0x80]) + b"binary")
+        with self.assertRaises(FileDecodeError):
+            format_text_attachment(path)
+
+    def test_no_placeholder_text_survives_in_the_library(self) -> None:
+        """The old fallback reached the model as if it were file content."""
+        import unified_ai_client.file_utils as file_utils
+
+        source = Path(file_utils.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("could not be read as text", source)
+
+
+class TestNativeBlockShapes(FileFixtureCase):
+    """The block a provider emits must match what its API actually accepts."""
+
+    def test_openai_pdf_uses_the_chat_completions_file_block(self) -> None:
+        """'input_file' is the Responses API name and is rejected here."""
+        provider = _provider_class("openai", "OpenAiProvider")(
+            ProviderConfig(), api_key="fake"
+        )
+        path = self.make(".pdf", b"%PDF-1.4 fake")
+        block = provider._build_native_block(path, "document")
+
+        self.assertEqual(block["type"], "file")
+        self.assertIn("file_data", block["file"])
+        self.assertTrue(
+            block["file"]["file_data"].startswith("data:application/pdf;base64,")
+        )
+
+    def test_llamacpp_audio_uses_an_input_audio_block(self) -> None:
+        provider = _provider_class("llamacpp", "LlamaCppProvider")(ProviderConfig())
+        path = self.make(".wav", b"RIFFfake")
+        block = provider._build_native_block(path, "audio")
+
+        self.assertEqual(block["type"], "input_audio")
+        self.assertEqual(block["input_audio"]["format"], "wav")
+        self.assertTrue(block["input_audio"]["data"])
+
+    def test_image_blocks_carry_a_data_url(self) -> None:
+        provider = _provider_class("groq", "GroqProvider")(
+            ProviderConfig(), api_key="fake"
+        )
+        path = self.make(".png", b"\x89PNG")
+        block = provider._build_native_block(path, "image")
+
+        self.assertEqual(block["type"], "image_url")
+        self.assertTrue(
+            block["image_url"]["url"].startswith("data:image/png;base64,")
+        )
+
+
+class TestProviderRefusalsEndToEnd(FileFixtureCase):
+    """The refusal must happen while building content, not at the transport."""
+
+    def test_ollama_refuses_audio(self) -> None:
+        """images[] carries images only; audio there is silently ignored."""
+        from unified_ai_client.exceptions import UnsupportedFileError
+
+        provider = _provider_class("ollama", "OllamaProvider")(ProviderConfig())
+        path = self.make(".mp3")
+        with self.assertRaises(UnsupportedFileError):
+            provider._process_files_for_message([path], "what do you hear?")
+
+    def test_ollama_still_carries_images_and_text(self) -> None:
+        provider = _provider_class("ollama", "OllamaProvider")(ProviderConfig())
+        image = self.make(".png", b"\x89PNG")
+        notes = self.make(".md", b"green")
+
+        prompt, images = provider._process_files_for_message(
+            [image, notes], "describe"
+        )
+        self.assertEqual(len(images), 1)
+        self.assertIn("green", prompt)
+        self.assertEqual(prompt.count("describe"), 1)
+
+    def test_anthropic_refuses_audio_instead_of_dropping_it(self) -> None:
+        """It used to log a warning and answer as if it had heard the file."""
+        from unified_ai_client.exceptions import UnsupportedFileError
+
+        provider = _provider_class("anthropic", "AnthropicProvider")(
+            ProviderConfig(), api_key="fake"
+        )
+        path = self.make(".wav")
+        with self.assertRaises(UnsupportedFileError):
+            provider._build_user_content("transcribe this", [path])
+
+    def test_compat_providers_refuse_audio_and_pdf(self) -> None:
+        from unified_ai_client.exceptions import UnsupportedFileError
+
+        provider = _provider_class("groq", "GroqProvider")(
+            ProviderConfig(), api_key="fake"
+        )
+        for suffix in (".mp3", ".pdf"):
+            with self.subTest(suffix=suffix):
+                path = self.make(suffix)
+                with self.assertRaises(UnsupportedFileError):
+                    provider._build_user_content("summarise", [path])
+
+    def test_extensionless_text_files_are_inlined_not_refused(self) -> None:
+        """A Dockerfile is among the most common things handed to an LLM.
+
+        It has no extension, so before the name lookup existed it classified as
+        unknown and the strict policy refused it.
+        """
+        import tempfile
+
+        provider = _provider_class("groq", "GroqProvider")(
+            ProviderConfig(), api_key="fake"
+        )
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "Dockerfile")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("FROM python:3.12-slim")
+        self._paths.append(path)
+
+        content = provider._build_user_content("Review this image build.", [path])
+        self.assertIsInstance(content, str)
+        self.assertIn("python:3.12-slim", content)
+        self.assertIn("Dockerfile", content)
+
+    def test_compat_providers_still_inline_text(self) -> None:
+        provider = _provider_class("groq", "GroqProvider")(
+            ProviderConfig(), api_key="fake"
+        )
+        path = self.make(".md", b"the colour is blue")
+        content = provider._build_user_content("what colour?", [path])
+
+        self.assertIsInstance(content, str)
+        self.assertIn("blue", content)
+        self.assertIn("what colour?", content)
+
+
+class TestFileHandlingLive(FileFixtureCase):
+    """Real requests confirming the block shapes the offline tests assert.
+
+    These are the checks the documentation could not settle. Each skips when
+    its provider is unreachable, so a normal run stays offline.
+    """
+
+    def _llamacpp_available(self) -> bool:
+        import urllib.request
+        try:
+            urllib.request.urlopen("http://localhost:8080/v1/models", timeout=2)
+            return True
+        except Exception:
+            return False
+
+    def test_llamacpp_live_audio(self) -> None:
+        """Confirm this build routes input_audio rather than rejecting it.
+
+        Upstream evidence is contradictory: llama.cpp's server README documents
+        the block, while the issue tracking it was closed as not planned. Only
+        the running server settles it.
+        """
+        if not self._llamacpp_available():
+            self.skipTest("llama.cpp server not reachable at localhost:8080")
+
+        from unified_ai_client import call_ai
+
+        # A minimal valid WAV: 44-byte header plus one sample of silence.
+        header = (
+            b"RIFF" + (36 + 2).to_bytes(4, "little") + b"WAVEfmt "
+            + (16).to_bytes(4, "little")
+            + (1).to_bytes(2, "little") + (1).to_bytes(2, "little")
+            + (8000).to_bytes(4, "little") + (16000).to_bytes(4, "little")
+            + (2).to_bytes(2, "little") + (16).to_bytes(2, "little")
+            + b"data" + (2).to_bytes(4, "little") + (0).to_bytes(2, "little")
+        )
+        path = self.make(".wav", header)
+
+        response = call_ai(
+            provider="llamacpp",
+            model="local",
+            prompt="Reply with the single word OK.",
+            file_path=path,
+            temperature=0.0,
+            timeout=60,
+            max_retries=1,
+        )
+        self.assertIsInstance(response.text, str)
+
+    def test_openai_live_pdf(self) -> None:
+        """The 'file' block must be accepted where 'input_file' was not."""
+        from unified_ai_client.config import load_secrets
+        if not load_secrets(os.getcwd()).get("openai_api_key"):
+            self.skipTest(
+                "openai_api_key not found in secrets.json or environment variables"
+            )
+        from unified_ai_client import call_ai
+
+        pdf = (
+            b"%PDF-1.4\n"
+            b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+            b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+            b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 99 99]>>endobj\n"
+            b"trailer<</Root 1 0 R>>\n"
+        )
+        path = self.make(".pdf", pdf)
+
+        response = call_ai(
+            provider="openai",
+            model="gpt-4o-mini",
+            prompt="Reply with exactly the word READ and nothing else.",
+            file_path=path,
+            temperature=0.0,
+            timeout=60,
+            max_retries=1,
+        )
+        self.assertIsInstance(response.text, str)
+
+    def test_cohere_live_image(self) -> None:
+        """The one support-table row the documentation left ambiguous."""
+        from unified_ai_client.config import load_secrets
+        if not load_secrets(os.getcwd()).get("cohere_api_key"):
+            self.skipTest(
+                "cohere_api_key not found in secrets.json or environment variables"
+            )
+        from unified_ai_client import call_ai
+
+        # 1x1 transparent PNG.
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgYAAAAAM"
+            "AASsJTYQAAAAASUVORK5CYII="
+        )
+        path = self.make(".png", png)
+
+        response = call_ai(
+            provider="cohere",
+            model="command-a-vision-07-2025",
+            prompt="Reply with exactly the word SEEN and nothing else.",
+            file_path=path,
+            temperature=0.0,
+            timeout=60,
+            max_retries=1,
+        )
+        self.assertIsInstance(response.text, str)
 
 
 if __name__ == "__main__":

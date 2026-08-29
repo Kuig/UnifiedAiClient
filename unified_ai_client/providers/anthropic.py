@@ -15,6 +15,7 @@ from unified_ai_client.file_utils import (
     get_mime_type,
     inline_text_attachments,
     normalize_file_paths,
+    validate_files,
 )
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
@@ -32,8 +33,8 @@ class AnthropicProvider(BaseProvider):
     File handling:
     - Images: base64 image content block.
     - PDFs: base64 document content block.
-    - Audio: not natively supported; fallback to text inline with warning.
     - Text files: inlined via inline_text_attachments().
+    - Audio: rejected. The Messages API has no audio block.
 
     Thinking: the request shape depends on the model generation, see
     _build_thinking_payload(). Reasoning text is extracted from
@@ -44,6 +45,8 @@ class AnthropicProvider(BaseProvider):
 
     REQUIRES_API_KEY: bool = True
     SECRETS_KEY: str = "anthropic_api_key"
+
+    SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "document"})
 
     # Claude 4.6 is where adaptive thinking was introduced. Below it only the
     # fixed-budget form is accepted; from 4.7 on only the adaptive one is.
@@ -244,7 +247,15 @@ class AnthropicProvider(BaseProvider):
 
         Returns:
             List of content block dicts in Anthropic format.
+
+        Raises:
+            FileNotFoundError: If an attachment does not exist.
+            UnsupportedFileError: If an attachment is neither text nor a class
+                the Messages API accepts. Audio lands here: dropping it silently
+                let the model answer as though it had heard the recording.
         """
+        validate_files(file_paths, self.provider_name, self.SUPPORTED_FILE_TYPES)
+
         content: list[dict[str, Any]] = []
         text_files: list[str] = []
 
@@ -275,12 +286,6 @@ class AnthropicProvider(BaseProvider):
                         "data": b64,
                     },
                 })
-
-            elif ft == "audio":
-                _log.warning(
-                    "Anthropic: audio not natively supported, skipping '%s'",
-                    os.path.basename(fp),
-                )
 
             else:
                 text_files.append(fp)

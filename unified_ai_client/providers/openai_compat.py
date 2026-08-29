@@ -8,12 +8,15 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from unified_ai_client.exceptions import UnsupportedFileError
 from unified_ai_client.file_utils import (
+    audio_format_name,
     classify_file,
     encode_file_base64,
     get_mime_type,
     inline_text_attachments,
     normalize_file_paths,
+    validate_files,
 )
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
@@ -30,8 +33,8 @@ class OpenAiCompatProvider(BaseProvider):
 
     File handling (default behaviour inherited by all subclasses):
     - Images: base64-encoded as image_url content blocks.
-    - Audio, text, PDF, unknown: inlined into the prompt via
-      inline_text_attachments().
+    - Text: inlined into the prompt via inline_text_attachments().
+    - Anything else: rejected by validate_files() before the request is built.
 
     Reasoning text: populated from the 'reasoning_content' field in the
     response message choice, if present (available on OpenAI o3/o4 models).
@@ -50,6 +53,10 @@ class OpenAiCompatProvider(BaseProvider):
     # or False: a non-reasoning model rejects the parameter outright, so
     # "default" must leave it out.
     REASONING_PARAM: str | None = None
+
+    # The OpenAI-compatible baseline: an image_url block is the only attachment
+    # every one of these endpoints understands. Subclasses widen this.
+    SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image"})
 
     def __init__(self, config: ProviderConfig, api_key: str = "") -> None:
         """Initialize the provider.
@@ -184,6 +191,49 @@ class OpenAiCompatProvider(BaseProvider):
         self._get("/v1/models", self.config.timeout)
         return True
 
+    def _build_native_block(self, file_path: str, file_type: str) -> dict[str, Any]:
+        """Build one provider-native content block for a non-text attachment.
+
+        Covers the two block shapes shared across OpenAI-compatible endpoints.
+        Subclasses override to add their own, calling super() for the rest.
+
+        Args:
+            file_path: Path to the attachment.
+            file_type: Its class from ``classify_file()``.
+
+        Returns:
+            A single content block dict.
+
+        Raises:
+            UnsupportedFileError: If this class has no block shape here. Reaching
+                this means SUPPORTED_FILE_TYPES claims a class the builder cannot
+                actually produce.
+        """
+        name = os.path.basename(file_path)
+
+        if file_type == "image":
+            mime = get_mime_type(file_path)
+            b64 = encode_file_base64(file_path)
+            _log.info("File '%s' → image_url block", name)
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            }
+
+        if file_type == "audio":
+            b64 = encode_file_base64(file_path)
+            fmt = audio_format_name(file_path)
+            _log.info("File '%s' → input_audio block (format=%s)", name, fmt)
+            return {
+                "type": "input_audio",
+                "input_audio": {"data": b64, "format": fmt},
+            }
+
+        raise UnsupportedFileError(
+            f"Provider '{self.provider_name}' declares support for {file_type} "
+            f"files but builds no block for them: '{file_path}'."
+        )
+
     def _build_user_content(
         self, prompt: str, file_paths: list[str]
     ) -> str | list[dict[str, Any]]:
@@ -198,26 +248,27 @@ class OpenAiCompatProvider(BaseProvider):
 
         Returns:
             String or list of content block dicts.
+
+        Raises:
+            FileNotFoundError: If an attachment does not exist.
+            UnsupportedFileError: If an attachment is neither text nor a class
+                this provider declares in SUPPORTED_FILE_TYPES.
         """
         if not file_paths:
             return prompt
 
-        # Separate text-fallback files from natively-supported ones
+        validate_files(file_paths, self.provider_name, self.SUPPORTED_FILE_TYPES)
+
+        # Text is inlined into the prompt; everything left is a native block.
         native_blocks: list[dict[str, Any]] = []
         text_files: list[str] = []
 
         for fp in file_paths:
             ft = classify_file(fp)
-            if ft == "image":
-                mime = get_mime_type(fp)
-                b64 = encode_file_base64(fp)
-                _log.info("File '%s' → image_url block", os.path.basename(fp))
-                native_blocks.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{b64}"},
-                })
-            else:
+            if ft == "text":
                 text_files.append(fp)
+            else:
+                native_blocks.append(self._build_native_block(fp, ft))
 
         effective_prompt = inline_text_attachments(prompt, text_files)
 

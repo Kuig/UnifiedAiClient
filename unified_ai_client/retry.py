@@ -2,6 +2,8 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
+from unified_ai_client.exceptions import NonRetryableError
+
 
 def with_retry(
     fn: Callable[..., Any],
@@ -27,6 +29,8 @@ def with_retry(
         The return value of the function invocation.
 
     Raises:
+        NonRetryableError: Immediately, without consuming an attempt. These
+            failures are deterministic, so every retry would reproduce them.
         BaseException: The last raised exception once retry budget is exhausted,
             or any exception not listed in retryable_exceptions raised immediately.
     """
@@ -34,6 +38,8 @@ def with_retry(
     while True:
         try:
             return fn(*args, **kwargs)
+        except NonRetryableError:
+            raise
         except retryable_exceptions as e:
             attempt += 1
             if attempt > max_retries:
