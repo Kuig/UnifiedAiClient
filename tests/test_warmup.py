@@ -122,31 +122,54 @@ class TestWarmUpGoogle(unittest.TestCase):
             config=ProviderConfig(**config_kwargs), api_key="dummy-key"
         )
 
+    def _attachment(self, suffix: str) -> str:
+        """A real file on disk, since warm_up() validates before uploading.
+
+        The upload itself is patched out, but the path has to exist: an
+        attachment warm_up() cannot use must not reach Google's quota.
+        """
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.write(b"x")
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        return tmp.name
+
     def test_warm_up_validates_model_and_uploads_files(self) -> None:
         provider = self._provider()
         fake_client = MagicMock()
+        paths = [self._attachment(".pdf"), self._attachment(".png")]
 
         with patch.object(provider, "_get_client", return_value=fake_client), \
              patch.object(provider, "_upload_file") as upload:
-            result = provider.warm_up(
-                "gemini-2.5-flash", ["/tmp/a.pdf", "/tmp/b.png"]
-            )
+            result = provider.warm_up("gemini-2.5-flash", paths)
 
         self.assertIs(result, True)
         fake_client.models.get.assert_called_once_with(model="gemini-2.5-flash")
         self.assertEqual(upload.call_count, 2)
-        self.assertEqual(
-            [c.args[0] for c in upload.call_args_list],
-            ["/tmp/a.pdf", "/tmp/b.png"],
-        )
+        self.assertEqual([c.args[0] for c in upload.call_args_list], paths)
 
     def test_warm_up_accepts_a_single_path_string(self) -> None:
         provider = self._provider()
+        path = self._attachment(".pdf")
         with patch.object(provider, "_get_client", return_value=MagicMock()), \
              patch.object(provider, "_upload_file") as upload:
-            provider.warm_up("gemini-2.5-flash", "/tmp/only.pdf")
+            provider.warm_up("gemini-2.5-flash", path)
         upload.assert_called_once()
-        self.assertEqual(upload.call_args.args[0], "/tmp/only.pdf")
+        self.assertEqual(upload.call_args.args[0], path)
+
+    def test_warm_up_refuses_a_file_it_could_not_use(self) -> None:
+        """A bad attachment must not reach the upload, and so not the quota.
+
+        warm_up() uploads into the same cache call() reads, so a file call()
+        would refuse would otherwise sit on Google's quota until cleanup(),
+        with client.warm_up() reporting only False.
+        """
+        provider = self._provider()
+        with patch.object(provider, "_get_client", return_value=MagicMock()), \
+             patch.object(provider, "_upload_file") as upload:
+            with self.assertRaises(FileNotFoundError):
+                provider.warm_up("gemini-2.5-flash", "no-such-file.pdf")
+        upload.assert_not_called()
 
     def test_warm_up_without_files_uploads_nothing(self) -> None:
         provider = self._provider()
@@ -161,7 +184,7 @@ class TestWarmUpGoogle(unittest.TestCase):
         provider = self._provider(extra_options={"upload_poll_timeout": 42})
         with patch.object(provider, "_get_client", return_value=MagicMock()), \
              patch.object(provider, "_upload_file") as upload:
-            provider.warm_up("gemini-2.5-flash", "/tmp/a.pdf")
+            provider.warm_up("gemini-2.5-flash", self._attachment(".pdf"))
         self.assertEqual(upload.call_args.args[1], 42)
 
     def test_preload_model_no_longer_raises(self) -> None:

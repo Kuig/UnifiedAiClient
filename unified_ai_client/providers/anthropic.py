@@ -9,13 +9,12 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from unified_ai_client.exceptions import UnsupportedFileError
 from unified_ai_client.file_utils import (
-    classify_file,
     encode_file_base64,
     get_mime_type,
     inline_text_attachments,
     normalize_file_paths,
-    validate_files,
 )
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
@@ -81,7 +80,7 @@ class AnthropicProvider(BaseProvider):
         """
         if not self.api_key and self.config.url is None:
             raise ValueError(
-                f"Missing API key for provider 'anthropic'. "
+                f"Missing API key for provider '{self.provider_name}'. "
                 f"Add '{self.SECRETS_KEY}' to secrets.json "
                 f"or set {self.SECRETS_KEY.upper()}."
             )
@@ -254,41 +253,33 @@ class AnthropicProvider(BaseProvider):
                 the Messages API accepts. Audio lands here: dropping it silently
                 let the model answer as though it had heard the recording.
         """
-        validate_files(file_paths, self.provider_name, self.SUPPORTED_FILE_TYPES)
-
         content: list[dict[str, Any]] = []
         text_files: list[str] = []
 
-        for fp in file_paths:
-            ft = classify_file(fp)
-
-            if ft == "image":
-                b64 = encode_file_base64(fp)
-                mime = get_mime_type(fp)
-                _log.info("Anthropic: '%s' → image base64 block", os.path.basename(fp))
+        for fp, ft in self._validate_files(file_paths):
+            # Both native classes share the same block shape; only the
+            # discriminator and the media type differ.
+            if ft in ("image", "document"):
+                _log.info("Anthropic: '%s' → %s base64 block", os.path.basename(fp), ft)
                 content.append({
-                    "type": "image",
+                    "type": ft,
                     "source": {
                         "type": "base64",
-                        "media_type": mime,
-                        "data": b64,
+                        "media_type": (
+                            "application/pdf" if ft == "document" else get_mime_type(fp)
+                        ),
+                        "data": encode_file_base64(fp),
                     },
                 })
 
-            elif ft == "document":
-                b64 = encode_file_base64(fp)
-                _log.info("Anthropic: '%s' → document base64 block", os.path.basename(fp))
-                content.append({
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": b64,
-                    },
-                })
+            elif ft == "text":
+                text_files.append(fp)
 
             else:
-                text_files.append(fp)
+                raise UnsupportedFileError(
+                    f"Provider '{self.provider_name}' declares support for {ft} "
+                    f"files but builds no block for them: '{fp}'."
+                )
 
         effective_prompt = inline_text_attachments(prompt, text_files)
         content.append({"type": "text", "text": effective_prompt})

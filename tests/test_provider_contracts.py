@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import importlib
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -32,11 +33,35 @@ from test_providers import ProviderRegistryIsolation  # noqa: E402
 from unified_ai_client.models import AiRequest, ProviderConfig  # noqa: E402
 
 
+# Every provider, keyed by the name call_ai() accepts. The single source the
+# credential, capability and file-support tables below are all driven from, so a
+# renamed class is one edit rather than three.
+_PROVIDER_CLASSES: dict[str, tuple[str, str]] = {
+    "ollama": ("ollama", "OllamaProvider"),
+    "google": ("google", "GoogleProvider"),
+    "anthropic": ("anthropic", "AnthropicProvider"),
+    "openai": ("openai", "OpenAiProvider"),
+    "mistral": ("mistral", "MistralProvider"),
+    "cohere": ("cohere", "CohereProvider"),
+    "meta": ("meta", "MetaProvider"),
+    "groq": ("groq", "GroqProvider"),
+    "xai": ("xai", "XAiProvider"),
+    "lmstudio": ("lmstudio", "LmStudioProvider"),
+    "llamacpp": ("llamacpp", "LlamaCppProvider"),
+    "script": ("script", "ScriptProvider"),
+}
+
+
 def _provider_class(module: str, class_name: str):
     """Import a provider class by module and class name."""
     return getattr(
         importlib.import_module(f"unified_ai_client.providers.{module}"), class_name
     )
+
+
+def _provider_class_by_name(name: str):
+    """Import a provider class by the registry name call_ai() accepts."""
+    return _provider_class(*_PROVIDER_CLASSES[name])
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +128,26 @@ class TestProviderUrlResolution(ProviderRegistryIsolation):
         self.assertEqual(provider.base_url, "https://example.test")
 
 
+class TestProviderNameRoundTrip(ProviderRegistryIsolation):
+    """The name a provider reports must be the one call_ai() accepts.
+
+    ``BaseProvider.provider_name`` derives the name from the class name, while
+    ``get_provider()`` holds the authoritative mapping. Nothing else ties the
+    two together, so a class renamed for style would quietly start naming a
+    provider the caller cannot pass — inside the very refusal messages the
+    attachment policy asks them to act on.
+    """
+
+    def test_every_registered_provider_reports_its_registry_name(self) -> None:
+        from unified_ai_client.client import get_provider
+
+        for name in _PROVIDER_CLASSES:
+            if name == "script":
+                continue  # needs a script_path in config to instantiate
+            with self.subTest(provider=name):
+                self.assertEqual(get_provider(name).provider_name, name)
+
+
 # ---------------------------------------------------------------------------
 # 2. API key handling
 # ---------------------------------------------------------------------------
@@ -111,33 +156,35 @@ class TestApiKeyHandling(ProviderRegistryIsolation):
     """A missing key must fail with a message, not a type error."""
 
     _CLOUD = {
-        "anthropic": ("anthropic", "AnthropicProvider", "anthropic_api_key"),
-        "openai": ("openai", "OpenAiProvider", "openai_api_key"),
-        "mistral": ("mistral", "MistralProvider", "mistral_api_key"),
-        "cohere": ("cohere", "CohereProvider", "cohere_api_key"),
-        "meta": ("meta", "MetaProvider", "meta_api_key"),
-        "groq": ("groq", "GroqProvider", "groq_api_key"),
-        "xai": ("xai", "XAiProvider", "xai_api_key"),
+        "anthropic": "anthropic_api_key",
+        "openai": "openai_api_key",
+        "mistral": "mistral_api_key",
+        "cohere": "cohere_api_key",
+        "meta": "meta_api_key",
+        "groq": "groq_api_key",
+        "xai": "xai_api_key",
     }
 
-    _LOCAL = (("lmstudio", "LmStudioProvider"), ("llamacpp", "LlamaCppProvider"))
+    _LOCAL = ("lmstudio", "llamacpp")
 
     def test_cloud_providers_reject_a_missing_key(self) -> None:
         """The error must name the secrets key, so the fix is obvious."""
-        for name, (module, class_name, secrets_key) in self._CLOUD.items():
+        for name, secrets_key in self._CLOUD.items():
             with self.subTest(provider=name):
-                provider = _provider_class(module, class_name)(
-                    ProviderConfig(), api_key=""
-                )
+                provider = _provider_class_by_name(name)(ProviderConfig(), api_key="")
                 with self.assertRaises(ValueError) as ctx:
                     provider._require_api_key()
-                self.assertIn(secrets_key, str(ctx.exception))
+                message = str(ctx.exception)
+                self.assertIn(secrets_key, message)
+                # The name the caller would pass to call_ai(), not one derived
+                # from the secrets key, which need not match it.
+                self.assertIn(f"'{name}'", message)
 
     def test_local_providers_accept_a_missing_key(self) -> None:
         """A local server without credentials is normal, not an error."""
-        for module, class_name in self._LOCAL:
-            with self.subTest(provider=module):
-                provider = _provider_class(module, class_name)(ProviderConfig())
+        for name in self._LOCAL:
+            with self.subTest(provider=name):
+                provider = _provider_class_by_name(name)(ProviderConfig())
                 self.assertIsNone(provider._require_api_key())
 
     def test_an_explicit_url_lifts_the_key_requirement(self) -> None:
@@ -147,9 +194,9 @@ class TestApiKeyHandling(ProviderRegistryIsolation):
         serves /v1/chat/completions is exactly what the url override is for;
         demanding a cloud credential for it would make that impossible.
         """
-        for name, (module, class_name, _) in self._CLOUD.items():
+        for name in self._CLOUD:
             with self.subTest(provider=name):
-                provider = _provider_class(module, class_name)(
+                provider = _provider_class_by_name(name)(
                     ProviderConfig(url="http://localhost:11434"), api_key=""
                 )
                 self.assertIsNone(provider._require_api_key())
@@ -448,18 +495,18 @@ class TestGoogleEmbeddingsLive(unittest.TestCase):
 # 6. File handling: what each provider accepts, and how it refuses the rest
 # ---------------------------------------------------------------------------
 
-def _make_file(suffix: str, data: bytes = b"x") -> str:
-    """Write a temp file with the given extension and return its path."""
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-    tmp.write(data)
-    tmp.close()
-    return tmp.name
+class FileFixtureCase(ProviderRegistryIsolation):
+    """Cleans up the temp files a test creates, and the registry it touches.
 
-
-class FileFixtureCase(unittest.TestCase):
-    """Base class that cleans up the temp files a test creates."""
+    Registry isolation matters here because the end-to-end tests call
+    ``call_ai()``, which caches provider instances in ``client._PROVIDERS``.
+    These classes sort before ``TestProviderUrlResolution``, which reads
+    ``get_provider(name).base_url``, so a leaked instance would decide a later
+    test's result.
+    """
 
     def setUp(self) -> None:
+        super().setUp()
         self._paths: list[str] = []
 
     def tearDown(self) -> None:
@@ -468,11 +515,26 @@ class FileFixtureCase(unittest.TestCase):
                 os.unlink(path)
             except OSError:
                 pass
+        super().tearDown()
 
     def make(self, suffix: str, data: bytes = b"x") -> str:
-        path = _make_file(suffix, data)
-        self._paths.append(path)
-        return path
+        """Write a temp file with the given extension and return its path."""
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.write(data)
+        tmp.close()
+        self._paths.append(tmp.name)
+        return tmp.name
+
+    def sample(self, suffix: str) -> str:
+        """A shared file for the given extension, created at most once.
+
+        ``validate_files()`` reads only the path's existence and extension, so
+        every check for a given class wants the same file rather than its own.
+        """
+        cache = self.__dict__.setdefault("_samples", {})
+        if suffix not in cache:
+            cache[suffix] = self.make(suffix)
+        return cache[suffix]
 
 
 class TestFileSupportMatrix(FileFixtureCase):
@@ -484,25 +546,25 @@ class TestFileSupportMatrix(FileFixtureCase):
     """
 
     _SUPPORT = {
-        "google": ("google", "GoogleProvider", {"image", "audio", "document"}),
-        "openai": ("openai", "OpenAiProvider", {"image", "audio", "document"}),
-        "anthropic": ("anthropic", "AnthropicProvider", {"image", "document"}),
-        "llamacpp": ("llamacpp", "LlamaCppProvider", {"image", "audio"}),
-        "ollama": ("ollama", "OllamaProvider", {"image"}),
-        "mistral": ("mistral", "MistralProvider", {"image"}),
-        "cohere": ("cohere", "CohereProvider", {"image"}),
-        "meta": ("meta", "MetaProvider", {"image"}),
-        "groq": ("groq", "GroqProvider", {"image"}),
-        "xai": ("xai", "XAiProvider", {"image"}),
-        "lmstudio": ("lmstudio", "LmStudioProvider", {"image"}),
+        "google": {"image", "audio", "document"},
+        "openai": {"image", "audio", "document"},
+        "anthropic": {"image", "document"},
+        "llamacpp": {"image", "audio"},
+        "ollama": {"image"},
+        "mistral": {"image"},
+        "cohere": {"image"},
+        "meta": {"image"},
+        "groq": {"image"},
+        "xai": {"image"},
+        "lmstudio": {"image"},
     }
 
     _SAMPLE = {"image": ".png", "audio": ".mp3", "document": ".pdf"}
 
     def test_declared_support_matches_the_table(self) -> None:
-        for name, (module, class_name, expected) in self._SUPPORT.items():
+        for name, expected in self._SUPPORT.items():
             with self.subTest(provider=name):
-                cls = _provider_class(module, class_name)
+                cls = _provider_class_by_name(name)
                 self.assertEqual(set(cls.SUPPORTED_FILE_TYPES), expected)
 
     def test_unsupported_classes_raise(self) -> None:
@@ -510,12 +572,12 @@ class TestFileSupportMatrix(FileFixtureCase):
         from unified_ai_client.exceptions import UnsupportedFileError
         from unified_ai_client.file_utils import validate_files
 
-        for name, (_, _, supported) in self._SUPPORT.items():
+        for name, supported in self._SUPPORT.items():
             for file_type, suffix in self._SAMPLE.items():
                 if file_type in supported:
                     continue
                 with self.subTest(provider=name, file_type=file_type):
-                    path = self.make(suffix)
+                    path = self.sample(suffix)
                     with self.assertRaises(UnsupportedFileError) as ctx:
                         validate_files([path], name, frozenset(supported))
                     message = str(ctx.exception)
@@ -525,23 +587,25 @@ class TestFileSupportMatrix(FileFixtureCase):
     def test_supported_classes_pass(self) -> None:
         from unified_ai_client.file_utils import validate_files
 
-        for name, (_, _, supported) in self._SUPPORT.items():
+        for name, supported in self._SUPPORT.items():
             for file_type in supported:
                 with self.subTest(provider=name, file_type=file_type):
-                    path = self.make(self._SAMPLE[file_type])
-                    self.assertIsNone(
-                        validate_files([path], name, frozenset(supported))
+                    path = self.sample(self._SAMPLE[file_type])
+                    self.assertEqual(
+                        validate_files([path], name, frozenset(supported)),
+                        [(path, file_type)],
                     )
 
     def test_text_is_accepted_everywhere(self) -> None:
         """No provider has a native text block, so inlining must stay open."""
         from unified_ai_client.file_utils import validate_files
 
-        for name, (_, _, supported) in self._SUPPORT.items():
+        for name, supported in self._SUPPORT.items():
             with self.subTest(provider=name):
-                path = self.make(".md", b"# notes")
-                self.assertIsNone(
-                    validate_files([path], name, frozenset(supported))
+                path = self.sample(".md")
+                self.assertEqual(
+                    validate_files([path], name, frozenset(supported)),
+                    [(path, "text")],
                 )
 
     def test_unknown_extensions_raise(self) -> None:
@@ -562,7 +626,7 @@ class TestFileSupportMatrix(FileFixtureCase):
 
     def test_script_validates_nothing(self) -> None:
         """The script owns its own type policy; the library must not guess."""
-        cls = _provider_class("script", "ScriptProvider")
+        cls = _provider_class_by_name("script")
         self.assertEqual(set(cls.SUPPORTED_FILE_TYPES), set())
 
 
@@ -744,12 +808,9 @@ class TestProviderRefusalsEndToEnd(FileFixtureCase):
         It has no extension, so before the name lookup existed it classified as
         unknown and the strict policy refused it.
         """
-        import tempfile
-
-        provider = _provider_class("groq", "GroqProvider")(
-            ProviderConfig(), api_key="fake"
-        )
+        provider = _provider_class_by_name("groq")(ProviderConfig(), api_key="fake")
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
         path = os.path.join(directory, "Dockerfile")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("FROM python:3.12-slim")

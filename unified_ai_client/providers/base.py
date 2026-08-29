@@ -2,6 +2,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+from unified_ai_client.file_utils import validate_files
+
 if TYPE_CHECKING:
     from unified_ai_client.models import AiRequest, AiResponse
 
@@ -38,6 +40,28 @@ class BaseProvider(ABC):
             The lower-case provider name.
         """
         return type(self).__name__.removesuffix("Provider").lower()
+
+    def _validate_files(self, paths: list[str]) -> list[tuple[str, str]]:
+        """Check attachments against this provider's declared capabilities.
+
+        The seam every adapter routes its attachments through, so the policy is
+        declared once here rather than re-assembled from ``provider_name`` and
+        ``SUPPORTED_FILE_TYPES`` at each call site. ``script`` is the deliberate
+        exception and never calls it: only the script knows what it can open.
+
+        Args:
+            paths: Local file paths attached to the current turn.
+
+        Returns:
+            One ``(path, file_type)`` pair per path, for the caller to build its
+            content blocks from without classifying a second time.
+
+        Raises:
+            MissingFileError: If a path does not exist.
+            UnsupportedFileError: If a file is neither text nor a class this
+                provider declares.
+        """
+        return validate_files(paths, self.provider_name, self.SUPPORTED_FILE_TYPES)
 
     @abstractmethod
     def call(self, request: AiRequest) -> AiResponse:

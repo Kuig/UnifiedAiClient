@@ -6,12 +6,11 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from unified_ai_client.exceptions import UnsupportedFileError
 from unified_ai_client.file_utils import (
-    classify_file,
     encode_file_base64,
     inline_text_attachments,
     normalize_file_paths,
-    validate_files,
 )
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
@@ -98,17 +97,20 @@ class OllamaProvider(BaseProvider):
             FileNotFoundError: If an attachment does not exist.
             UnsupportedFileError: If an attachment is neither an image nor text.
         """
-        validate_files(file_paths, self.provider_name, self.SUPPORTED_FILE_TYPES)
-
         multimodal_data: list[str] = []
         text_files: list[str] = []
 
-        for fp in file_paths:
-            if classify_file(fp) == "image":
+        for fp, ft in self._validate_files(file_paths):
+            if ft == "image":
                 _log.info("Ollama: encoding '%s' as base64 image data", fp)
                 multimodal_data.append(encode_file_base64(fp))
-            else:
+            elif ft == "text":
                 text_files.append(fp)
+            else:
+                raise UnsupportedFileError(
+                    f"Provider '{self.provider_name}' declares support for {ft} "
+                    f"files but has no way to send them: '{fp}'."
+                )
 
         effective_prompt = inline_text_attachments(prompt, text_files)
         return effective_prompt, multimodal_data

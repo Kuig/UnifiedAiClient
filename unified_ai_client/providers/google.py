@@ -11,7 +11,7 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-from unified_ai_client.file_utils import normalize_file_paths, validate_files
+from unified_ai_client.file_utils import normalize_file_paths
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
 
@@ -27,8 +27,8 @@ class GoogleProvider(BaseProvider):
     variants, and rigorous file cleanup on termination.
     """
 
-    # The Files API accepts every class the library can classify, so uploads are
-    # never refused locally.
+    # The Files API takes every class the library can classify natively, so only
+    # a file classify_file() cannot place at all is refused before upload.
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "audio", "document"})
 
     def __init__(self, config: ProviderConfig, api_key: str | None = None) -> None:
@@ -214,11 +214,12 @@ class GoogleProvider(BaseProvider):
             FileNotFoundError: If an attachment does not exist. Checked up front
                 so a bad path fails before earlier files are uploaded and have
                 to be cleaned up again.
+            UnsupportedFileError: If a path classifies as 'unknown'. Every class
+                the library recognises is uploadable; one it cannot place at all
+                is not.
         """
-        validate_files(file_paths, self.provider_name, self.SUPPORTED_FILE_TYPES)
-
         parts = []
-        for fp in file_paths:
+        for fp, _ in self._validate_files(file_paths):
             ref = self._upload_file(fp, upload_poll_timeout)
             parts.append(
                 types.Part.from_uri(file_uri=ref.uri, mime_type=ref.mime_type)
@@ -454,7 +455,10 @@ class GoogleProvider(BaseProvider):
         client = self._get_client()
         client.models.get(model=model)
 
-        for path in normalize_file_paths(file_paths):
+        # Validated for the same reason call() validates: an unusable file would
+        # otherwise be uploaded, counted against quota and held in the cache
+        # until cleanup(), for a request that will refuse it anyway.
+        for path, _ in self._validate_files(normalize_file_paths(file_paths)):
             self._upload_file(path, upload_poll_timeout)
 
         return True

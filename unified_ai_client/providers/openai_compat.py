@@ -11,12 +11,10 @@ from typing import Any
 from unified_ai_client.exceptions import UnsupportedFileError
 from unified_ai_client.file_utils import (
     audio_format_name,
-    classify_file,
     encode_file_base64,
     get_mime_type,
     inline_text_attachments,
     normalize_file_paths,
-    validate_files,
 )
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
@@ -92,7 +90,7 @@ class OpenAiCompatProvider(BaseProvider):
         """
         if self.REQUIRES_API_KEY and not self.api_key and self.config.url is None:
             raise ValueError(
-                f"Missing API key for provider '{self.SECRETS_KEY.removesuffix('_api_key')}'. "
+                f"Missing API key for provider '{self.provider_name}'. "
                 f"Add '{self.SECRETS_KEY}' to secrets.json "
                 f"or set {self.SECRETS_KEY.upper()}."
             )
@@ -257,14 +255,11 @@ class OpenAiCompatProvider(BaseProvider):
         if not file_paths:
             return prompt
 
-        validate_files(file_paths, self.provider_name, self.SUPPORTED_FILE_TYPES)
-
         # Text is inlined into the prompt; everything left is a native block.
         native_blocks: list[dict[str, Any]] = []
         text_files: list[str] = []
 
-        for fp in file_paths:
-            ft = classify_file(fp)
+        for fp, ft in self._validate_files(file_paths):
             if ft == "text":
                 text_files.append(fp)
             else:

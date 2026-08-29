@@ -108,7 +108,7 @@ def validate_files(
     paths: list[str],
     provider_name: str,
     supported: frozenset[str],
-) -> None:
+) -> list[tuple[str, str]]:
     """Reject attachments a provider cannot transmit, before the request is built.
 
     Every path is checked before any of them is read or encoded, so a rejected
@@ -127,21 +127,30 @@ def validate_files(
         supported: File classes this provider can transmit natively, from
             ``BaseProvider.SUPPORTED_FILE_TYPES``.
 
+    Returns:
+        One ``(path, file_type)`` pair per accepted path, in the order given.
+        Callers build their content blocks from these rather than calling
+        ``classify_file()`` a second time, so a file is always sent under the
+        classification it was accepted under.
+
     Raises:
         MissingFileError: If a path does not exist or is not a regular file.
             A ``FileNotFoundError`` subclass, so existing handlers still catch it.
         UnsupportedFileError: If a file's class is neither ``'text'`` nor one
             the provider supports.
     """
+    classified: list[tuple[str, str]] = []
+
     for path in paths:
         if not os.path.isfile(path):
             raise MissingFileError(f"Attachment not found: '{path}'")
 
         file_type = classify_file(path)
         if file_type == "text" or file_type in supported:
+            classified.append((path, file_type))
             continue
 
-        accepted = ", ".join(sorted(supported | {"text"})) or "text"
+        accepted = ", ".join(sorted(supported | {"text"}))
         if file_type == "unknown":
             detail = (
                 f"Unrecognised file type: '{path}'. Provider "
@@ -153,6 +162,8 @@ def validate_files(
                 f"'{path}'. Accepted: {accepted}."
             )
         raise UnsupportedFileError(detail)
+
+    return classified
 
 
 # ---------------------------------------------------------------------------
