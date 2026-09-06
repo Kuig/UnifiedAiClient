@@ -16,6 +16,7 @@ from unified_ai_client.exceptions import (
     FileDecodeError,
 )
 from unified_ai_client.silence import silence_sdks
+from unified_ai_client.verbosity import set_verbosity
 from unified_ai_client.models import AiResponse, AiRequest, ProviderConfig, ToolDefinition, ToolCall, ToolResult
 from unified_ai_client.providers.base import BaseProvider
 
@@ -30,6 +31,7 @@ __all__ = [
     "load_secrets",
     "load_config",
     "silence_sdks",
+    "set_verbosity",
     "NonRetryableError",
     "UnsupportedFileError",
     "MissingFileError",

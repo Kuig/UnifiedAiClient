@@ -212,7 +212,7 @@ class OpenAiCompatProvider(BaseProvider):
         if file_type == "image":
             mime = get_mime_type(file_path)
             b64 = encode_file_base64(file_path)
-            _log.info("File '%s' → image_url block", name)
+            _log.debug("File '%s' → image_url block", name)
             return {
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime};base64,{b64}"},
@@ -221,7 +221,7 @@ class OpenAiCompatProvider(BaseProvider):
         if file_type == "audio":
             b64 = encode_file_base64(file_path)
             fmt = audio_format_name(file_path)
-            _log.info("File '%s' → input_audio block (format=%s)", name, fmt)
+            _log.debug("File '%s' → input_audio block (format=%s)", name, fmt)
             return {
                 "type": "input_audio",
                 "input_audio": {"data": b64, "format": fmt},

@@ -264,7 +264,7 @@ def format_text_attachment(file_path: str) -> str:
             f"Text attachment '{file_path}' is not valid UTF-8. "
             f"Its extension suggests text, but its content is not."
         ) from exc
-    _log.info(
+    _log.debug(
         "File '%s' formatted as text attachment (%d chars)",
         filename,
         len(content),

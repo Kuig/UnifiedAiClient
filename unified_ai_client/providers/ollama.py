@@ -102,7 +102,7 @@ class OllamaProvider(BaseProvider):
 
         for fp, ft in self._validate_files(file_paths):
             if ft == "image":
-                _log.info("Ollama: encoding '%s' as base64 image data", fp)
+                _log.debug("Ollama: encoding '%s' as base64 image data", fp)
                 multimodal_data.append(encode_file_base64(fp))
             elif ft == "text":
                 text_files.append(fp)

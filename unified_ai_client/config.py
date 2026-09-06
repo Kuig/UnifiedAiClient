@@ -1,7 +1,10 @@
 from __future__ import annotations
 import json
+import logging
 import os
 from typing import Any
+
+_log = logging.getLogger("unified_ai_client.config")
 
 
 # Mapping from environment variable names to the snake_case keys used in
@@ -64,8 +67,8 @@ def load_secrets(project_root: str, filename: str = "secrets.json") -> dict[str,
             if isinstance(data, dict):
                 for k, v in data.items():
                     merged[str(k)] = str(v)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.warning("Ignoring malformed %s: %s", json_path, exc)
 
     # Override with environment variables (higher priority)
     for env_key, secret_key in _ENV_VAR_MAP.items():
@@ -120,5 +123,9 @@ def load_config(
                 extra.update(data["extra_options"])
             filtered_data["extra_options"] = extra
         return dataclass_type(**filtered_data)
-    except Exception:
+    except Exception as exc:
+        _log.warning(
+            "Ignoring malformed %s, falling back to %s defaults: %s",
+            config_path, dataclass_type.__name__, exc,
+        )
         return dataclass_type()

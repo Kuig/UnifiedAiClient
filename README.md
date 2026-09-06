@@ -104,9 +104,10 @@ All features are exported from the top-level package namespace.
 ### Basic Generation
 
 ```python
-from unified_ai_client import call_ai, silence_sdks
+from unified_ai_client import call_ai, silence_sdks, set_verbosity
 
-silence_sdks()   # Suppress verbose SDK loggers at startup
+silence_sdks()          # Suppress verbose SDK loggers at startup
+set_verbosity("debug")  # See everything the library does, useful during development
 
 response = call_ai(
     provider="ollama",
@@ -115,6 +116,8 @@ response = call_ai(
 )
 print(response.text)
 ```
+
+See [`set_verbosity`](docs/api.md#set_verbosity) for the full level list.
 
 ### Multi-turn Chat, Temperature, and JSON Output
 

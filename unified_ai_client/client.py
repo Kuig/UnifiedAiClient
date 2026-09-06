@@ -4,6 +4,7 @@ import atexit
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +99,11 @@ def configure_provider(name: str, **kwargs: Any) -> None:
             config = ProviderConfig(**new_known, extra_options=new_extra)
         _PROVIDER_CONFIGS[name] = config
 
+    _log.info(
+        "configure_provider('%s'): url=%s timeout=%s sleep_time=%s extra=%s",
+        name, config.url, config.timeout, config.sleep_time, config.extra_options,
+    )
+
     # Invalidate cached provider instance so the next call rebuilds with new config
     with _PROVIDERS_LOCK:
         _PROVIDERS.pop(name, None)
@@ -164,6 +170,10 @@ def get_provider(provider_name: str) -> BaseProvider:
         api_key_xai = secrets.get("xai_api_key") or ""
 
         # 4. Instantiate provider adapter
+        _log.debug(
+            "Building provider '%s' (cache miss): url=%s timeout=%s",
+            provider_name, config.url, config.timeout,
+        )
         if provider_name == "ollama":
             from unified_ai_client.providers.ollama import OllamaProvider
             provider_instance: BaseProvider = OllamaProvider(config)
@@ -233,8 +243,8 @@ def cleanup() -> None:
         for provider in _PROVIDERS.values():
             try:
                 provider.cleanup()
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning("cleanup() failed for a cached provider: %s", exc)
 
 
 def call_ai(
@@ -305,6 +315,11 @@ def call_ai(
     """
     _register_cleanup()
 
+    _log.info(
+        "call_ai start: provider=%s model=%s prompt_chars=%d thinking=%s tools=%d",
+        provider, model, len(prompt), thinking, len(tools or []),
+    )
+
     prov = get_provider(provider)
 
     # Resolve centralized sleep rate-limiting delay
@@ -313,7 +328,6 @@ def call_ai(
         effective_sleep = getattr(getattr(prov, "config", None), "sleep_time", 0)
 
     if effective_sleep > 0:
-        import time
         time.sleep(effective_sleep)
 
     request = AiRequest(
@@ -337,12 +351,20 @@ def call_ai(
     )
 
     from unified_ai_client.retry import with_retry
-    return with_retry(
+    start = time.perf_counter()
+    response = with_retry(
         prov.call,
         request,
         max_retries=max_retries,
         base_delay=retry_base_delay,
+        label=f"{provider}/{model}",
     )
+    _log.info(
+        "call_ai success: provider=%s model=%s elapsed=%.2fs input_tokens=%d output_tokens=%d",
+        provider, model, time.perf_counter() - start,
+        response.input_tokens, response.output_tokens,
+    )
+    return response
 
 
 def preload_model(
@@ -386,6 +408,11 @@ def preload_model(
             previously registered settings and persisted via
             ``configure_provider()``.
     """
+    _log.info(
+        "preload_model('%s', '%s'): keep_alive=%s context_size=%s",
+        provider, model, keep_alive, context_size,
+    )
+
     # Register settings so they persist into all subsequent call_ai() calls
     if context_size is not None or extra_options:
         config_kwargs: dict[str, Any] = {}
@@ -456,10 +483,13 @@ def warm_up(
     _register_cleanup()
 
     try:
-        return get_provider(provider).warm_up(model, file_paths)
+        result = get_provider(provider).warm_up(model, file_paths)
     except Exception as exc:
         _log.warning("Warm-up failed for provider '%s' (%s): %s", provider, model, exc)
         return False
+    if result:
+        _log.info("Warm-up completed for provider '%s' model '%s'", provider, model)
+    return result
 
 
 def get_embedding(

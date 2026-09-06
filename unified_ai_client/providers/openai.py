@@ -44,7 +44,7 @@ class OpenAiProvider(OpenAiCompatProvider):
         """
         if file_type == "document":
             b64 = encode_file_base64(file_path)
-            _log.info("OpenAI: '%s' → file block (PDF)", os.path.basename(file_path))
+            _log.debug("OpenAI: '%s' → file block (PDF)", os.path.basename(file_path))
             return {
                 "type": "file",
                 "file": {

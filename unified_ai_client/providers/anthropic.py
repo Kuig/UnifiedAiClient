@@ -260,7 +260,7 @@ class AnthropicProvider(BaseProvider):
             # Both native classes share the same block shape; only the
             # discriminator and the media type differ.
             if ft in ("image", "document"):
-                _log.info("Anthropic: '%s' → %s base64 block", os.path.basename(fp), ft)
+                _log.debug("Anthropic: '%s' → %s base64 block", os.path.basename(fp), ft)
                 content.append({
                     "type": ft,
                     "source": {

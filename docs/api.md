@@ -204,6 +204,42 @@ Suppresses verbose debug and info messages from downstream provider SDKs such as
 def silence_sdks() -> None:
 ```
 
+### `set_verbosity`
+
+Controls how much of the library's own internal activity is printed to the console. Attaches
+(or removes) a console handler on the library's own logger only, never the root logger, so it
+cannot duplicate output onto a host application's logging setup or interfere with it. Calling
+this again replaces the previous handler instead of stacking a second one. Independent of
+`silence_sdks()`, which targets third-party SDK loggers instead: call both for first-party and
+third-party debug output together.
+
+```python
+def set_verbosity(level: str) -> None:
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `level` | `str` | required | One of `"silent"`, `"error"`, `"warning"`, `"debug"`. Case-insensitive. |
+
+| Level | Shows |
+|---|---|
+| `"silent"` | Nothing, ever. |
+| `"error"` | `ERROR` and above. |
+| `"warning"` | `WARNING` and above. |
+| `"debug"` | Everything, including fine-grained per-file and per-block detail. |
+
+**Raises:** `ValueError` for an unknown level.
+
+Console lines are prefixed with `"UAC :: "` so they stay attributable when interleaved with the
+consuming project's own output.
+
+```python
+from unified_ai_client import call_ai, set_verbosity
+
+set_verbosity("debug")   # see everything during development
+response = call_ai(provider="ollama", model="gemma4:12b", prompt="Hello")
+```
+
 ### `cleanup`
 
 Purges remote and local resources held by every cached provider, for example deleting
