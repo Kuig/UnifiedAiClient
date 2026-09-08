@@ -55,7 +55,7 @@ pip install -e /path/to/UnifiedAiClient
 **Production / other machines**: declare in your project's `requirements.txt`:
 
 ```text
-unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.5.4
+unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.5.5
 ```
 
 then run `pip install -r requirements.txt`.

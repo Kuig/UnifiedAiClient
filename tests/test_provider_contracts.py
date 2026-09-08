@@ -1621,3 +1621,385 @@ class TestHttpErrorDetailExtraction(unittest.TestCase):
         detail = _extract_detail("x" * 5000)
         self.assertTrue(detail.endswith("..."))
         self.assertLessEqual(len(detail), _MAX_DETAIL_CHARS + 3)
+
+
+# ---------------------------------------------------------------------------
+# 13. The extra_options namespace
+# ---------------------------------------------------------------------------
+
+def _capture_http_payload(name: str, config: ProviderConfig, **request_kwargs) -> dict:
+    """Run one call against an http-backed adapter and return the payload sent.
+
+    Anthropic's _post takes no endpoint and ollama's needs no credentials, so
+    the interception differs slightly per adapter even though the transport
+    beneath them is shared.
+    """
+    cls = _provider_class_by_name(name)
+    provider = cls(config) if name == "ollama" else cls(config, api_key="k")
+    captured: dict = {}
+
+    def fake_post(*args):
+        # (endpoint, payload, timeout) everywhere except anthropic: (payload, timeout)
+        captured.update(args[0] if name == "anthropic" else args[1])
+        return {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {},
+            "message": {"content": "ok"},
+            "eval_count": 1,
+            "prompt_eval_count": 1,
+            "content": [{"type": "text", "text": "ok"}],
+        }
+
+    fields = {"provider": name, "model": "m", "prompt": "hi", "timeout": 10}
+    fields.update(request_kwargs)
+    request = AiRequest(**fields)
+    with patch.object(provider, "_post", side_effect=fake_post):
+        provider.call(request)
+    return captured
+
+
+def _ollama_options(config: ProviderConfig, **request_kwargs) -> dict:
+    """The Ollama model `options` block, which is where its keys land."""
+    return _capture_http_payload("ollama", config, **request_kwargs)["options"]
+
+
+class TestLibraryOptionNamespace(ProviderRegistryIsolation):
+    """extra_options carries two kinds of key, and only one may reach the wire.
+
+    The library owns the meaning of the keys in `_LIBRARY_OPTION_KEYS`; each
+    adapter consumes the ones it owns and must drop the rest. Everything else
+    is provider-specific and passes through verbatim. Until 0.5.5 only Ollama
+    enforced any of this, so `context_size` -- which config.json.example
+    shipped for lmstudio and llamacpp -- travelled straight into the body of
+    /v1/chat/completions, and Google's `disable_safety` landed in Ollama's
+    model options.
+    """
+
+    # The specification, written out rather than derived, on the model of
+    # TestFileSupportMatrix._SUPPORT: it mirrors the table in
+    # docs/configuration.md and fails when code and document drift apart.
+    _NAMESPACE = frozenset({
+        "url", "timeout", "sleep_time",
+        "temperature", "max_tokens", "max_output_tokens", "top_k", "top_p",
+        "context_size", "use_generate", "keep_alive",
+        "disable_safety", "upload_poll_timeout",
+        "task_type", "output_dimensionality",
+    })
+
+    def test_the_namespace_matches_its_specification(self) -> None:
+        from unified_ai_client.providers.base import BaseProvider
+
+        self.assertEqual(
+            BaseProvider._LIBRARY_OPTION_KEYS,
+            self._NAMESPACE,
+            "the library option namespace changed without updating this table "
+            "or the one in docs/configuration.md",
+        )
+
+    def test_every_key_is_owned_by_some_adapter(self) -> None:
+        """A key nobody consumes is silently dropped everywhere: dead weight."""
+        from unified_ai_client.providers.base import BaseProvider
+
+        infrastructure = {"url", "timeout", "sleep_time"}
+        consumed: set[str] = set()
+        for name in _PROVIDER_CLASSES:
+            consumed |= set(_provider_class_by_name(name)._CONSUMED_OPTION_KEYS)
+
+        self.assertEqual(
+            BaseProvider._LIBRARY_OPTION_KEYS - infrastructure - consumed,
+            set(),
+            "these keys are in the namespace but no adapter reads them",
+        )
+
+    def test_no_adapter_claims_a_key_outside_the_namespace(self) -> None:
+        from unified_ai_client.providers.base import BaseProvider
+
+        for name in _PROVIDER_CLASSES:
+            with self.subTest(provider=name):
+                cls = _provider_class_by_name(name)
+                self.assertEqual(
+                    set(cls._CONSUMED_OPTION_KEYS) - BaseProvider._LIBRARY_OPTION_KEYS,
+                    set(),
+                    "an adapter declares a key the library does not own",
+                )
+
+    def test_a_key_owned_elsewhere_never_reaches_an_http_body(self) -> None:
+        """The bug this batch closes, measured on every http adapter."""
+        # Exactly what config.json.example shipped, plus a control key only
+        # Ollama has ever read.
+        config = ProviderConfig(
+            extra_options={"context_size": 0, "use_generate": False, "url": "x"}
+        )
+        for name in ("openai", "groq", "lmstudio", "llamacpp", "anthropic"):
+            with self.subTest(provider=name):
+                payload = _capture_http_payload(name, config)
+                for leaked in ("context_size", "use_generate", "url"):
+                    self.assertNotIn(leaked, payload)
+
+    def test_googles_keys_do_not_reach_ollamas_model_options(self) -> None:
+        """The same leak in the other direction, which Ollama also had."""
+        options = _ollama_options(
+            ProviderConfig(extra_options={"disable_safety": True, "task_type": "x"})
+        )
+        self.assertNotIn("disable_safety", options)
+        self.assertNotIn("task_type", options)
+
+    def test_provider_specific_options_still_pass_through(self) -> None:
+        """The half that protects against fixing this too greedily.
+
+        `visual_token_budget` reaching Gemma 4 without the library knowing it
+        exists is the stated point of extra_options, so a filter that also
+        caught unknown keys would be a worse bug than the one it replaced.
+        """
+        config = ProviderConfig(
+            extra_options={"visual_token_budget": 1120, "repeat_penalty": 1.2}
+        )
+        options = _ollama_options(config)
+        self.assertEqual(options["visual_token_budget"], 1120)
+        self.assertEqual(options["repeat_penalty"], 1.2)
+
+        for name in ("openai", "anthropic"):
+            with self.subTest(provider=name):
+                payload = _capture_http_payload(name, config)
+                self.assertEqual(payload["visual_token_budget"], 1120)
+
+    def test_the_call_time_escape_hatch_still_wins(self) -> None:
+        """0.5.3's precedence must survive the consolidation."""
+        options = _ollama_options(
+            ProviderConfig(extra_options={"top_k": 999}),
+            extra_options={"top_k": 5},
+        )
+        self.assertEqual(options["top_k"], 5)
+
+
+class TestTemperatureResolution(ProviderRegistryIsolation):
+    """temperature resolves like its sibling levers, or it resolves wrongly.
+
+    It was the one common lever still defaulting to a value rather than None,
+    so "not given" was indistinguishable from "given 0.7" and a temperature
+    registered through configure_provider() was overwritten on every call
+    while top_k, sitting beside it, survived.
+    """
+
+    def test_a_configured_temperature_reaches_the_payload(self) -> None:
+        config = ProviderConfig(extra_options={"temperature": 0.1})
+        for name in ("openai", "anthropic"):
+            with self.subTest(provider=name):
+                self.assertEqual(
+                    _capture_http_payload(name, config)["temperature"], 0.1
+                )
+        self.assertEqual(_ollama_options(config)["temperature"], 0.1)
+
+    def test_an_explicit_temperature_beats_the_configured_one(self) -> None:
+        config = ProviderConfig(extra_options={"temperature": 0.1})
+        for name in ("openai", "anthropic"):
+            with self.subTest(provider=name):
+                payload = _capture_http_payload(name, config, temperature=0.9)
+                self.assertEqual(payload["temperature"], 0.9)
+        self.assertEqual(_ollama_options(config, temperature=0.9)["temperature"], 0.9)
+
+    def test_configuring_nothing_still_sends_the_old_default(self) -> None:
+        """The compatibility half: 0.7 was the signature default for years."""
+        config = ProviderConfig()
+        for name in ("openai", "anthropic"):
+            with self.subTest(provider=name):
+                self.assertEqual(
+                    _capture_http_payload(name, config)["temperature"], 0.7
+                )
+        self.assertEqual(_ollama_options(config)["temperature"], 0.7)
+
+    def test_the_script_protocol_never_receives_null(self) -> None:
+        """docs/script-protocol.md declares this field `float`, not `float | null`.
+
+        top_k and top_p are documented as nullable and are forwarded raw; this
+        one is not, so a script doing arithmetic on it must keep working.
+        """
+        from unified_ai_client.providers.script import ScriptProvider
+
+        provider = ScriptProvider(ProviderConfig())
+        request = AiRequest(provider="script", model="s.py", prompt="hi", timeout=10)
+        captured: dict = {}
+
+        def fake_run(cmd, payload, timeout):
+            captured.update(payload)
+            return {"text": "ok"}
+
+        with patch(
+            "unified_ai_client.providers.script._run_script", side_effect=fake_run
+        ):
+            provider.call(request)
+
+        self.assertIsNotNone(captured["temperature"])
+        self.assertEqual(captured["temperature"], 0.7)
+
+
+# ---------------------------------------------------------------------------
+# 14. Invariants shared by every adapter
+# ---------------------------------------------------------------------------
+
+class TestToolResultsDoNotReappendThePrompt(ProviderRegistryIsolation):
+    """With tool_results present the prompt is already in messages.
+
+    This invariant entered ollama, anthropic and openai_compat in one commit
+    and reached google only later, so for a while tool calling on Google
+    duplicated the user turn. Nothing asserted it across all four until now:
+    the per-adapter tests each check their own, which is exactly the shape of
+    coverage that let the fourth drift.
+    """
+
+    _PROMPT = "SENTINEL-PROMPT-NOT-TO-BE-REAPPENDED"
+
+    def _tool_results(self):
+        from unified_ai_client.models import ToolResult
+        return [ToolResult(call_id="1", name="f", content="done")]
+
+    def _history(self):
+        return [{"role": "user", "content": self._PROMPT}]
+
+    def test_http_adapters_send_the_prompt_exactly_once(self) -> None:
+        for name in ("openai", "anthropic", "ollama"):
+            with self.subTest(provider=name):
+                payload = _capture_http_payload(
+                    name,
+                    ProviderConfig(),
+                    prompt=self._PROMPT,
+                    messages=self._history(),
+                    tool_results=self._tool_results(),
+                )
+                occurrences = sum(
+                    1 for m in payload["messages"]
+                    if self._PROMPT in str(m.get("content", ""))
+                )
+                self.assertEqual(
+                    occurrences, 1,
+                    "the prompt was re-appended on top of the history",
+                )
+
+    def test_google_sends_the_prompt_exactly_once(self) -> None:
+        from unified_ai_client.providers.google import GoogleProvider
+
+        provider = GoogleProvider(ProviderConfig(), api_key="fake-key")
+        fake_response = MagicMock()
+        fake_response.candidates = []
+        fake_response.prompt_feedback = None
+        fake_response.text = "ok"
+        fake_client = MagicMock()
+        fake_client.models.generate_content.return_value = fake_response
+
+        request = AiRequest(
+            provider="google", model="gemini-2.5-flash", prompt=self._PROMPT,
+            messages=self._history(), tool_results=self._tool_results(), timeout=30,
+        )
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client):
+            provider.call(request)
+
+        contents = fake_client.models.generate_content.call_args.kwargs["contents"]
+        self.assertEqual(str(contents).count(self._PROMPT), 1)
+
+
+class TestAttachmentRefusalIsWordedOnce(FileFixtureCase):
+    """A provider that promises a file class it cannot build says so one way.
+
+    The three copies of this refusal had already drifted into two wordings,
+    "builds no block for them" and "has no way to send them", which is the
+    shape of divergence that produced the .mp3 bug in the first place.
+
+    Each case widens SUPPORTED_FILE_TYPES past what the adapter's block builder
+    can actually produce, which is the inconsistency the message exists to
+    report, and then drives the real code path rather than the shared factory:
+    a test that called the factory directly would pass even if no adapter used
+    it.
+    """
+
+    # (provider, the class it is made to declare, a file of that class)
+    _CASES = (
+        ("groq", "document", ".pdf"),   # base OpenAiCompat builder: image + audio only
+        ("anthropic", "audio", ".mp3"),  # Messages API has no audio block
+        ("ollama", "audio", ".mp3"),     # /api/chat carries images[] and nothing else
+    )
+
+    def _refusal(self, name: str, declared: str, suffix: str) -> str:
+        from unified_ai_client.exceptions import UnsupportedFileError
+
+        cls = _provider_class_by_name(name)
+        provider = cls(ProviderConfig()) if name == "ollama" else cls(
+            ProviderConfig(), api_key="k"
+        )
+        widened = cls.SUPPORTED_FILE_TYPES | {declared}
+        request = AiRequest(
+            provider=name, model="m", prompt="hi", timeout=10,
+            file_path=self.make(suffix),
+        )
+        with patch.object(cls, "SUPPORTED_FILE_TYPES", widened):
+            with self.assertRaises(UnsupportedFileError) as ctx:
+                provider.call(request)
+        return str(ctx.exception)
+
+    def test_the_three_adapters_word_it_identically(self) -> None:
+        shapes = set()
+        for name, declared, suffix in self._CASES:
+            message = self._refusal(name, declared, suffix)
+            with self.subTest(provider=name):
+                self.assertIn(name, message)
+                self.assertIn(declared, message)
+            # Strip the parts that legitimately differ: the provider name, the
+            # file class and the path. What is left is the wording itself.
+            shapes.add(
+                message.split("declares support for", 1)[1].split(declared, 1)[1]
+                .split(":", 1)[0]
+            )
+        self.assertEqual(
+            len(shapes), 1, f"the refusal is worded {len(shapes)} different ways: {shapes}"
+        )
+
+
+class TestPreloadAndUnloadStayPaired(unittest.TestCase):
+    """preload_model and unload_model are two halves of model residency.
+
+    Overriding one without the other leaves a model this library asked for and
+    can no longer release, which is precisely what cleanup() exists to prevent.
+    Now that preload_model is a concrete no-op, an adapter that overrides it is
+    making a claim, and this is what checks the claim.
+    """
+
+    def test_only_the_residency_providers_override_preload(self) -> None:
+        from unified_ai_client.providers.base import BaseProvider
+
+        for name in _PROVIDER_CLASSES:
+            with self.subTest(provider=name):
+                cls = _provider_class_by_name(name)
+                overrides = cls.preload_model is not BaseProvider.preload_model
+                self.assertEqual(
+                    overrides, cls.SUPPORTS_UNLOAD,
+                    "preload_model and SUPPORTS_UNLOAD disagree about whether "
+                    "this provider holds a model resident",
+                )
+
+
+class TestReasoningTokenSplit(unittest.TestCase):
+    """The shared estimator must reproduce what the two copies produced."""
+
+    def _split(self, content: str, reasoning: str, total: int) -> int:
+        from unified_ai_client.providers.base import BaseProvider
+        return BaseProvider._estimate_reasoning_tokens(content, reasoning, total)
+
+    def test_it_matches_the_original_formula(self) -> None:
+        for content, reasoning, total in (
+            ("answer", "thinking hard", 100),
+            ("a" * 900, "b" * 100, 250),
+            ("", "only reasoning", 40),
+        ):
+            with self.subTest(total=total):
+                total_chars = len(content) + len(reasoning)
+                expected = max(1, round(len(reasoning) / (total_chars / total)))
+                self.assertEqual(self._split(content, reasoning, total), expected)
+
+    def test_no_trace_means_no_reasoning_tokens(self) -> None:
+        self.assertEqual(self._split("answer", "", 100), 0)
+
+    def test_a_trace_is_never_rounded_down_to_nothing(self) -> None:
+        """0 would read as "the model did not think", which is a different claim."""
+        self.assertEqual(self._split("a" * 100000, "x", 10), 1)
+
+    def test_nothing_to_divide_is_zero_not_a_crash(self) -> None:
+        self.assertEqual(self._split("answer", "trace", 0), 0)

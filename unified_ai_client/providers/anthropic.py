@@ -6,11 +6,9 @@ import os
 import re
 from typing import Any
 
-from unified_ai_client.exceptions import UnsupportedFileError
 from unified_ai_client.file_utils import (
     encode_file_base64,
     get_mime_type,
-    inline_text_attachments,
     normalize_file_paths,
 )
 from unified_ai_client.http import get_json, post_json
@@ -44,6 +42,13 @@ class AnthropicProvider(BaseProvider):
     SECRETS_KEY: str = "anthropic_api_key"
 
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "document"})
+
+    # The four common levers, each mapped onto its own field in call(). The rest
+    # of the library's namespace belongs to other adapters and is dropped rather
+    # than forwarded: /v1/messages rejects an unknown top-level field.
+    _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset(
+        {"temperature", "max_tokens", "top_k", "top_p"}
+    )
 
     # Claude 4.6 is where adaptive thinking was introduced. Below it only the
     # fixed-budget form is accepted; from 4.7 on only the adaptive one is.
@@ -241,7 +246,7 @@ class AnthropicProvider(BaseProvider):
         Returns:
             Always True.
         """
-        self._get("/v1/models", timeout if timeout is not None else self.config.timeout)
+        self._get("/v1/models", self._resolve_timeout(timeout))
         return True
 
     def _build_user_content(
@@ -262,35 +267,26 @@ class AnthropicProvider(BaseProvider):
                 the Messages API accepts. Audio lands here: dropping it silently
                 let the model answer as though it had heard the recording.
         """
-        content: list[dict[str, Any]] = []
-        text_files: list[str] = []
+        effective_prompt, native = self._partition_attachments(file_paths, prompt)
 
-        for fp, ft in self._validate_files(file_paths):
+        content: list[dict[str, Any]] = []
+        for fp, ft in native:
             # Both native classes share the same block shape; only the
             # discriminator and the media type differ.
-            if ft in ("image", "document"):
-                _log.debug("Anthropic: '%s' → %s base64 block", os.path.basename(fp), ft)
-                content.append({
-                    "type": ft,
-                    "source": {
-                        "type": "base64",
-                        "media_type": (
-                            "application/pdf" if ft == "document" else get_mime_type(fp)
-                        ),
-                        "data": encode_file_base64(fp),
-                    },
-                })
+            if ft not in ("image", "document"):
+                raise self._unsupported_native_error(fp, ft)
+            _log.debug("Anthropic: '%s' → %s base64 block", os.path.basename(fp), ft)
+            content.append({
+                "type": ft,
+                "source": {
+                    "type": "base64",
+                    "media_type": (
+                        "application/pdf" if ft == "document" else get_mime_type(fp)
+                    ),
+                    "data": encode_file_base64(fp),
+                },
+            })
 
-            elif ft == "text":
-                text_files.append(fp)
-
-            else:
-                raise UnsupportedFileError(
-                    f"Provider '{self.provider_name}' declares support for {ft} "
-                    f"files but builds no block for them: '{fp}'."
-                )
-
-        effective_prompt = inline_text_attachments(prompt, text_files)
         content.append({"type": "text", "text": effective_prompt})
         return content
 
@@ -342,12 +338,7 @@ class AnthropicProvider(BaseProvider):
         Returns:
             Standardized AiResponse.
         """
-        # Merge options
-        opts = {}
-        if self.config.extra_options:
-            opts.update(self.config.extra_options)
-        if request.extra_options:
-            opts.update(request.extra_options)
+        opts = self._merge_options(request)
 
         messages: list[dict[str, Any]] = []
 
@@ -361,27 +352,28 @@ class AnthropicProvider(BaseProvider):
             user_content = self._build_user_content(request.prompt, file_paths)
             messages.append({"role": "user", "content": user_content})
 
-        max_tokens = request.max_tokens if request.max_tokens is not None else opts.get("max_tokens", 8192)
+        max_tokens = self._prefer_request(request.max_tokens, opts, "max_tokens", 8192)
 
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": request.temperature,
+            "temperature": self._prefer_request(
+                request.temperature, opts, "temperature", self.DEFAULT_TEMPERATURE
+            ),
         }
 
-        top_k = request.top_k if request.top_k is not None else opts.get("top_k")
+        top_k = self._prefer_request(request.top_k, opts, "top_k")
         if top_k is not None:
             payload["top_k"] = top_k
 
-        top_p = request.top_p if request.top_p is not None else opts.get("top_p")
+        top_p = self._prefer_request(request.top_p, opts, "top_p")
         if top_p is not None:
             payload["top_p"] = top_p
 
-        # Populate payload from other opts
-        for k, v in opts.items():
-            if k not in ("max_tokens", "temperature", "top_k", "top_p", "timeout", "sleep_time", "keep_alive"):
-                payload[k] = v
+        # Provider-specific options, forwarded verbatim. Anything the library
+        # owns was consumed above or belongs to another adapter.
+        payload.update(self._passthrough_options(opts))
 
         if request.system_prompt:
             payload["system"] = request.system_prompt
@@ -444,14 +436,11 @@ class AnthropicProvider(BaseProvider):
         usage = resp.get("usage", {})
         output_tokens = usage.get("output_tokens", 0)
 
-        # Anthropic's output_tokens aggregates thinking + response tokens.
-        # Estimate reasoning_tokens from the char-ratio of the combined output.
-        reasoning_tokens = 0
-        if raw_reasoning:
-            total_chars = len(response_text) + len(raw_reasoning)
-            if total_chars > 0 and output_tokens > 0:
-                chars_per_token = total_chars / output_tokens
-                reasoning_tokens = max(1, round(len(raw_reasoning) / chars_per_token))
+        # Anthropic's output_tokens aggregates thinking + response tokens, so
+        # the split has to be estimated from the character ratio.
+        reasoning_tokens = self._estimate_reasoning_tokens(
+            response_text, raw_reasoning, output_tokens
+        )
 
         return AiResponse(
             text=response_text,
@@ -461,23 +450,6 @@ class AnthropicProvider(BaseProvider):
             reasoning_text=raw_reasoning,
             tool_calls=tool_calls,
         )
-
-    def preload_model(
-        self,
-        model: str,
-        keep_alive: str | int = "15m",
-        context_size: int | None = None,
-        extra_options: dict | None = None,
-    ) -> None:
-        """Model preloading is not supported by the Anthropic API.
-
-        Args:
-            model: Unused.
-            keep_alive: Unused.
-            context_size: Unused.
-            extra_options: Unused.
-        """
-        pass
 
     def get_embedding(self, model: str, text: str) -> list[float]:
         """Anthropic does not support text embeddings.

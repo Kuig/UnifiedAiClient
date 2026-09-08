@@ -114,7 +114,11 @@ class AiRequest:
         file_path: Optional local file path or list of file paths for
             multimodal input. Accepts images, audio, text files, and PDFs.
             The provider handles all encoding, upload, and fallback internally.
-        temperature: Sampling temperature.
+        temperature: Sampling temperature, or ``None`` to fall back to the
+            configured value and finally to 0.7. ``None`` rather than a number
+            for the same reason as ``top_k``: with a value there is no way to
+            tell "not given" from "given the default", so a temperature set
+            through ``configure_provider()`` could never win.
         thinking: Whether to enable extended thinking/reasoning mode (True/False)
             or use the provider's default behavior ("default").
         format_json: Whether to force JSON output format.
@@ -145,7 +149,7 @@ class AiRequest:
     system_prompt: str | None = None
     messages: list[dict] | None = None
     file_path: str | list[str] | None = None
-    temperature: float = 0.7
+    temperature: float | None = None
     thinking: bool | str = "default"
     format_json: bool = False
     timeout: int | None = None

@@ -156,10 +156,22 @@ behaviour:
 | `task_type` | `google` | unset | Embedding task type, passed to `embed_content`. |
 | `output_dimensionality` | `google` | unset | Embedding vector size, passed to `embed_content`. |
 | `top_k`, `top_p` | all | `64` / `0.95` | Sampling parameters. Also per-call arguments, which win. |
+| `temperature` | all | `0.7` | Sampling temperature. Also a per-call argument, which wins. |
 
 Anything else is passed through verbatim to the provider payload. On Ollama that means it
 lands inside the `options` object, which is how a model-specific knob such as
 `visual_token_budget` reaches Gemma 4 without the library needing to know it exists.
+
+The options above are the reverse case: the library owns their meaning, and the
+`Providers` column says which adapter reads each one. An adapter that does not own an
+option drops it rather than forwarding it, because a name this library defined is not a
+field any endpoint has. Setting `context_size` on `groq`, for instance, changes nothing
+instead of putting an unknown field in the request body.
+
+`google` is the one exception to the passthrough. Its SDK takes a typed configuration
+object that rejects unrecognised fields, so instead of forwarding anything it accepts a
+named list: `response_schema`, `stop_sequences`, `presence_penalty`, `frequency_penalty`
+and `seed`. An option outside that list and outside the table above does not reach Gemini.
 
 ## `config.json`, the file-based fallback
 

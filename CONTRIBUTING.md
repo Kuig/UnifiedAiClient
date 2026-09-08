@@ -93,7 +93,10 @@ live in that module, and an adapter that bypasses it silently loses both.
 
 Set `SUPPORTED_FILE_TYPES` to what you have **verified** the endpoint accepts, and
 `SUPPORTS_UNLOAD` only if the endpoint keeps a model resident and offers a way to release
-it, in which case override `unload_model()` too. The
+it, in which case override `unload_model()` and `preload_model()` too: a contract test
+asserts that the flag and the two overrides agree. Set `LAZY_MODEL_LOAD` only for a local
+server that defers the model load until first inference, since warming those up costs a
+one-token completion rather than a free metadata GET. The
 inherited default is `{"image"}`, and declaring a class whose content block the builder
 cannot produce raises at request-build time rather than at import.
 
@@ -111,6 +114,13 @@ Then wire it in and document it:
   `TestFileSupportMatrix._SUPPORT` and `TestUnloadSupportMatrix._SUPPORTS_UNLOAD` assert
   the declared capabilities against an explicit list, so a provider added without a row
   there fails the suite.
+
+If the endpoint takes an option this library already names, such as `context_size` or
+`keep_alive`, read it explicitly and add it to the adapter's `_CONSUMED_OPTION_KEYS`.
+Everything in `BaseProvider._LIBRARY_OPTION_KEYS` that an adapter does not declare is
+dropped before the request is built, which is deliberate: those names mean something here
+and nothing to an endpoint that never defined them. Options outside that set are
+provider-specific and reach the payload untouched.
 
 A provider that needs a vendor SDK is a different conversation: the absence of a
 dependency tree is the point of the library.

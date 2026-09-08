@@ -352,7 +352,7 @@ def call_ai(
     system_prompt: str | None = None,
     messages: list[dict] | None = None,
     file_path: str | list[str] | None = None,
-    temperature: float = 0.7,
+    temperature: float | None = None,
     thinking: bool | str = "default",
     format_json: bool = False,
     timeout: int | None = None,
@@ -382,7 +382,8 @@ def call_ai(
         file_path: Optional local file path or list of paths for multimodal
             input. Supports images, audio, text files, and PDFs. The provider
             handles all encoding and upload internally.
-        temperature: Sampling temperature.
+        temperature: Sampling temperature. ``None`` falls back to the value
+            registered through ``configure_provider()``, and finally to 0.7.
         thinking: Enable extended reasoning/thinking mode (``True``/``False``)
             or use the provider's default behavior (``"default"``).
         format_json: Force JSON-formatted response.

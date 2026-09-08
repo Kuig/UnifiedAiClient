@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-09-08
+
+### Fixed
+
+- Options that belong to this library no longer travel to an endpoint that never
+  defined them. `context_size` and `use_generate` reached the body of
+  `/v1/chat/completions` on every OpenAI-compatible provider, and Google's
+  `disable_safety` and friends reached Ollama's model `options`. Only Ollama filtered
+  anything, and only in one direction. Copying `config.json.example`, which shipped
+  `"context_size": 0` for `lmstudio` and `llamacpp`, was enough to trigger it: harmless
+  noise on a permissive local server, a 400 on a strict cloud endpoint. Options the
+  library does not define are still forwarded verbatim, which is unchanged and is the
+  point of `extra_options`.
+- A `temperature` registered through `configure_provider()` now reaches the payload. It
+  was the last common lever still defaulting to a value rather than `None`, so "not given"
+  and "given 0.7" were indistinguishable and the configured value was overwritten on every
+  call, while `top_k` and `top_p` beside it were honoured.
+
+### Changed
+
+- Everything the adapters had in common moved onto `BaseProvider`: option merging, the
+  three-source resolution of a common lever, the option namespace and its filter, timeout
+  resolution, the reasoning-token split, and the attachment partition with a single
+  wording for its refusal. Two of those had already drifted into behaving differently in
+  different copies.
+- `preload_model()` is a concrete no-op instead of `@abstractmethod`, matching `warm_up()`,
+  `unload_model()` and `cleanup()`. Three stub overrides are gone, and a contract test now
+  holds it and `SUPPORTS_UNLOAD` together.
+- `LM Studio` and `llama.cpp` declare `LAZY_MODEL_LOAD = True` instead of each carrying a
+  verbatim copy of the same 27-line `warm_up()`.
+- `temperature` is `float | None = None` in `call_ai()` and `AiRequest`. Every existing
+  call keeps compiling and keeps sending the same value: the `0.7` that was the signature
+  default is now `BaseProvider.DEFAULT_TEMPERATURE`, applied when neither the caller nor
+  the configuration supplies one. The `script` protocol still receives a concrete float,
+  never `null`, since `docs/script-protocol.md` declares that field non-nullable.
+- `config.json.example` no longer lists `context_size` under `lmstudio` and `llamacpp`. It
+  never had an effect there and is now explicitly dropped.
+
 ## [0.5.4] - 2026-09-08
 
 ### Added

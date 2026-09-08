@@ -33,14 +33,12 @@
 
     "lmstudio": {
         "url": "http://localhost:1234",
-        "timeout": 300,
-        "context_size": 0
+        "timeout": 300
     },
 
     "llamacpp": {
         "url": "http://localhost:8080",
-        "timeout": 300,
-        "context_size": 0
+        "timeout": 300
     },
 
     "mistral": {

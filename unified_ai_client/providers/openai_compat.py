@@ -10,7 +10,6 @@ from unified_ai_client.file_utils import (
     audio_format_name,
     encode_file_base64,
     get_mime_type,
-    inline_text_attachments,
     normalize_file_paths,
 )
 from unified_ai_client.http import get_json, post_json
@@ -51,6 +50,25 @@ class OpenAiCompatProvider(BaseProvider):
     # The OpenAI-compatible baseline: an image_url block is the only attachment
     # every one of these endpoints understands. Subclasses widen this.
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image"})
+
+    # The four common levers, each mapped onto its own field below. Everything
+    # else in the library's namespace belongs to another adapter and is dropped
+    # rather than forwarded: /v1/chat/completions has no context_size and no
+    # use_generate, and a strict endpoint answers an unknown field with a 400.
+    _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset(
+        {"temperature", "max_tokens", "top_k", "top_p"}
+    )
+
+    LAZY_MODEL_LOAD: bool = False
+    """Whether this endpoint defers loading the model until first inference.
+
+    True only for the local servers, LM Studio and llama.cpp, where a metadata
+    GET returns instantly and leaves the load cost for the first real call, so
+    warming up has to send a one-token completion instead. That completion is
+    billable inference in principle; it stays acceptable only because these
+    servers are local, which is why the default is False and a paid endpoint
+    must never set it.
+    """
 
     def __init__(self, config: ProviderConfig, api_key: str = "") -> None:
         """Initialize the provider.
@@ -137,11 +155,7 @@ class OpenAiCompatProvider(BaseProvider):
             "temperature": 0.0,
             "stream": False,
         }
-        self._post(
-            "/v1/chat/completions",
-            payload,
-            timeout if timeout is not None else self.config.timeout,
-        )
+        self._post("/v1/chat/completions", payload, self._resolve_timeout(timeout))
 
     def warm_up(
         self,
@@ -155,11 +169,13 @@ class OpenAiCompatProvider(BaseProvider):
 
         ``GET /v1/models`` costs nothing and consumes no tokens, so it is safe
         on paid endpoints. It pays the DNS + TCP + TLS handshake and validates
-        the API key. It does not load the model: subclasses backed by a local
-        server that loads lazily override this with a minimal completion.
+        the API key, but it does not load the model. Providers that declare
+        ``LAZY_MODEL_LOAD`` send a one-token completion instead, because on
+        those servers the metadata GET would return before any load happened.
 
         Args:
-            model: Unused. Listing models warms the channel regardless.
+            model: The model to load, used only when ``LAZY_MODEL_LOAD`` is set.
+                Otherwise unused: listing models warms the channel regardless.
             file_paths: Ignored. These providers inline attachments into the
                 request and keep no remote file store.
             keep_alive: Ignored. A cloud endpoint holds no model on the
@@ -169,7 +185,10 @@ class OpenAiCompatProvider(BaseProvider):
         Returns:
             Always True: the connection is always worth opening early.
         """
-        self._get("/v1/models", timeout if timeout is not None else self.config.timeout)
+        if self.LAZY_MODEL_LOAD:
+            self._warm_up_completion(model, timeout)
+        else:
+            self._get("/v1/models", self._resolve_timeout(timeout))
         return True
 
     def _build_native_block(self, file_path: str, file_type: str) -> dict[str, Any]:
@@ -210,10 +229,7 @@ class OpenAiCompatProvider(BaseProvider):
                 "input_audio": {"data": b64, "format": fmt},
             }
 
-        raise UnsupportedFileError(
-            f"Provider '{self.provider_name}' declares support for {file_type} "
-            f"files but builds no block for them: '{file_path}'."
-        )
+        raise self._unsupported_native_error(file_path, file_type)
 
     def _build_user_content(
         self, prompt: str, file_paths: list[str]
@@ -238,17 +254,8 @@ class OpenAiCompatProvider(BaseProvider):
         if not file_paths:
             return prompt
 
-        # Text is inlined into the prompt; everything left is a native block.
-        native_blocks: list[dict[str, Any]] = []
-        text_files: list[str] = []
-
-        for fp, ft in self._validate_files(file_paths):
-            if ft == "text":
-                text_files.append(fp)
-            else:
-                native_blocks.append(self._build_native_block(fp, ft))
-
-        effective_prompt = inline_text_attachments(prompt, text_files)
+        effective_prompt, native = self._partition_attachments(file_paths, prompt)
+        native_blocks = [self._build_native_block(fp, ft) for fp, ft in native]
 
         if native_blocks:
             content: list[dict[str, Any]] = [{"type": "text", "text": effective_prompt}]
@@ -297,12 +304,7 @@ class OpenAiCompatProvider(BaseProvider):
         Returns:
             Standardized AiResponse.
         """
-        # Merge options
-        opts = {}
-        if self.config.extra_options:
-            opts.update(self.config.extra_options)
-        if request.extra_options:
-            opts.update(request.extra_options)
+        opts = self._merge_options(request)
 
         messages: list[dict[str, Any]] = []
 
@@ -324,7 +326,9 @@ class OpenAiCompatProvider(BaseProvider):
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
-            "temperature": request.temperature,
+            "temperature": self._prefer_request(
+                request.temperature, opts, "temperature", self.DEFAULT_TEMPERATURE
+            ),
             "stream": False,
         }
         if request.format_json:
@@ -353,15 +357,15 @@ class OpenAiCompatProvider(BaseProvider):
                     "content": tr.content,
                 })
 
-        max_tokens = request.max_tokens if request.max_tokens is not None else opts.get("max_tokens")
+        max_tokens = self._prefer_request(request.max_tokens, opts, "max_tokens")
         if max_tokens is not None and max_tokens > 0:
             payload["max_tokens"] = max_tokens
 
-        top_k = request.top_k if request.top_k is not None else opts.get("top_k")
+        top_k = self._prefer_request(request.top_k, opts, "top_k")
         if top_k is not None:
             payload["top_k"] = top_k
 
-        top_p = request.top_p if request.top_p is not None else opts.get("top_p")
+        top_p = self._prefer_request(request.top_p, opts, "top_p")
         if top_p is not None:
             payload["top_p"] = top_p
 
@@ -375,11 +379,11 @@ class OpenAiCompatProvider(BaseProvider):
         ):
             payload[self.REASONING_PARAM] = "high" if request.thinking else "none"
 
-        # Populate payload from other opts. This runs last so extra_options
-        # can override the mapping above with a provider-specific value.
-        for k, v in opts.items():
-            if k not in ("max_tokens", "temperature", "top_k", "top_p", "timeout", "sleep_time", "keep_alive"):
-                payload[k] = v
+        # Provider-specific options, forwarded verbatim. This runs last so a
+        # caller can override the mapping above with an endpoint-specific value.
+        # Anything the library owns has been consumed above or belongs to
+        # another adapter, and either way must not travel as a raw key.
+        payload.update(self._passthrough_options(opts))
 
         resp = self._post("/v1/chat/completions", payload, request.timeout)
         choice = resp["choices"][0]["message"]
@@ -414,23 +418,6 @@ class OpenAiCompatProvider(BaseProvider):
             reasoning_text=raw_reasoning,
             tool_calls=tool_calls,
         )
-
-    def preload_model(
-        self,
-        model: str,
-        keep_alive: str | int = "15m",
-        context_size: int | None = None,
-        extra_options: dict | None = None,
-    ) -> None:
-        """Model preloading is not supported by OpenAI-compatible endpoints.
-
-        Args:
-            model: Unused.
-            keep_alive: Unused.
-            context_size: Unused.
-            extra_options: Unused.
-        """
-        pass  # No-op: not supported
 
     def get_embedding(self, model: str, text: str) -> list[float]:
         """Generate a text embedding vector.

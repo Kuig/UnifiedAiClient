@@ -18,7 +18,7 @@ def call_ai(
     system_prompt: str | None = None,
     messages: list[dict] | None = None,
     file_path: str | list[str] | None = None,
-    temperature: float = 0.7,
+    temperature: float | None = None,
     thinking: bool | str = "default",
     format_json: bool = False,
     timeout: int | None = None,
@@ -42,7 +42,7 @@ def call_ai(
 | `system_prompt` | `str \| None` | `None` | System instructions. |
 | `messages` | `list[dict] \| None` | `None` | Chat history as `[{"role": "user" \| "assistant", "content": "..."}]`. An entry may also carry a `"files"` key with local file paths to attach to that turn. |
 | `file_path` | `str \| list[str] \| None` | `None` | Local file path(s) to attach to the current turn. See [Multimodal Input](multimodal.md). |
-| `temperature` | `float` | `0.7` | Sampling temperature. |
+| `temperature` | `float \| None` | `None` | Sampling temperature. `None` falls back to the configured value, then to `0.7`. |
 | `thinking` | `bool \| str` | `"default"` | `True` / `False` to force reasoning on or off, `"default"` to leave it to the provider. See [Thinking and Reasoning](reasoning.md). |
 | `format_json` | `bool` | `False` | Forces the model to respond in valid JSON. |
 | `timeout` | `int \| None` | `None` | Network timeout in seconds. `None` uses the timeout registered for the provider via `configure_provider()`, falling back to 300. Since a non-streaming request sends nothing until the answer is complete, this behaves as a deadline for the whole call. |

@@ -20,30 +20,6 @@ class LlamaCppProvider(OpenAiCompatProvider):
     # flac), so this is the one local provider that takes audio directly.
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "audio"})
 
-    def warm_up(
-        self,
-        model: str,
-        file_paths: str | list[str] | None = None,
-        *,
-        keep_alive: str | int | None = None,
-        timeout: int | None = None,
-    ) -> bool:
-        """Load the model with a one-token completion.
-
-        llama.cpp servers started in multi-model mode load on first inference,
-        so the inherited ``GET /v1/models`` would leave that cost for the first
-        real call. The completion is billable inference in principle, but the
-        server is local, so in practice it is free.
-
-        Args:
-            model: Model identifier to load.
-            file_paths: Ignored. llama.cpp inlines attachments into the request.
-            keep_alive: Ignored. This server has no residency control on
-                the OpenAI-compatible surface this adapter speaks.
-            timeout: Seconds to wait. Defaults to the configured timeout.
-
-        Returns:
-            Always True.
-        """
-        self._warm_up_completion(model, timeout)
-        return True
+    # Started in multi-model mode, llama-server loads on first inference, so
+    # warming up has to send a completion rather than the inherited metadata GET.
+    LAZY_MODEL_LOAD: bool = True

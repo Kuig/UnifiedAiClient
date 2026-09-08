@@ -4,10 +4,11 @@ from unified_ai_client.providers.openai_compat import OpenAiCompatProvider
 
 
 class LmStudioProvider(OpenAiCompatProvider):
-    """LM Studio local provider.
+    """LM Studio local server provider.
 
-    Connects to a locally running LM Studio server using the OpenAI-compatible
-    /v1/chat/completions API. Default URL: http://localhost:1234.
+    Connects to a locally running LM Studio instance using its
+    OpenAI-compatible /v1/chat/completions API. Default URL:
+    http://localhost:1234.
 
     All file handling and reasoning text extraction is inherited from
     OpenAiCompatProvider. LM Studio does not expose native reasoning tokens;
@@ -16,30 +17,6 @@ class LmStudioProvider(OpenAiCompatProvider):
 
     DEFAULT_URL: str = "http://localhost:1234"
 
-    def warm_up(
-        self,
-        model: str,
-        file_paths: str | list[str] | None = None,
-        *,
-        keep_alive: str | int | None = None,
-        timeout: int | None = None,
-    ) -> bool:
-        """Load the model with a one-token completion.
-
-        LM Studio loads a model on first inference, so the inherited
-        ``GET /v1/models`` would return instantly and leave the load cost for
-        the first real call. The completion is billable inference in principle,
-        but the server is local, so in practice it is free.
-
-        Args:
-            model: Model identifier to load.
-            file_paths: Ignored. LM Studio inlines attachments into the request.
-            keep_alive: Ignored. This server has no residency control on
-                the OpenAI-compatible surface this adapter speaks.
-            timeout: Seconds to wait. Defaults to the configured timeout.
-
-        Returns:
-            Always True.
-        """
-        self._warm_up_completion(model, timeout)
-        return True
+    # LM Studio loads a model on first inference, so warming up has to send a
+    # completion rather than the inherited metadata GET.
+    LAZY_MODEL_LOAD: bool = True

@@ -97,6 +97,12 @@ class ScriptProvider(BaseProvider):
     # and a script that does not implement them declines by exiting non-zero.
     SUPPORTS_UNLOAD: bool = True
 
+    # Deliberately empty: this adapter reads none of the library's options and
+    # hands the whole extra_options dict to the script untouched. Only the
+    # script knows which settings it understands, and that passthrough is part
+    # of the public contract in docs/script-protocol.md.
+    _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset()
+
     def __init__(self, config: ProviderConfig) -> None:
         """Initialize the ScriptProvider.
 
@@ -130,7 +136,17 @@ class ScriptProvider(BaseProvider):
             "system_prompt": request.system_prompt,
             "messages": request.messages,
             "file_path": normalize_file_paths(request.file_path),
-            "temperature": request.temperature,
+            # Resolved here rather than forwarded raw: docs/script-protocol.md
+            # declares this field a float, not "float or null" as it does for
+            # top_k and top_p, so a None would break a script doing arithmetic
+            # on it. The configured value is not folded in either, because the
+            # whole extra_options dict travels alongside and the script, not
+            # this adapter, decides what to make of what it finds there.
+            "temperature": (
+                request.temperature
+                if request.temperature is not None
+                else self.DEFAULT_TEMPERATURE
+            ),
             "thinking": request.thinking,
             "format_json": request.format_json,
             "timeout": request.timeout,
@@ -253,7 +269,7 @@ class ScriptProvider(BaseProvider):
             implement the mode or reported that it had nothing to do.
         """
         cmd = _resolve_interpreter(model)
-        effective_timeout = timeout if timeout is not None else self.config.timeout
+        effective_timeout = self._resolve_timeout(timeout)
         payload = {
             "mode": "warm_up",
             "file_path": normalize_file_paths(file_paths),
@@ -289,7 +305,7 @@ class ScriptProvider(BaseProvider):
                 registered for this provider.
         """
         cmd = _resolve_interpreter(model)
-        effective_timeout = timeout if timeout is not None else self.config.timeout
+        effective_timeout = self._resolve_timeout(timeout)
         payload = {
             "mode": "unload",
             "timeout": effective_timeout,

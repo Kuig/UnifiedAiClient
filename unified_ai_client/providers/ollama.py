@@ -4,12 +4,7 @@ import json
 import logging
 from typing import Any
 
-from unified_ai_client.exceptions import UnsupportedFileError
-from unified_ai_client.file_utils import (
-    encode_file_base64,
-    inline_text_attachments,
-    normalize_file_paths,
-)
+from unified_ai_client.file_utils import encode_file_base64, normalize_file_paths
 from unified_ai_client.http import post_json
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
@@ -22,36 +17,45 @@ _DEFAULT_KEEP_ALIVE: str | int = "15m"
 # short deadline rather than the provider timeout, which is usually minutes.
 _UNLOAD_TIMEOUT: int = 30
 
-_NON_MODEL_OPTIONS: frozenset[str] = frozenset(
-    {"keep_alive", "timeout", "sleep_time", "use_generate", "url"}
-)
-"""Keys this library reads itself, which must never reach Ollama's ``options``.
+_TRANSLATED_OPTIONS: dict[str, str] = {
+    "context_size": "num_ctx",
+    "max_tokens": "num_predict",
+}
+"""Library option names that Ollama spells differently."""
 
-``extra_options`` carries two unrelated kinds of key: Ollama model parameters,
-which are forwarded verbatim so a caller can reach any of them without this
-library knowing their names, and UAC-level controls that steer the adapter.
-Only the second kind is listed here. Anything absent from this set is assumed
-to be a model parameter and passed through untouched.
-"""
+_MODEL_PARAM_OPTIONS: frozenset[str] = frozenset({"temperature", "top_k", "top_p"})
+"""Library options Ollama accepts under the very same name."""
 
 
 def _fold_options(opts: dict[str, Any], options: dict[str, Any]) -> None:
-    """Fold UAC-level options into an Ollama model ``options`` dict, in place.
+    """Fold merged options into an Ollama model ``options`` dict, in place.
 
-    Two names are translated to Ollama's own spelling, the control keys in
-    ``_NON_MODEL_OPTIONS`` are dropped, and everything else passes through.
+    Three outcomes, and which one a key gets is the whole of the rule:
+
+    - a name Ollama spells differently is translated (``context_size`` becomes
+      ``num_ctx``);
+    - a name Ollama shares is kept as it is;
+    - anything else the library owns is dropped, because this adapter either
+      consumes it elsewhere, as it does with ``keep_alive`` and
+      ``use_generate``, or it belongs to another adapter entirely, as
+      ``disable_safety`` belongs to Google. Neither has any business inside a
+      model parameter block.
+
+    Everything outside the library's namespace passes through untouched, which
+    is how a model-specific knob such as ``visual_token_budget`` reaches Gemma 4
+    without this library knowing it exists.
 
     Args:
         opts: Source options, from the provider config or from the request.
         options: The Ollama ``options`` dict to update in place.
     """
     for k, v in opts.items():
-        if k in _NON_MODEL_OPTIONS:
+        if k in _TRANSLATED_OPTIONS:
+            options[_TRANSLATED_OPTIONS[k]] = v
+        elif k in _MODEL_PARAM_OPTIONS:
+            options[k] = v
+        elif k in BaseProvider._LIBRARY_OPTION_KEYS:
             continue
-        if k == "context_size":
-            options["num_ctx"] = v
-        elif k == "max_tokens":
-            options["num_predict"] = v
         else:
             options[k] = v
 
@@ -87,6 +91,13 @@ class OllamaProvider(BaseProvider):
 
     # Ollama keeps a model in VRAM between requests and can be told to drop it.
     SUPPORTS_UNLOAD: bool = True
+
+    # The levers this adapter reads for itself: three folded into `options`
+    # under their own name, two translated to Ollama's spelling, and two that
+    # steer the adapter without ever reaching the wire as raw keys.
+    _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset(
+        set(_TRANSLATED_OPTIONS) | _MODEL_PARAM_OPTIONS | {"keep_alive", "use_generate"}
+    )
 
     def __init__(self, config: ProviderConfig) -> None:
         """Initialize the Ollama provider.
@@ -149,22 +160,15 @@ class OllamaProvider(BaseProvider):
             FileNotFoundError: If an attachment does not exist.
             UnsupportedFileError: If an attachment is neither an image nor text.
         """
+        effective_prompt, native = self._partition_attachments(file_paths, prompt)
+
         multimodal_data: list[str] = []
-        text_files: list[str] = []
+        for fp, ft in native:
+            if ft != "image":
+                raise self._unsupported_native_error(fp, ft)
+            _log.debug("Ollama: encoding '%s' as base64 image data", fp)
+            multimodal_data.append(encode_file_base64(fp))
 
-        for fp, ft in self._validate_files(file_paths):
-            if ft == "image":
-                _log.debug("Ollama: encoding '%s' as base64 image data", fp)
-                multimodal_data.append(encode_file_base64(fp))
-            elif ft == "text":
-                text_files.append(fp)
-            else:
-                raise UnsupportedFileError(
-                    f"Provider '{self.provider_name}' declares support for {ft} "
-                    f"files but has no way to send them: '{fp}'."
-                )
-
-        effective_prompt = inline_text_attachments(prompt, text_files)
         return effective_prompt, multimodal_data
 
     def call(self, request: AiRequest) -> AiResponse:
@@ -216,11 +220,7 @@ class OllamaProvider(BaseProvider):
 
         # 3. Resolve options early: the file-processing step below needs to
         # know use_generate before it can decide whether its result is used.
-        opts = {}
-        if self.config.extra_options:
-            opts.update(self.config.extra_options)
-        if request.extra_options:
-            opts.update(request.extra_options)
+        opts = self._merge_options(request)
         use_generate = opts.get("use_generate", False)
 
         # 4. Current User Message — only add when NOT in a tool result continuation.
@@ -266,15 +266,15 @@ class OllamaProvider(BaseProvider):
         _fold_options(self.config.extra_options or {}, options)
         _fold_options(request.extra_options or {}, options)
 
-        options["temperature"] = request.temperature
-        if request.top_k is not None:
-            options["top_k"] = request.top_k
-        elif "top_k" not in options:
-            options["top_k"] = self.DEFAULT_TOP_K
-        if request.top_p is not None:
-            options["top_p"] = request.top_p
-        elif "top_p" not in options:
-            options["top_p"] = self.DEFAULT_TOP_P
+        options["temperature"] = self._prefer_request(
+            request.temperature, opts, "temperature", self.DEFAULT_TEMPERATURE
+        )
+        options["top_k"] = self._prefer_request(
+            request.top_k, opts, "top_k", self.DEFAULT_TOP_K
+        )
+        options["top_p"] = self._prefer_request(
+            request.top_p, opts, "top_p", self.DEFAULT_TOP_P
+        )
 
         # Call-time max_tokens takes precedence
         if request.max_tokens is not None:
@@ -369,12 +369,11 @@ class OllamaProvider(BaseProvider):
                     arguments=fn.get("arguments") or {},
                 ))
 
-        reasoning_tokens = 0
-        if raw_thinking:
-            total_chars = len(content_text) + len(raw_thinking)
-            if total_chars > 0 and eval_count > 0:
-                chars_per_token = total_chars / eval_count
-                reasoning_tokens = max(1, round(len(raw_thinking) / chars_per_token))
+        # Ollama reports one aggregate eval_count, so the split between the
+        # thinking trace and the answer has to be estimated.
+        reasoning_tokens = self._estimate_reasoning_tokens(
+            content_text, raw_thinking, eval_count
+        )
 
         return AiResponse(
             text=content_text,
@@ -405,16 +404,6 @@ class OllamaProvider(BaseProvider):
         opts = self.config.extra_options or {}
         return opts.get("keep_alive", _DEFAULT_KEEP_ALIVE)
 
-    def _resolve_timeout(self, timeout: int | None) -> int:
-        """Resolve the socket timeout, explicit argument over configured one.
-
-        Args:
-            timeout: The caller's explicit value, or None to fall back.
-
-        Returns:
-            Seconds to wait.
-        """
-        return timeout if timeout is not None else self.config.timeout
 
     def preload_model(
         self,

@@ -88,6 +88,14 @@ the tool-calling triple `ToolDefinition`, `ToolCall`, `ToolResult`.
 Every adapter subclasses `BaseProvider` and implements the same contract: take an
 `AiRequest`, produce an `AiResponse`. The twelve of them fall into three families.
 
+`BaseProvider` is not only that contract: it also holds what all twelve would otherwise
+each write for themselves. Merging config-level and call-level options, resolving a common
+lever across its three sources, deciding which options may travel to an endpoint at all,
+splitting attachments into inlined text and native blocks, estimating how an aggregate
+token count divides between a thinking trace and an answer. Each of those had been copied
+between three and five times, and two of them had already drifted into behaving
+differently in different copies before being consolidated.
+
 **The OpenAI-compatible family** is the workhorse. `OpenAiCompatProvider` implements the
 whole `/v1/chat/completions` conversation: message assembly, file blocks, tool schemas,
 reasoning parameters, response parsing. Seven providers (`mistral`, `cohere`, `meta`,
@@ -122,6 +130,14 @@ reference under `docs/`.
 `document` or `unknown`, validates a list of paths against what a provider declares it
 accepts, encodes to base64, and wraps text attachments in delimited blocks. Every adapter
 branches on the classification it returns, which is why adding a file type starts here.
+
+One of those helpers deserves naming here, because it encodes a rule rather than a
+convenience. `_LIBRARY_OPTION_KEYS` lists every option key this library assigns a meaning
+to, and each adapter declares in `_CONSUMED_OPTION_KEYS` which of them it reads. An option
+inside that namespace is consumed by its owner and dropped by everyone else; an option
+outside it is provider-specific and forwarded untouched. The split is what keeps
+`extra_options` able to carry both a knob the library has never heard of and a setting the
+library defined itself, without either being mistaken for the other.
 
 `config.py` resolves credentials and loads JSON config into dataclasses. `http.py` is the
 single urllib transport the three HTTP adapters share: it builds the request, parses the

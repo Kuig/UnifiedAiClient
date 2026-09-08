@@ -50,6 +50,16 @@ class GoogleProvider(BaseProvider):
 
     # The Files API takes every class the library can classify natively, so only
     # a file classify_file() cannot place at all is refused before upload.
+    # Everything this adapter reads out of extra_options. Google is the one
+    # provider with no verbatim passthrough: GenerateContentConfig is a typed
+    # model, so unrecognised fields go through the explicit allowlist in call()
+    # rather than straight into the payload.
+    _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset({
+        "temperature", "max_tokens", "max_output_tokens", "top_k", "top_p",
+        "disable_safety", "upload_poll_timeout",
+        "task_type", "output_dimensionality",
+    })
+
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "audio", "document"})
 
     def __init__(self, config: ProviderConfig, api_key: str | None = None) -> None:
@@ -260,12 +270,7 @@ class GoogleProvider(BaseProvider):
         """
         client = self._get_client()
 
-        # Merge options
-        opts = {}
-        if self.config.extra_options:
-            opts.update(self.config.extra_options)
-        if request.extra_options:
-            opts.update(request.extra_options)
+        opts = self._merge_options(request)
 
         upload_poll_timeout = opts.get("upload_poll_timeout", 15)
 
@@ -324,7 +329,9 @@ class GoogleProvider(BaseProvider):
 
         # --- Build generation config ---
         config_kwargs = {
-            "temperature": request.temperature,
+            "temperature": self._prefer_request(
+                request.temperature, opts, "temperature", self.DEFAULT_TEMPERATURE
+            ),
             "system_instruction": request.system_prompt,
             "safety_settings": self._build_safety_settings(opts.get("disable_safety", False)),
             "thinking_config": self._build_thinking_config(
@@ -333,15 +340,20 @@ class GoogleProvider(BaseProvider):
             "response_mime_type": "application/json" if request.format_json else None,
         }
 
-        top_k = request.top_k if request.top_k is not None else opts.get("top_k")
+        top_k = self._prefer_request(request.top_k, opts, "top_k")
         if top_k is not None:
             config_kwargs["top_k"] = top_k
 
-        top_p = request.top_p if request.top_p is not None else opts.get("top_p")
+        top_p = self._prefer_request(request.top_p, opts, "top_p")
         if top_p is not None:
             config_kwargs["top_p"] = top_p
 
-        max_output_tokens = request.max_tokens if request.max_tokens is not None else (opts.get("max_output_tokens") or opts.get("max_tokens"))
+        max_output_tokens = self._prefer_request(
+            request.max_tokens,
+            opts,
+            "max_output_tokens",
+            opts.get("max_tokens"),
+        )
         if max_output_tokens is not None:
             config_kwargs["max_output_tokens"] = max_output_tokens
 
@@ -455,23 +467,6 @@ class GoogleProvider(BaseProvider):
             reasoning_is_summary=bool(reasoning_text),
             tool_calls=tool_calls,
         )
-
-    def preload_model(
-        self,
-        model: str,
-        keep_alive: str | int = "15m",
-        context_size: int | None = None,
-        extra_options: dict | None = None,
-    ) -> None:
-        """Model preloading is not supported by the Google AI API.
-
-        Args:
-            model: Unused.
-            keep_alive: Unused.
-            context_size: Unused.
-            extra_options: Unused.
-        """
-        pass  # No-op: not supported
 
     def warm_up(
         self,
