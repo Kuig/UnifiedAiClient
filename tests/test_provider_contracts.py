@@ -1205,6 +1205,71 @@ class TestSamplingParameters(unittest.TestCase):
     def test_ollama_still_honours_an_explicit_value(self) -> None:
         self.assertEqual(self._ollama_options(top_k=10)["top_k"], 10)
 
+    def _ollama_options_with_config(self, config: ProviderConfig, **request_kwargs) -> dict:
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(config)
+        seen = {}
+
+        def fake_post(self, endpoint, payload, timeout):
+            seen["payload"] = payload
+            return _OK_RESPONSE
+
+        with patch.object(OllamaProvider, "_post", fake_post):
+            provider.call(AiRequest(
+                provider="ollama", model="m", prompt="hi",
+                timeout=30, **request_kwargs,
+            ))
+        return seen["payload"]["options"]
+
+    def test_ollama_explicit_call_time_value_beats_config_extra_options(self) -> None:
+        """Regression: extra_options from configure_provider() won over an
+        explicit call-time top_k, the opposite of the documented precedence.
+
+        _fold_options(opts, options) used to run after temperature/top_k/
+        top_p were set from the request, unconditionally overwriting them
+        with whatever configure_provider() had registered.
+        """
+        config = ProviderConfig(extra_options={"top_k": 999, "top_p": 0.01})
+        options = self._ollama_options_with_config(config, top_k=10, top_p=0.5)
+        self.assertEqual(options["top_k"], 10)
+        self.assertEqual(options["top_p"], 0.5)
+
+    def test_ollama_config_extra_options_still_apply_when_nothing_else_does(self) -> None:
+        """The config-level value must still reach the payload on its own."""
+        config = ProviderConfig(extra_options={"top_k": 999})
+        options = self._ollama_options_with_config(config)
+        self.assertEqual(options["top_k"], 999)
+
+    def test_ollama_call_time_extra_options_beat_config_when_no_param_given(self) -> None:
+        """extra_options set at call time override the same key from
+        configure_provider(), the ordering docs/configuration.md documents,
+        as long as the caller does not also pass the named parameter."""
+        config = ProviderConfig(extra_options={"top_k": 999})
+        options = self._ollama_options_with_config(
+            config, extra_options={"top_k": 5},
+        )
+        self.assertEqual(options["top_k"], 5)
+
+    def test_ollama_explicit_parameter_beats_call_time_extra_options_too(self) -> None:
+        """When a call gives both the named parameter and extra_options for
+        the same key, the parameter wins: it is the more specific signal for
+        this exact call, and extra_options exists to reach settings the
+        named parameters do not cover, not to second-guess the ones given
+        alongside it."""
+        config = ProviderConfig(extra_options={"top_k": 999})
+        options = self._ollama_options_with_config(
+            config, top_k=10, extra_options={"top_k": 5},
+        )
+        self.assertEqual(options["top_k"], 10)
+
+    def test_ollama_config_extra_options_do_not_leak_unrelated_model_params(self) -> None:
+        """A sanity check that the reorder did not drop config extras that
+        are not temperature/top_k/top_p, such as num_ctx."""
+        config = ProviderConfig(extra_options={"num_ctx": 8000})
+        options = self._ollama_options_with_config(config)
+        self.assertEqual(options["num_ctx"], 8000)
+
     def test_thinking_strips_what_anthropic_refuses(self) -> None:
         """Regression: thinking=True was a 400 on every Claude model.
 
@@ -1266,6 +1331,66 @@ class TestGoogleCallTimeout(unittest.TestCase):
             elapsed, 3.0,
             f"timeout did not end the wait: returned after {elapsed:.2f}s",
         )
+
+
+# ---------------------------------------------------------------------------
+# Google blocked response
+# ---------------------------------------------------------------------------
+
+class TestGoogleBlockedResponse(unittest.TestCase):
+    """A blocked prompt must not disappear as an unremarkable empty string."""
+
+    def test_a_blocked_prompt_logs_the_reason(self) -> None:
+        """Regression: candidates=[] fell into the same except as a genuinely
+        malformed response, and the real reason (safety, prohibited content)
+        was discarded along with it — the caller got AiResponse(text=""),
+        indistinguishable from the model simply saying nothing.
+        """
+        from unified_ai_client.providers.google import GoogleProvider
+
+        provider = GoogleProvider(ProviderConfig(), api_key="fake-key")
+        fake_response = MagicMock()
+        fake_response.candidates = []
+        fake_response.prompt_feedback.block_reason = "SAFETY"
+        fake_response.text = ""
+        fake_client = MagicMock()
+        fake_client.models.generate_content.return_value = fake_response
+
+        request = AiRequest(
+            provider="google", model="gemini-2.5-flash", prompt="hi", timeout=30
+        )
+
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client):
+            with self.assertLogs(
+                "unified_ai_client.providers.google", level="WARNING"
+            ) as cm:
+                response = provider.call(request)
+
+        self.assertEqual(response.text, "")
+        self.assertTrue(any("SAFETY" in line for line in cm.output))
+
+    def test_no_warning_when_nothing_was_blocked(self) -> None:
+        """An ordinary empty candidates list, with no prompt_feedback to
+        explain it, must not manufacture a warning out of nothing."""
+        from unified_ai_client.providers.google import GoogleProvider
+
+        provider = GoogleProvider(ProviderConfig(), api_key="fake-key")
+        fake_response = MagicMock()
+        fake_response.candidates = []
+        fake_response.prompt_feedback = None
+        fake_response.text = ""
+        fake_client = MagicMock()
+        fake_client.models.generate_content.return_value = fake_response
+
+        request = AiRequest(
+            provider="google", model="gemini-2.5-flash", prompt="hi", timeout=30
+        )
+
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client):
+            with self.assertNoLogs(
+                "unified_ai_client.providers.google", level="WARNING"
+            ):
+                provider.call(request)
 
 
 if __name__ == "__main__":

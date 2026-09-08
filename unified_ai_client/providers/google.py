@@ -174,7 +174,7 @@ class GoogleProvider(BaseProvider):
 
     def _build_thinking_config(
         self,
-        thinking: bool,
+        thinking: bool | str,
         model_name: str,
     ) -> types.ThinkingConfig | None:
         """Build thinking configuration for the model.
@@ -185,7 +185,7 @@ class GoogleProvider(BaseProvider):
         SDK returns thought parts in the response candidates.
 
         Args:
-            thinking: Whether thinking mode is requested.
+            thinking: True, False, or "default" as passed to call_ai().
             model_name: The target model identifier.
 
         Returns:
@@ -428,6 +428,22 @@ class GoogleProvider(BaseProvider):
                 else:
                     response_text += part.text or ""
         except (IndexError, AttributeError):
+            # candidates is empty when the prompt itself was blocked (safety,
+            # prohibited content, recitation): there is no candidate to read a
+            # finish_reason from, only prompt_feedback on the response itself.
+            # The empty text this falls back to is indistinguishable from "the
+            # model said nothing", so the reason is logged rather than lost,
+            # the same failure shape CLAUDE.md documents for the old
+            # "[File could not be read as text]" placeholder, moved from the
+            # file layer to the response layer.
+            block_reason = getattr(
+                getattr(response, "prompt_feedback", None), "block_reason", None
+            )
+            if block_reason:
+                _log.warning(
+                    "Google blocked the prompt for model '%s': %s",
+                    request.model, block_reason,
+                )
             response_text = getattr(response, "text", "") or ""
 
         return AiResponse(
@@ -559,8 +575,12 @@ class GoogleProvider(BaseProvider):
         for ref in refs:
             try:
                 client.files.delete(name=ref.name)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Swallowed by design (see docstring), but silent until now:
+                # a failed delete leaves the file on Google's quota, which is
+                # the exact leak cleanup() exists to prevent, so it is worth
+                # a trace even though it must not stop the other deletes.
+                _log.debug("Failed to delete uploaded file '%s': %s", ref.name, exc)
         with _UPLOADED_FILES_LOCK:
             _UPLOADED_FILES.clear()
         _log.info("Google: remote file cache cleared.")

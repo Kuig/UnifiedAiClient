@@ -35,6 +35,7 @@ unified_ai_client/
 ├── config.py             # load_secrets(), load_config() (utility)
 ├── retry.py              # Exponential backoff
 ├── silence.py            # silence_sdks()
+├── verbosity.py          # set_verbosity()
 └── providers/
     ├── base.py           # BaseProvider ABC
     ├── google.py         # Google AI (Gemini): upload caching, thinking, cleanup
@@ -117,7 +118,8 @@ branches on the classification it returns, which is why adding a file type start
 
 `config.py` resolves credentials and loads JSON config into dataclasses. `retry.py`
 implements the exponential backoff. `exceptions.py` holds the deterministic failures.
-`silence.py` quiets third-party SDK loggers.
+`silence.py` quiets third-party SDK loggers; `verbosity.py` attaches or removes the
+library's own console handler and is deliberately decoupled from it, see CLAUDE.md.
 
 ## Boundaries
 

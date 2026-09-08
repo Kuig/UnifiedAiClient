@@ -841,6 +841,33 @@ class TestScriptProvider(ProviderRegistryIsolation):
         finally:
             os.unlink(script)
 
+    def test_script_subprocess_is_run_as_utf8(self) -> None:
+        """Regression: stdin/stdout used to be decoded with the locale encoding.
+
+        `subprocess.run(text=True)` without an explicit `encoding` falls back
+        to `locale.getpreferredencoding(False)`, which is cp1252 on Windows,
+        the platform this project develops on. The documented JSON payload
+        happens to survive that anyway, because `json.dumps()` defaults to
+        `ensure_ascii=True` and escapes every non-ASCII character before it
+        ever reaches the pipe — but a script's stderr on a crash is raw text,
+        not JSON, and that path is where the mojibake or UnicodeDecodeError
+        actually surfaces. Asserted directly on the call rather than through
+        an end-to-end pipe, since the failure mode depends on the parent's
+        locale, the child's own stdio encoding, and this shell's console
+        encoding all at once, none of which a portable test controls.
+        """
+        from unified_ai_client.providers.script import _run_script
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout='{"text": "ok"}', stderr="",
+            )
+            _run_script(["python", "fake.py"], {"mode": "generate"}, 30)
+
+        _, kwargs = mock_run.call_args
+        self.assertEqual(kwargs.get("encoding"), "utf-8")
+        self.assertEqual(kwargs.get("errors"), "replace")
+
     def test_script_embed(self) -> None:
         script = _make_script(_ECHO_SCRIPT)
         try:
@@ -1085,6 +1112,39 @@ class TestGoogleUploadCache(ProviderRegistryIsolation):
         client.files.delete.assert_called_once_with(name="files/abc123")
         self.assertEqual(google_mod._UPLOADED_FILES, {})
 
+    def test_a_failed_delete_is_logged_and_does_not_stop_the_others(self) -> None:
+        """Regression: a delete failure was swallowed with no trace at all,
+        for the one outcome cleanup() exists to prevent: the file stays on
+        Google's quota. Must still not raise, and must not stop the delete
+        of the other uploads in the same cleanup() call.
+        """
+        from unified_ai_client.client import cleanup, configure_provider, get_provider
+        from unified_ai_client.providers import google as google_mod
+        from unified_ai_client.providers.google import GoogleProvider
+
+        get_provider("google")
+        google_mod._UPLOADED_FILES.clear()
+        bad_ref = MagicMock()
+        bad_ref.name = "files/bad"
+        good_ref = MagicMock()
+        good_ref.name = "files/good"
+        google_mod._UPLOADED_FILES["/tmp/bad.pdf"] = bad_ref
+        google_mod._UPLOADED_FILES["/tmp/good.pdf"] = good_ref
+
+        configure_provider("google", timeout=120)
+
+        client = MagicMock()
+        client.files.delete.side_effect = [RuntimeError("quota service down"), None]
+        with patch.object(GoogleProvider, "_get_client", return_value=client):
+            with self.assertLogs(
+                "unified_ai_client.providers.google", level="DEBUG"
+            ) as cm:
+                cleanup(unload_models=False)
+
+        self.assertEqual(client.files.delete.call_count, 2)
+        self.assertTrue(any("bad" in line for line in cm.output))
+        self.assertEqual(google_mod._UPLOADED_FILES, {})
+
 
 class TestOllamaOffline(unittest.TestCase):
     """Payload construction and response parsing, with _post intercepted."""
@@ -1135,6 +1195,42 @@ class TestOllamaOffline(unittest.TestCase):
         self.assertEqual(options["num_predict"], 100)
         self.assertEqual(options["my_custom_option"], 456)
         self.assertEqual(options["visual_token_budget"], 70)
+
+    def test_ollama_skips_file_processing_on_a_tool_result_continuation(self) -> None:
+        """Regression: an attachment was read and base64-encoded even when
+        tool_results meant the result could never be attached to this turn.
+
+        _process_files_for_message() used to run unconditionally, before the
+        `if not request.tool_results` guard around using its result, so the
+        encoding cost was paid and then thrown away.
+        """
+        from unified_ai_client.providers.ollama import OllamaProvider
+        from unified_ai_client.models import AiRequest, ProviderConfig, ToolResult
+
+        provider = OllamaProvider(config=ProviderConfig())
+
+        def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+            return {
+                "message": {"content": "response", "thinking": ""},
+                "eval_count": 10,
+                "prompt_eval_count": 5,
+            }
+
+        request = AiRequest(
+            provider="ollama",
+            model="mock-model",
+            prompt="hello",
+            file_path=__file__,  # any real path; must not be read
+            tool_results=[ToolResult(call_id="1", name="f", content="done")],
+        )
+
+        with patch.object(provider, "_post", side_effect=fake_post):
+            with patch.object(
+                provider, "_process_files_for_message"
+            ) as mock_process:
+                provider.call(request)
+
+        mock_process.assert_not_called()
 
     def test_ollama_tool_payload(self) -> None:
         """Ollama provider must build tools in OpenAI-compatible format."""
@@ -1821,6 +1917,37 @@ class TestConfigurationReachesTheCall(ProviderRegistryIsolation):
 
     def test_the_default_is_still_300_when_nothing_is_registered(self) -> None:
         self.assertEqual(self._capture_request().timeout, 300)
+
+
+class TestFilePathWithToolResultsIsFlagged(ProviderRegistryIsolation):
+    """A file that will not be attached must not vanish without a trace.
+
+    Every adapter treats tool_results as "the user turn is already in
+    messages", so file_path is never attached alongside it. The warning is
+    the caller's only signal that this happened, since dropping the file
+    itself is unchanged and stays out of scope for this fix.
+    """
+
+    def _call(self, **call_kwargs):
+        from unified_ai_client import call_ai
+        from unified_ai_client.models import AiResponse, ToolResult
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        with patch.object(OllamaProvider, "call", lambda self, request: AiResponse(text="ok")):
+            call_ai(
+                provider="ollama", model="m", prompt="p",
+                tool_results=[ToolResult(call_id="1", name="f", content="done")],
+                **call_kwargs,
+            )
+
+    def test_file_path_with_tool_results_logs_a_warning(self) -> None:
+        with self.assertLogs("unified_ai_client.client", level="WARNING") as cm:
+            self._call(file_path=__file__)
+        self.assertTrue(any("file_path" in line for line in cm.output))
+
+    def test_no_warning_without_a_file_path(self) -> None:
+        with self.assertNoLogs("unified_ai_client.client", level="WARNING"):
+            self._call()
 
 
 class TestConfigureProviderMergesTheFile(ProviderRegistryIsolation):

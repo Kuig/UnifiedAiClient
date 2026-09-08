@@ -37,13 +37,21 @@ def load_secrets(project_root: str, filename: str = "secrets.json") -> dict[str,
 
     Supported keys:
 
-    +------------------------+-------------------------+
-    | ``secrets.json`` key   | Environment variable    |
-    +========================+=========================+
-    | ``google_api_key``     | ``GOOGLE_API_KEY``      |
-    | ``anthropic_api_key``  | ``ANTHROPIC_API_KEY``   |
-    | ``openai_api_key``     | ``OPENAI_API_KEY``      |
-    +------------------------+-------------------------+
+    +------------------------+---------------------------------------+
+    | ``secrets.json`` key   | Environment variable                  |
+    +========================+=========================================+
+    | ``google_api_key``     | ``GOOGLE_API_KEY``                     |
+    | ``anthropic_api_key``  | ``ANTHROPIC_API_KEY``                  |
+    | ``openai_api_key``     | ``OPENAI_API_KEY``                     |
+    | ``mistral_api_key``    | ``MISTRAL_API_KEY``                    |
+    | ``cohere_api_key``     | ``COHERE_API_KEY``                     |
+    | ``meta_api_key``       | ``LLAMA_API_KEY`` or ``META_API_KEY``  |
+    | ``groq_api_key``       | ``GROQ_API_KEY``                       |
+    | ``xai_api_key``        | ``XAI_API_KEY``                        |
+    +------------------------+---------------------------------------+
+
+    The full mapping lives in ``_ENV_VAR_MAP`` in this module; the table above
+    mirrors it and must stay in step with it.
 
     Server URLs for local providers (Ollama, LM Studio, llama.cpp) are
     **not** credentials — they belong in ``config.json`` and are never

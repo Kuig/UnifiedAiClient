@@ -131,8 +131,8 @@ nothing to do or the warm-up failed.
 ### `preload_model`
 
 Pre-loads a model into system memory and registers its settings for all subsequent
-`call_ai()` calls. Only Ollama performs an actual load; every other provider treats the
-load as a no-op but still registers the settings.
+`call_ai()` calls. Ollama, and a script that implements the `preload` mode, perform an
+actual load; every other provider treats it as a no-op but still registers the settings.
 
 ```python
 def preload_model(

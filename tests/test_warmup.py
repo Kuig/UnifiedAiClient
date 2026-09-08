@@ -15,7 +15,6 @@ import os
 import sys
 import tempfile
 import unittest
-import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -565,15 +564,11 @@ class TestWarmUpScript(unittest.TestCase):
         self._temp_paths.append(sidecar)
         script = self._script(_WARMING_SCRIPT, sidecar=sidecar)
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        with self.assertNoLogs(
+            "unified_ai_client.providers.script", level="WARNING"
+        ):
             self.provider.preload_model(script, keep_alive="30m", context_size=8000)
 
-        self.assertEqual(
-            [w for w in caught if issubclass(w.category, UserWarning)],
-            [],
-            "A script that implements 'preload' must not trigger the warning",
-        )
         with open(sidecar, encoding="utf-8") as fh:
             received = json.load(fh)
         self.assertEqual(received["mode"], "preload")
@@ -581,10 +576,20 @@ class TestWarmUpScript(unittest.TestCase):
         self.assertEqual(received["context_size"], 8000)
 
     def test_legacy_script_preload_still_warns(self) -> None:
-        """The signal that a preload call did nothing must survive."""
+        """The signal that a preload call did nothing must survive.
+
+        Moved off the stdlib `warnings` module onto `logging`, per
+        CLAUDE.md's "logs through stdlib logging only" rule: `warnings.warn`
+        was the one place in the library that did not, and it bypassed
+        set_verbosity("silent") entirely since it never touched the
+        unified_ai_client logger tree.
+        """
         script = self._script(_LEGACY_SCRIPT)
-        with self.assertWarns(UserWarning):
+        with self.assertLogs(
+            "unified_ai_client.providers.script", level="WARNING"
+        ) as cm:
             self.provider.preload_model(script)
+        self.assertTrue(any("preload" in line for line in cm.output))
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,6 @@ import json
 import logging
 import subprocess
 import sys
-import warnings
 from pathlib import Path
 
 from unified_ai_client.file_utils import normalize_file_paths
@@ -62,6 +61,8 @@ def _run_script(cmd: list[str], payload: dict, timeout: int) -> dict:
         input=json.dumps(payload),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
     )
     if result.returncode != 0:
@@ -77,8 +78,8 @@ class ScriptProvider(BaseProvider):
     """Provider adapter that delegates inference to an external script.
 
     The script must implement the stdin/stdout JSON protocol defined in
-    LLM_BEHAVIOUR_REQUIREMENTS.md. The 'model' field of the request is
-    interpreted as the path to the script file.
+    docs/script-protocol.md. The 'model' field of the request is interpreted
+    as the path to the script file. Both sides of the pipe are UTF-8.
 
     Interpreter resolution for Python scripts (.py extension):
       1. If a .venv directory exists in the script's own directory, its
@@ -210,12 +211,18 @@ class ScriptProvider(BaseProvider):
         }
         try:
             _run_script(cmd, payload, self.config.timeout)
-        except Exception:
-            warnings.warn(
-                f"Script '{model}' does not implement mode 'preload'. "
-                f"preload_model() call ignored.",
-                UserWarning,
-                stacklevel=2,
+        except RuntimeError as exc:
+            # RuntimeError is what _run_script raises for a non-zero exit,
+            # which the protocol overloads to mean two different things: "I
+            # do not implement this mode" and "I tried and crashed" look
+            # identical on the wire (docs/script-protocol.md), so the message
+            # below cannot claim more certainty than the protocol itself has.
+            # TimeoutExpired, JSONDecodeError and FileNotFoundError are left
+            # to propagate: none of them means "not implemented".
+            _log.warning(
+                "Script '%s' does not implement mode 'preload', or failed "
+                "while trying: %s",
+                model, exc,
             )
 
     def warm_up(
@@ -255,7 +262,15 @@ class ScriptProvider(BaseProvider):
         }
         try:
             data = _run_script(cmd, payload, effective_timeout)
-        except Exception:
+        except RuntimeError as exc:
+            # Same ambiguity as preload_model(): a non-zero exit means either
+            # "no such mode" or "tried and crashed", and the protocol does not
+            # distinguish the two.
+            _log.warning(
+                "Script '%s' does not implement mode 'warm_up', or failed "
+                "while trying: %s",
+                model, exc,
+            )
             return False
         return bool(data.get("warmed_up", True))
 
@@ -281,8 +296,15 @@ class ScriptProvider(BaseProvider):
         }
         try:
             _run_script(cmd, payload, effective_timeout)
-        except Exception as exc:
-            _log.debug("Script '%s' does not implement mode 'unload': %s", model, exc)
+        except RuntimeError as exc:
+            # Same ambiguity as preload_model() and warm_up(); raised to
+            # warning to match them, since a swallowed real failure here is
+            # no less worth surfacing than the other two.
+            _log.warning(
+                "Script '%s' does not implement mode 'unload', or failed "
+                "while trying: %s",
+                model, exc,
+            )
 
     def get_embedding(self, model: str, text: str) -> list[float]:
         """Generate a text embedding by spawning the target script in embed mode.

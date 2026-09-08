@@ -468,6 +468,20 @@ def call_ai(
         tool_results=tool_results,
     )
 
+    if file_path and tool_results:
+        # Every adapter treats tool_results as "the consumer already put the
+        # user turn in messages", so a file_path passed alongside it is never
+        # attached to this request: on the chat providers it is silently
+        # skipped, and on Ollama it used to be read and base64-encoded first
+        # and only then discarded. Attaching a file on a tool-result
+        # continuation is not supported, so this is the caller's one signal
+        # that it happened rather than nothing at all.
+        _log.warning(
+            "call_ai: file_path was given alongside tool_results and will "
+            "not be attached to this request; attachments are only sent on "
+            "a fresh turn."
+        )
+
     from unified_ai_client.retry import with_retry
     start = time.perf_counter()
     response = with_retry(

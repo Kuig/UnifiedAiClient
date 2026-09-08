@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -25,8 +24,9 @@ _log = logging.getLogger("unified_ai_client.providers.openai_compat")
 class OpenAiCompatProvider(BaseProvider):
     """Base class for providers using the OpenAI-compatible /v1/chat/completions API.
 
-    Shared by OpenAiProvider, LmStudioProvider, and LlamaCppProvider.
-    Subclasses override DEFAULT_URL and may override _build_file_content_blocks()
+    Shared by OpenAiProvider, MistralProvider, CohereProvider, MetaProvider,
+    GroqProvider, XAiProvider, LmStudioProvider, and LlamaCppProvider.
+    Subclasses override DEFAULT_URL and may override _build_native_block()
     to add native support for audio or PDF file types.
 
     File handling (default behaviour inherited by all subclasses):

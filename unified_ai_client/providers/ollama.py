@@ -221,13 +221,31 @@ class OllamaProvider(BaseProvider):
                         entry["tool_calls"] = msg["tool_calls"]
                     messages.append(entry)
 
-        # 3. Current User Message — only add when NOT in a tool result continuation.
+        # 3. Resolve options early: the file-processing step below needs to
+        # know use_generate before it can decide whether its result is used.
+        opts = {}
+        if self.config.extra_options:
+            opts.update(self.config.extra_options)
+        if request.extra_options:
+            opts.update(request.extra_options)
+        use_generate = opts.get("use_generate", False)
+
+        # 4. Current User Message — only add when NOT in a tool result continuation.
         # When tool_results are provided, the consumer has already placed the user
         # message in `messages` (history) and the prompt should not be re-appended.
-        file_paths = normalize_file_paths(request.file_path)
-        effective_prompt, multimodal_data = self._process_files_for_message(
-            file_paths, request.prompt
-        )
+        #
+        # File processing runs whenever its result is actually used: always
+        # for /api/generate below, whose payload has no other place to carry
+        # the prompt or attachments, and only for a fresh /api/chat turn
+        # otherwise — encoding an attachment a tool-result continuation will
+        # never send used to run unconditionally, which is wasted work.
+        if use_generate or not request.tool_results:
+            file_paths = normalize_file_paths(request.file_path)
+            effective_prompt, multimodal_data = self._process_files_for_message(
+                file_paths, request.prompt
+            )
+        else:
+            effective_prompt, multimodal_data = request.prompt, []
 
         if not request.tool_results:
             user_message: dict[str, Any] = {
@@ -238,30 +256,38 @@ class OllamaProvider(BaseProvider):
                 user_message["images"] = multimodal_data
             messages.append(user_message)
 
-        # 4. Build payload
-        opts = {}
-        if self.config.extra_options:
-            opts.update(self.config.extra_options)
-        if request.extra_options:
-            opts.update(request.extra_options)
+        # 5. Build the model options.
+        #
+        # Fold extra_options first, config below call-time so the latter
+        # overrides the former for the same key (docs/configuration.md), then
+        # let an explicit named parameter win over both — it is the more
+        # specific signal the caller gave for this exact call. Only when
+        # neither an explicit parameter nor any extra_options set a value
+        # does Ollama's own default apply.
+        #
+        # This used to run in the opposite order: temperature/top_k/top_p
+        # were set from the request first, and _fold_options(opts, options)
+        # ran last, so a top_k registered via configure_provider() silently
+        # overrode an explicit call_ai(top_k=...) every time.
+        options: dict[str, Any] = {}
+        _fold_options(self.config.extra_options or {}, options)
+        _fold_options(request.extra_options or {}, options)
 
-        options: dict[str, Any] = {"temperature": request.temperature}
-
-        options["top_k"] = (
-            request.top_k if request.top_k is not None else self.DEFAULT_TOP_K
-        )
-        options["top_p"] = (
-            request.top_p if request.top_p is not None else self.DEFAULT_TOP_P
-        )
-
-        _fold_options(opts, options)
+        options["temperature"] = request.temperature
+        if request.top_k is not None:
+            options["top_k"] = request.top_k
+        elif "top_k" not in options:
+            options["top_k"] = self.DEFAULT_TOP_K
+        if request.top_p is not None:
+            options["top_p"] = request.top_p
+        elif "top_p" not in options:
+            options["top_p"] = self.DEFAULT_TOP_P
 
         # Call-time max_tokens takes precedence
         if request.max_tokens is not None:
             options["num_predict"] = request.max_tokens
 
         keep_alive = opts.get("keep_alive", _DEFAULT_KEEP_ALIVE)
-        use_generate = opts.get("use_generate", False)
 
         if use_generate:
             # Map back to /api/generate format

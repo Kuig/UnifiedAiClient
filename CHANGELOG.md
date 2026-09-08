@@ -5,6 +5,48 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-09-08
+
+### Fixed
+
+- A script's stdout and stderr are now decoded as UTF-8 instead of the platform's locale
+  encoding, which is `cp1252` on Windows, the platform this project develops on. The
+  documented JSON payload happened to survive the old behaviour, since `json.dumps()`
+  escapes every non-ASCII character by default, but a script's stderr on a crash is raw
+  text and could come back as mojibake or trigger a decode error.
+- Ollama: an explicit `top_k`/`top_p`/`temperature` passed to `call_ai()` now wins over
+  the same key registered via `configure_provider()`, matching the precedence
+  `docs/configuration.md` documents. `_fold_options()` used to run after those three were
+  set from the request and silently overwrote them.
+- Ollama: an attachment is no longer read and base64-encoded on a tool-result
+  continuation, where the result was always discarded. `call_ai()` now logs a warning
+  when `file_path` and `tool_results` are both set, on every provider, since the file is
+  never attached to that turn either way and previously vanished without a trace.
+- The script provider's `preload_model()`, `warm_up()` and `unload_model()` distinguish a
+  genuine failure (a timeout, a malformed response, a missing interpreter) from a mode the
+  script does not implement. All three used to catch every exception and report "not
+  implemented", discarding the real error, including the script's own stderr.
+- `preload_model()` no longer emits a `UserWarning` via the stdlib `warnings` module, the
+  one place in the library that did not log through `logging`. `set_verbosity("silent")`
+  did not silence it, since it never reached the `unified_ai_client` logger tree.
+- Google: a prompt blocked by safety or content filters now logs the `block_reason`
+  instead of silently returning `AiResponse(text="")`, indistinguishable from the model
+  saying nothing. A failed delete during `cleanup()` is now logged at `debug` instead of
+  being swallowed without a trace, the same failure `cleanup()` exists to prevent.
+
+### Documentation
+
+- Corrected several references to a class method that does not exist
+  (`_build_file_content_blocks`, `_build_user_content` in `openai_compat.py`'s own
+  docstring and in `CLAUDE.md`): the real hook is `_build_native_block()`.
+- `google.py`'s `_build_thinking_config()` type hint corrected to `bool | str`, matching
+  what it actually receives.
+- `load_secrets()`'s credential table now lists all nine supported environment variables,
+  not three.
+- `docs/api.md` corrected to say that a script implementing `preload` performs a real
+  load, matching `docs/warm-up.md` and the code.
+- `ARCHITECTURE.md`'s codemap now lists `verbosity.py`.
+
 ## [0.5.2] - 2026-09-08
 
 ### Changed
