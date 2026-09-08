@@ -995,7 +995,10 @@ class TestModelResidency(ProviderRegistryIsolation):
         self.assertIn(("ollama", "gemma4:12b"), self._tracked())
 
     def test_cleanup_survives_a_failing_unload(self) -> None:
-        """One provider that cannot release must not block the others."""
+        """One provider that cannot release must not block the others,
+        and the one that failed must stay tracked for the next cleanup()
+        to retry instead of being cleared along with the one that succeeded.
+        """
         from unified_ai_client import cleanup
         from unified_ai_client.client import get_provider, _LOADED_MODELS
 
@@ -1008,7 +1011,9 @@ class TestModelResidency(ProviderRegistryIsolation):
             cleanup()
 
         self.assertEqual(unload.call_count, 2)
-        self.assertEqual(self._tracked(), set())
+        # sorted(_LOADED_MODELS) processes "a" before "b", so the
+        # side_effect list makes "a" the one that raised.
+        self.assertEqual(self._tracked(), {("ollama", "a")})
 
     def test_explicit_unload_is_not_repeated_at_exit(self) -> None:
         from unified_ai_client import cleanup, unload_model

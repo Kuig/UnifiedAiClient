@@ -328,8 +328,13 @@ def cleanup(*, unload_models: bool = True) -> None:
 
     with _LOADED_MODELS_LOCK:
         loaded = sorted(_LOADED_MODELS)
-        _LOADED_MODELS.clear()
 
+    # Cleared entry by entry, only on success, instead of upfront: an unload
+    # that raises must stay in _LOADED_MODELS so the next cleanup() call still
+    # knows about it and retries. Clearing before the loop used to lose that
+    # tracking the moment a single unload failed, silently turning a retryable
+    # failure into a permanent leak for the rest of the process.
+    released: list[tuple[str, str]] = []
     for provider_name, model in loaded:
         # Resolved by name for the same reason as above, and safe here only
         # because _PROVIDERS_LOCK was released. One try per model: a provider
@@ -342,6 +347,10 @@ def cleanup(*, unload_models: bool = True) -> None:
             )
         else:
             _log.info("cleanup() unloaded '%s/%s'", provider_name, model)
+            released.append((provider_name, model))
+
+    with _LOADED_MODELS_LOCK:
+        _LOADED_MODELS.difference_update(released)
 
 
 def call_ai(

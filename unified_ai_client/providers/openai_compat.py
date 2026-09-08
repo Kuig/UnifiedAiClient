@@ -271,8 +271,10 @@ class OpenAiCompatProvider(BaseProvider):
 
         Args:
             msg: Source message dict with at least 'role' and 'content' keys.
-                 May also contain 'files': list[str] or 'tool_calls' (for
-                 assistant messages that requested tool execution).
+                 May also contain 'files': list[str], 'tool_calls' (for
+                 assistant messages that requested tool execution), or
+                 'tool_call_id' (required on a 'tool' message, to link it
+                 back to the call it answers).
 
         Returns:
             OpenAI-format message dict.
@@ -293,6 +295,12 @@ class OpenAiCompatProvider(BaseProvider):
                 }
                 for i, tc in enumerate(msg["tool_calls"])
             ]
+        # A 'tool' message the API rejects without this: it is how the
+        # response gets linked back to the call it answers. Read from the
+        # history entry rather than invented, since a fallback here would
+        # link the result to the wrong call as readily as to the right one.
+        if role == "tool" and msg.get("tool_call_id"):
+            entry["tool_call_id"] = msg["tool_call_id"]
         return entry
 
     def call(self, request: AiRequest) -> AiResponse:

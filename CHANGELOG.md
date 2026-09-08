@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-09-08
+
+### Fixed
+
+- `cleanup()` no longer loses track of a model whose `unload_model()` call fails.
+  `_LOADED_MODELS` used to be cleared before the unload attempts, so a single provider
+  failing to release lost the tracking for every model in that call, itself included, and
+  no later `cleanup()` retried it. It is now cleared entry by entry, only on success.
+- Anthropic and Google no longer send an empty text block or Part when the prompt is empty
+  but a file is attached. `call_ai(m, prompt="", file_path="photo.png")`, a legitimate
+  "describe this" call with the instruction in the system prompt, used to produce a block
+  both APIs reject.
+- A history message's `content`, `files` and `tool_calls` are preserved together on every
+  provider. Anthropic dropped the file when `tool_calls` was present, Google dropped the
+  text, and Ollama dropped the tool calls, three different bugs from the same shape: an
+  exclusive branch on `tool_calls` where the fields should have been handled independently.
+- `openai_compat`'s message builder now preserves `tool_call_id` on a `role: "tool"` history
+  entry, which a consumer reconstructing a third turn after `tool_results` has to supply by
+  hand and which used to be read from nowhere and silently dropped, producing a 400.
+- `set_verbosity()` is now protected by a lock. Two concurrent calls could previously leave
+  a handler attached to the logger that nothing referenced any more, duplicating every line
+  this library logs with no later call able to detach it.
+
 ## [0.5.5] - 2026-09-08
 
 ### Fixed

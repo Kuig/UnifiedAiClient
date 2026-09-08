@@ -44,6 +44,14 @@ response = call_ai(
 
 Both paths are validated the same way.
 
+### Attaching files to history {#attaching-files-to-history}
+
+A history entry's `files`, its `content`, and a `tool_calls` list, when present, are
+independent: none of them is dropped for the others being there. A message that recorded
+both the file the model looked at and the tool call it made from that still carries both on
+every provider. See [Tool Calling](tool-calling.md#a-third-turn-continuing-after-a-tool-result)
+for the matching guarantee on `tool_call_id`.
+
 ## Supported file types per provider
 
 | Provider | Images | Audio | Text files | PDFs |

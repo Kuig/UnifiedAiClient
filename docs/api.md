@@ -310,6 +310,10 @@ def cleanup(*, unload_models: bool = True) -> None:
 |---|---|---|---|
 | `unload_models` | `bool` | `True` | Whether to also unload local models. Pass `False` to release the remote resources but leave the models warm, for a caller that runs this mid-session. |
 
+A model whose unload fails stays tracked rather than being dropped from the retry list, so
+a later `cleanup()` call in the same process still attempts it. Two models tracked in the
+same call are independent: one failing does not stop the other from being released.
+
 ### `load_secrets`
 
 Loads API credentials from environment variables and an optional JSON file. Environment

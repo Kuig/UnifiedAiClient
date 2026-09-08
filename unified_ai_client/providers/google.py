@@ -299,10 +299,15 @@ class GoogleProvider(BaseProvider):
                             name=fn.get("name", ""),
                             args=fn.get("arguments", {}),
                         ))
-                else:
-                    parts.append(
-                        types.Part.from_text(text=msg.get("content", ""))
-                    )
+                # Text is appended independently of tool_calls, not as its
+                # alternative: a message that carries both must not lose one
+                # for having the other. "not parts" is the same safety valve
+                # anthropic.py uses — only reached when this message had no
+                # files, no tool_calls and no text, where Content(parts=[])
+                # would otherwise be sent.
+                content_text = msg.get("content", "")
+                if content_text or not parts:
+                    parts.append(types.Part.from_text(text=content_text))
                 contents.append(types.Content(role=role, parts=parts))
 
         # Current turn: files + prompt
@@ -314,7 +319,13 @@ class GoogleProvider(BaseProvider):
             file_paths = normalize_file_paths(request.file_path)
             if file_paths:
                 current_parts.extend(self._build_parts_for_files(file_paths, upload_poll_timeout))
-            current_parts.append(types.Part.from_text(text=request.prompt))
+            # Skip an empty text Part when a file already made this turn
+            # non-empty: prompt="" with only an image attached is a
+            # legitimate "describe this" call. "not current_parts" is the
+            # safety valve for the genuinely empty case (no prompt, no
+            # files), where an empty Part is still sent rather than nothing.
+            if request.prompt or not current_parts:
+                current_parts.append(types.Part.from_text(text=request.prompt))
             contents.append(types.Content(role="user", parts=current_parts))
 
         # Tool results: append function_response Parts in a user turn

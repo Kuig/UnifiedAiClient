@@ -86,6 +86,39 @@ else:
     print(response.text)  # Model answered directly without tools
 ```
 
+## A third turn: continuing after a tool result
+
+A `tool_results` argument only ever applies to the turn it is passed on. Sending a further
+message after that needs the full history rebuilt in `messages`, including the `role:
+"tool"` entry the previous turn produced, with its `tool_call_id` intact so the model can
+still link the answer to its own request:
+
+```python
+history = [
+    {"role": "user", "content": prompt},
+    assistant_msg,
+    {
+        "role": "tool",
+        "content": results[0].content,
+        "tool_call_id": results[0].call_id,
+    },
+]
+
+follow_up = call_ai(
+    provider="ollama",
+    model="gemma4:12b",
+    prompt="Should I bring an umbrella?",
+    messages=history,
+    temperature=0.0,
+)
+```
+
+`content`, `files` and `tool_calls` on the same history entry are all preserved together on
+every provider: a message that carries an attachment alongside its `tool_calls` does not
+lose the attachment (or the text) for having both. See
+[Multimodal input](multimodal.md#attaching-files-to-history) for the same guarantee from
+the file side.
+
 ## Provider compatibility
 
 All providers support tool calling. Whether a specific model will actually use

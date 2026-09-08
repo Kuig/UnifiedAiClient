@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import sys
+import threading
 
 # Console verbosity control for unified_ai_client's own internal logging.
 #
@@ -20,6 +21,11 @@ _PACKAGE_LOGGER_NAME = "unified_ai_client"
 _PREFIX_FORMAT = "UAC :: %(levelname)-8s %(name)s: %(message)s"
 
 _handler: logging.Handler | None = None
+_LOCK = threading.Lock()
+"""Guards ``_handler``. Without it, two concurrent set_verbosity() calls can
+interleave their read-modify-write of the module-level handler and leave one
+attached to the logger but no longer referenced here, so a later call's
+``removeHandler`` never finds it to detach."""
 
 
 def set_verbosity(level: str) -> None:
@@ -64,18 +70,19 @@ def set_verbosity(level: str) -> None:
 
     logger = logging.getLogger(_PACKAGE_LOGGER_NAME)
 
-    if _handler is not None:
-        logger.removeHandler(_handler)
-        _handler = None
+    with _LOCK:
+        if _handler is not None:
+            logger.removeHandler(_handler)
+            _handler = None
 
-    logger.propagate = False
+        logger.propagate = False
 
-    if level == "silent":
-        logger.setLevel(logging.CRITICAL + 1)
-        return
+        if level == "silent":
+            logger.setLevel(logging.CRITICAL + 1)
+            return
 
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(_PREFIX_FORMAT))
-    logger.addHandler(handler)
-    logger.setLevel(_LEVELS[level])
-    _handler = handler
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter(_PREFIX_FORMAT))
+        logger.addHandler(handler)
+        logger.setLevel(_LEVELS[level])
+        _handler = handler

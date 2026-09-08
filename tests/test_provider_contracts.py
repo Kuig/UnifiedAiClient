@@ -921,6 +921,190 @@ class TestNativeBlockShapes(FileFixtureCase):
         )
 
 
+class TestEmptyPromptWithAnAttachment(FileFixtureCase):
+    """prompt='' plus a file must not send an empty text block or Part.
+
+    Regression: anthropic and google both appended a text block unconditionally,
+    so `call_ai(m, prompt="", file_path="photo.png")` -- a legitimate "describe
+    this" call with the instruction in the system prompt -- produced an empty
+    text block or Part that the API rejects.
+    """
+
+    def test_anthropic_omits_the_empty_text_block_with_an_image(self) -> None:
+        provider = _provider_class("anthropic", "AnthropicProvider")(
+            ProviderConfig(), api_key="k"
+        )
+        path = self.make(".png", b"\x89PNG")
+        content = provider._build_user_content("", [path])
+        self.assertTrue(all(block["type"] != "text" for block in content))
+
+    def test_anthropic_still_inlines_a_text_attachment(self) -> None:
+        """The guard is "nothing to say", not "the prompt string was empty"."""
+        provider = _provider_class("anthropic", "AnthropicProvider")(
+            ProviderConfig(), api_key="k"
+        )
+        path = self.make(".md", b"important context")
+        content = provider._build_user_content("", [path])
+        text_blocks = [b for b in content if b["type"] == "text"]
+        self.assertEqual(len(text_blocks), 1)
+        self.assertIn("important context", text_blocks[0]["text"])
+
+    def test_anthropic_never_sends_an_empty_content_array(self) -> None:
+        """The safety valve: genuinely nothing to say still needs one block."""
+        provider = _provider_class("anthropic", "AnthropicProvider")(
+            ProviderConfig(), api_key="k"
+        )
+        content = provider._build_user_content("", [])
+        self.assertEqual(len(content), 1)
+
+    def _google_call(self, prompt: str, file_path: str | None):
+        from types import SimpleNamespace
+        from unified_ai_client.providers.google import GoogleProvider
+
+        provider = GoogleProvider(ProviderConfig(), api_key="fake-key")
+        fake_response = MagicMock()
+        fake_response.candidates = []
+        fake_response.prompt_feedback = None
+        fake_response.text = "ok"
+        fake_client = MagicMock()
+        fake_client.models.generate_content.return_value = fake_response
+
+        request = AiRequest(
+            provider="google", model="gemini-2.5-flash", prompt=prompt,
+            file_path=file_path, timeout=30,
+        )
+        # _upload_file is patched with a real .uri/.mime_type, which
+        # _build_parts_for_files needs to build a Part: a bare MagicMock
+        # fails pydantic validation, and the real upload path would poll for
+        # ACTIVE state for real seconds against a mock that never satisfies it.
+        fake_ref = SimpleNamespace(uri="gs://bucket/f", mime_type="image/png")
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client), \
+                patch.object(provider, "_upload_file", return_value=fake_ref):
+            provider.call(request)
+
+        contents = fake_client.models.generate_content.call_args.kwargs["contents"]
+        return contents[-1].parts
+
+    def test_google_omits_the_empty_text_part_with_an_image(self) -> None:
+        path = self.make(".png", b"\x89PNG")
+        parts = self._google_call("", path)
+        self.assertFalse(any(p.text == "" for p in parts))
+
+    def test_google_never_sends_an_empty_parts_list(self) -> None:
+        parts = self._google_call("", None)
+        self.assertEqual(len(parts), 1)
+
+
+class TestToolMessageKeepsItsCallId(ProviderRegistryIsolation):
+    """A history 'tool' message without tool_call_id is a 400 waiting to happen.
+
+    docs/tool-calling.md only documents the two-turn exchange, where
+    tool_results carries the id for the library. A consumer building a third
+    turn has to reconstruct the 'tool' message itself, and until now that id
+    was read from the history dict and then silently dropped.
+    """
+
+    def test_the_id_reaches_the_payload(self) -> None:
+        history = [{
+            "role": "tool",
+            "content": "22°C and sunny",
+            "tool_call_id": "call_abc123",
+        }]
+        payload = _capture_http_payload(
+            "openai", ProviderConfig(), messages=history
+        )
+        self.assertEqual(payload["messages"][0]["tool_call_id"], "call_abc123")
+
+    def test_a_missing_id_is_not_invented(self) -> None:
+        """No fallback: a wrong link is worse than a visible KeyError upstream."""
+        history = [{"role": "tool", "content": "22°C and sunny"}]
+        payload = _capture_http_payload(
+            "openai", ProviderConfig(), messages=history
+        )
+        self.assertNotIn("tool_call_id", payload["messages"][0])
+
+
+class TestHistoryMessageKeepsEverything(FileFixtureCase):
+    """text + files + tool_calls on one history message must all survive.
+
+    Regression, the same shape in four places: anthropic returned early inside
+    its tool_calls branch without ever looking at file_paths; google's tool_calls
+    branch was the 'if' half of an if/else whose 'else' appended the text Part;
+    ollama's file branch built its own entry dict and never checked tool_calls.
+    Three different bugs from the same cause -- an exclusive branch where the
+    fields should have been independent -- which is exactly the shape that
+    produced the .mp3 bug CLAUDE.md documents.
+    """
+
+    def _history(self, path: str) -> list[dict]:
+        return [{
+            "role": "assistant",
+            "content": "let me check the weather",
+            "files": [path],
+            "tool_calls": [
+                {"function": {"name": "get_weather", "arguments": {"city": "Rome"}}}
+            ],
+        }]
+
+    def test_http_adapters_keep_text_file_and_tool_calls(self) -> None:
+        path = self.make(".png", b"\x89PNG")
+        for name in ("openai", "anthropic", "ollama"):
+            with self.subTest(provider=name):
+                payload = _capture_http_payload(
+                    name, ProviderConfig(), messages=self._history(path)
+                )
+                msg = payload["messages"][0]
+                serialized = str(msg)
+                with self.subTest(field="text"):
+                    self.assertIn("let me check the weather", serialized)
+                with self.subTest(field="tool_calls"):
+                    self.assertIn("get_weather", serialized)
+                with self.subTest(field="file"):
+                    if name == "ollama":
+                        self.assertTrue(msg.get("images"))
+                    else:
+                        blocks = msg["content"] if isinstance(msg["content"], list) else []
+                        self.assertTrue(
+                            any(b.get("type") in ("image", "image_url") for b in blocks)
+                        )
+
+    def test_google_keeps_text_file_and_tool_calls(self) -> None:
+        from types import SimpleNamespace
+        from unified_ai_client.providers.google import GoogleProvider
+
+        provider = GoogleProvider(ProviderConfig(), api_key="fake-key")
+        fake_response = MagicMock()
+        fake_response.candidates = []
+        fake_response.prompt_feedback = None
+        fake_response.text = "ok"
+        fake_client = MagicMock()
+        fake_client.models.generate_content.return_value = fake_response
+
+        path = self.make(".png", b"\x89PNG")
+        request = AiRequest(
+            provider="google", model="gemini-2.5-flash", prompt="ignored",
+            messages=self._history(path), timeout=30,
+        )
+        # _upload_file is patched rather than the raw client: _build_parts_for_files
+        # needs a real .uri/.mime_type to build a Part, which a bare MagicMock
+        # cannot provide, and the real upload path would poll for ACTIVE state
+        # for real seconds against a mock that never satisfies it.
+        fake_ref = SimpleNamespace(uri="gs://bucket/photo.png", mime_type="image/png")
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client), \
+                patch.object(provider, "_upload_file", return_value=fake_ref):
+            provider.call(request)
+
+        contents = fake_client.models.generate_content.call_args.kwargs["contents"]
+        history_turn = contents[0]
+        serialized = str(history_turn)
+        with self.subTest(field="text"):
+            self.assertTrue(any(p.text == "let me check the weather" for p in history_turn.parts))
+        with self.subTest(field="tool_calls"):
+            self.assertIn("get_weather", serialized)
+        with self.subTest(field="file"):
+            self.assertIn("photo.png", serialized)
+
+
 class TestProviderRefusalsEndToEnd(FileFixtureCase):
     """The refusal must happen while building content, not at the transport."""
 

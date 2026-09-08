@@ -249,17 +249,31 @@ class AnthropicProvider(BaseProvider):
         self._get("/v1/models", self._resolve_timeout(timeout))
         return True
 
-    def _build_user_content(
-        self, prompt: str, file_paths: list[str]
+    def _build_content_blocks(
+        self, prompt: str, file_paths: list[str], *, pad_if_empty: bool = True
     ) -> list[dict[str, Any]]:
-        """Build Anthropic-style content blocks for a user message.
+        """Build the native-attachment and text blocks any message is made of.
+
+        Shared by a plain user turn and a history message that also carries
+        tool_calls, so text and attachments are handled identically either
+        way: a caller does not lose its file or its prompt just because
+        tool_calls happen to be present in the same message.
 
         Args:
-            prompt: The user prompt text.
+            prompt: The message text.
             file_paths: List of file paths to attach.
+            pad_if_empty: When true and neither an attachment nor a non-empty
+                prompt produced a block, still emit one empty text block,
+                because the Messages API rejects an empty content array. A
+                caller that is about to append its own blocks afterwards
+                (tool_use blocks, currently the only such caller) passes
+                False: those guarantee the array is non-empty on their own,
+                so padding here would only waste a block.
 
         Returns:
-            List of content block dicts in Anthropic format.
+            Content blocks: one native block per attachment, followed by a
+            text block when the prompt has anything to say (or when nothing
+            else does and padding was requested).
 
         Raises:
             FileNotFoundError: If an attachment does not exist.
@@ -287,8 +301,33 @@ class AnthropicProvider(BaseProvider):
                 },
             })
 
-        content.append({"type": "text", "text": effective_prompt})
+        # Skip an empty text block rather than sending {"type": "text",
+        # "text": ""}, which the Messages API rejects. A prompt="" call with
+        # only a file attached (a "describe this" call with the instruction
+        # in the system prompt) is a legitimate use that used to fail on this.
+        if effective_prompt or (pad_if_empty and not content):
+            content.append({"type": "text", "text": effective_prompt})
         return content
+
+    def _build_user_content(
+        self, prompt: str, file_paths: list[str]
+    ) -> list[dict[str, Any]]:
+        """Build Anthropic-style content blocks for a user message.
+
+        Args:
+            prompt: The user prompt text.
+            file_paths: List of file paths to attach.
+
+        Returns:
+            List of content block dicts in Anthropic format.
+
+        Raises:
+            FileNotFoundError: If an attachment does not exist.
+            UnsupportedFileError: If an attachment is neither text nor a class
+                the Messages API accepts. Audio lands here: dropping it silently
+                let the model answer as though it had heard the recording.
+        """
+        return self._build_content_blocks(prompt, file_paths)
 
     def _build_message(
         self, msg: dict[str, Any]
@@ -308,11 +347,13 @@ class AnthropicProvider(BaseProvider):
         file_paths = normalize_file_paths(msg.get("files"))
 
         if role == "assistant" and msg.get("tool_calls"):
-            # Convert consumer's tool_calls into Anthropic tool_use blocks
-            # so the API can link subsequent tool_result messages back.
-            content: list[dict[str, Any]] = []
-            if text:
-                content.append({"type": "text", "text": text})
+            # Text and files go through the same builder as any other
+            # message, pad_if_empty=False because the tool_use blocks below
+            # guarantee content is non-empty on their own. Building it this
+            # way, instead of only checking `text`, is what keeps a file
+            # attached to this same history message from disappearing just
+            # because tool_calls are also present.
+            content = self._build_content_blocks(text, file_paths, pad_if_empty=False)
             for i, tc in enumerate(msg["tool_calls"]):
                 fn = tc.get("function", tc)
                 content.append({

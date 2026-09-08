@@ -878,5 +878,34 @@ class TestCleanupIsArmedWhenAModelIsTracked(ProviderRegistryIsolation):
         self.assertFalse(self._client._CLEANUP_REGISTERED)
 
 
+class TestCleanupKeepsTrackingAFailedUnload(ProviderRegistryIsolation):
+    """A model whose unload fails must stay tracked, not vanish with the rest.
+
+    Regression: _LOADED_MODELS.clear() used to run before the unload attempts,
+    so a single provider raising lost the tracking for every model in the
+    same cleanup() call, itself included. The next cleanup() then had nothing
+    left to retry, and the model stayed resident for good.
+    """
+
+    def test_the_failed_model_survives_the_successful_ones(self) -> None:
+        from unified_ai_client import client as client_module
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        client_module._LOADED_MODELS.clear()
+        client_module._LOADED_MODELS.update(
+            {("ollama", "stuck-model"), ("ollama", "released-model")}
+        )
+
+        def fake_unload(self, model, *, timeout=None):
+            if model == "stuck-model":
+                raise RuntimeError("server unreachable")
+
+        with patch.object(OllamaProvider, "unload_model", fake_unload):
+            client_module.cleanup()
+
+        self.assertIn(("ollama", "stuck-model"), client_module._LOADED_MODELS)
+        self.assertNotIn(("ollama", "released-model"), client_module._LOADED_MODELS)
+
+
 if __name__ == "__main__":
     unittest.main()

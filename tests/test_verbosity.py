@@ -10,6 +10,7 @@ import logging
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # ---------------------------------------------------------------------------
 # Ensure the project root is in sys.path so unified_ai_client is importable
@@ -131,6 +132,68 @@ class TestRetryLogging(VerbosityIsolation):
             with self.assertRaises(NonRetryableError):
                 with_retry(bad_input, max_retries=3, base_delay=0, label="test/bad_input")
         self.assertTrue(any("non-retryable" in line for line in cm.output))
+
+
+class TestSetVerbosityIsThreadSafe(VerbosityIsolation):
+    """Concurrent set_verbosity() calls must not race on the shared handler.
+
+    Regression: the module-level `_handler` was read, then mutated, with no
+    lock. Two threads could interleave their remove-old/add-new sequence and
+    leave a handler attached to the logger that `_handler` no longer
+    references, which no later call would ever find to remove — an orphan
+    that silently duplicates every line this library logs.
+    """
+
+    def test_a_second_call_waits_for_the_first_to_leave_the_critical_section(self) -> None:
+        """Forces the interleaving instead of hoping the GIL produces it.
+
+        A plain "fire N threads and see if it broke" test is not reliable here:
+        the critical section is a handful of attribute accesses with no I/O, so
+        under CPython's GIL it usually completes in one scheduling slice even
+        with no lock at all, and the race almost never shows up experimentally.
+        This patches addHandler so the first call parks *inside* the section
+        it is supposed to hold exclusively, then checks whether a second call
+        reached that same point before being let go — which it must not, with
+        the lock in place.
+        """
+        import threading
+
+        entered = threading.Event()
+        release = threading.Event()
+        reached_add_handler: list[int] = []
+        real_add_handler = logging.Logger.addHandler
+
+        def parking_add_handler(self_logger, handler):
+            reached_add_handler.append(1)
+            entered.set()
+            release.wait(timeout=2)
+            return real_add_handler(self_logger, handler)
+
+        with patch.object(logging.Logger, "addHandler", parking_add_handler):
+            first = threading.Thread(target=set_verbosity, args=("debug",))
+            first.start()
+            self.assertTrue(
+                entered.wait(timeout=2), "the first call never reached addHandler"
+            )
+
+            second = threading.Thread(target=set_verbosity, args=("warning",))
+            second.start()
+            # A generous window for the second call to race in if the critical
+            # section were unprotected — it needs only a few bytecode steps to
+            # reach its own addHandler, nowhere near this long.
+            second.join(timeout=0.3)
+
+            self.assertEqual(
+                len(reached_add_handler), 1,
+                "a second call reached addHandler while the first was still "
+                "inside the critical section",
+            )
+
+            release.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+        self.assertEqual(len(self._logger.handlers), 1)
 
 
 if __name__ == "__main__":

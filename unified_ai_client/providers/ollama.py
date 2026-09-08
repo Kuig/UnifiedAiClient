@@ -202,21 +202,23 @@ class OllamaProvider(BaseProvider):
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
                 msg_files = normalize_file_paths(msg.get("files"))
+                multimodal: list[str] = []
                 if msg_files:
                     content, multimodal = self._process_files_for_message(
                         msg_files, content
                     )
-                    entry: dict[str, Any] = {"role": role, "content": content}
-                    if multimodal:
-                        entry["images"] = multimodal
-                    messages.append(entry)
-                else:
-                    entry = {"role": role, "content": content}
-                    # Preserve tool_calls on assistant messages so Ollama can
-                    # correctly link subsequent tool results back to the call.
-                    if role == "assistant" and msg.get("tool_calls"):
-                        entry["tool_calls"] = msg["tool_calls"]
-                    messages.append(entry)
+
+                entry: dict[str, Any] = {"role": role, "content": content}
+                if multimodal:
+                    entry["images"] = multimodal
+                # Preserve tool_calls on assistant messages so Ollama can
+                # correctly link subsequent tool results back to the call,
+                # regardless of whether this same message also carries a file:
+                # the two used to be on an if/else, so a message with both
+                # silently lost its tool_calls.
+                if role == "assistant" and msg.get("tool_calls"):
+                    entry["tool_calls"] = msg["tool_calls"]
+                messages.append(entry)
 
         # 3. Resolve options early: the file-processing step below needs to
         # know use_generate before it can decide whether its result is used.
