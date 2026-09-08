@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import base64
 import importlib
+import io
 import os
 import shutil
 import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -250,6 +252,21 @@ class TestApiKeyHandling(ProviderRegistryIsolation):
                     ProviderConfig(), api_key=None
                 )
                 self.assertEqual(provider.api_key, "")
+
+    def test_providers_without_a_key_inherit_a_harmless_check(self) -> None:
+        """The three no-key providers must survive the inherited method.
+
+        `_require_api_key()` moved onto BaseProvider, so ollama, script and
+        google now inherit it where before they simply had no such method. It
+        returns before touching `api_key`, which none of them defines: without
+        that early exit this raises AttributeError on every request they make.
+        """
+        for name in sorted(self._NO_KEY_CHECK):
+            with self.subTest(provider=name):
+                cls = _provider_class_by_name(name)
+                provider = cls(ProviderConfig())
+                self.assertFalse(cls.REQUIRES_API_KEY)
+                self.assertIsNone(provider._require_api_key())
 
     def test_get_provider_never_passes_none(self) -> None:
         from unified_ai_client.client import get_provider
@@ -1395,3 +1412,212 @@ class TestGoogleBlockedResponse(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# 12. HTTP error classification
+# ---------------------------------------------------------------------------
+
+def _http_error(
+    code: int, body: str, url: str = "http://example.test/v1/chat/completions"
+) -> urllib.error.HTTPError:
+    """Build the HTTPError urllib would raise for an error response.
+
+    The body is handed over as a stream, exactly as urllib does, so the
+    transport has to read it to see anything: a test that pre-decoded it would
+    not prove that the read happens at all.
+    """
+    return urllib.error.HTTPError(
+        url, code, "Reason From Status Line", {}, io.BytesIO(body.encode("utf-8"))
+    )
+
+
+class TestHttpErrorClassification(ProviderRegistryIsolation):
+    """A 4xx must fail once, with the provider's own message attached.
+
+    Before this, every urllib adapter let urllib.error.HTTPError propagate
+    untouched: the response body, which is where an API says what it actually
+    rejected, was never read, and a deterministic 401 spent the whole retry
+    budget arriving at the same answer.
+    """
+
+    # One entry per urllib-backed adapter, with the error shape that API really
+    # returns. Driving all three off the shared transport is the point of the
+    # refactor, so the same expectations have to hold for each.
+    _ADAPTERS = (
+        (
+            "openai",
+            '{"error": {"message": "Unrecognized request argument", "type": "invalid_request_error"}}',
+            "Unrecognized request argument",
+        ),
+        (
+            "anthropic",
+            '{"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}',
+            "invalid x-api-key",
+        ),
+        (
+            "ollama",
+            '{"error": "model \'nope\' not found"}',
+            "model 'nope' not found",
+        ),
+    )
+
+    def _send(self, name: str):
+        """Fire one request at the named adapter, whatever its _post looks like.
+
+        Anthropic's _post takes no endpoint and ollama's takes no credentials,
+        so the call shape differs per adapter even though the transport beneath
+        them is now shared.
+        """
+        cls = _provider_class_by_name(name)
+        if name == "ollama":
+            return cls(ProviderConfig())._post("/api/chat", {"model": "m"}, 10)
+        if name == "anthropic":
+            return cls(ProviderConfig(), api_key="k")._post({"model": "m"}, 10)
+        return cls(ProviderConfig(), api_key="k")._post(
+            "/v1/chat/completions", {"model": "m"}, 10
+        )
+
+    def test_a_4xx_carries_the_providers_own_message(self) -> None:
+        from unified_ai_client.exceptions import NonRetryableHttpError
+
+        for name, body, expected in self._ADAPTERS:
+            with self.subTest(provider=name):
+                with patch(
+                    "urllib.request.urlopen", side_effect=_http_error(401, body)
+                ):
+                    with self.assertRaises(NonRetryableHttpError) as ctx:
+                        self._send(name)
+                self.assertIn(expected, str(ctx.exception))
+                self.assertEqual(ctx.exception.code, 401)
+                self.assertEqual(ctx.exception.detail, expected)
+                self.assertIn(expected, ctx.exception.body)
+
+    def test_existing_httperror_handlers_still_catch_it(self) -> None:
+        """The compatibility half of the exception design.
+
+        Consumers written against this library catch urllib.error.HTTPError
+        today. Raising a type outside that hierarchy would silently stop their
+        handlers from running, which is the failure this inheritance prevents.
+        """
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=_http_error(404, '{"error": {"message": "no such model"}}'),
+        ):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                self._send("openai")
+        self.assertEqual(ctx.exception.code, 404)
+
+    def test_the_line_between_retryable_and_not(self) -> None:
+        """408, 409, 425 and 429 are the 4xx a later attempt can still win."""
+        from unified_ai_client.exceptions import NonRetryableError, ProviderHttpError
+
+        cases = {
+            400: False, 401: False, 403: False, 404: False, 422: False,
+            408: True, 409: True, 425: True, 429: True,
+            500: True, 502: True, 503: True,
+        }
+        for code, retryable in cases.items():
+            with self.subTest(status=code):
+                with patch(
+                    "urllib.request.urlopen",
+                    side_effect=_http_error(code, '{"error": {"message": "x"}}'),
+                ):
+                    with self.assertRaises(ProviderHttpError) as ctx:
+                        self._send("openai")
+                self.assertEqual(
+                    isinstance(ctx.exception, NonRetryableError),
+                    not retryable,
+                    f"status {code} landed on the wrong side of the line",
+                )
+
+    def test_a_connection_failure_stays_retryable(self) -> None:
+        """A local server still starting up must not become a hard failure."""
+        from unified_ai_client.exceptions import NonRetryableError
+
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("connection refused"),
+        ):
+            with self.assertRaises(urllib.error.URLError) as ctx:
+                self._send("ollama")
+        self.assertNotIsInstance(ctx.exception, NonRetryableError)
+
+    def test_a_4xx_does_not_spend_the_retry_budget(self) -> None:
+        """The measurable half of the fix, end to end through call_ai().
+
+        A rejected credential used to cost max_retries+1 attempts and the whole
+        exponential backoff before surfacing an error that had been settled by
+        the first response.
+        """
+        from unified_ai_client.client import call_ai
+        from unified_ai_client.exceptions import NonRetryableHttpError
+
+        attempts = []
+
+        def fake_urlopen(req, timeout=None):
+            attempts.append(req.full_url)
+            raise _http_error(
+                401, '{"error": {"message": "Invalid API Key"}}', url=req.full_url
+            )
+
+        with patch.dict(os.environ, {"GROQ_API_KEY": "fake"}, clear=False):
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                with self.assertRaises(NonRetryableHttpError) as ctx:
+                    call_ai(
+                        "groq",
+                        "llama-3.3-70b",
+                        "hi",
+                        max_retries=3,
+                        retry_base_delay=0.01,
+                    )
+
+        self.assertEqual(len(attempts), 1, "a deterministic 401 was retried anyway")
+        self.assertIn("Invalid API Key", str(ctx.exception))
+
+
+class TestHttpErrorDetailExtraction(unittest.TestCase):
+    """The body shapes the three APIs use, plus the ones they do not."""
+
+    def test_every_shape_the_providers_actually_send(self) -> None:
+        from unified_ai_client.http import _extract_detail
+
+        cases = (
+            # OpenAI-compatible: error is an object carrying a message.
+            ('{"error": {"message": "bad request", "type": "invalid"}}', "bad request"),
+            # Anthropic: same shape, inside a typed envelope.
+            ('{"type": "error", "error": {"type": "x", "message": "overloaded"}}', "overloaded"),
+            # Ollama: error is a bare string.
+            ('{"error": "model not found"}', "model not found"),
+            # An object with only a type still says more than the status line.
+            ('{"error": {"type": "rate_limit_error"}}', "rate_limit_error"),
+            # Some gateways put the message at the top level.
+            ('{"message": "upstream timeout"}', "upstream timeout"),
+        )
+        for body, expected in cases:
+            with self.subTest(body=body):
+                self.assertEqual(_extract_detail(body), expected)
+
+    def test_a_body_that_is_not_json_degrades_to_its_text(self) -> None:
+        """A proxy answering with HTML must not turn into a parsing error.
+
+        Replacing the HTTP failure with a JSONDecodeError would hide the status
+        the caller needs, which is the same swallow-and-substitute pattern the
+        file layer was fixed for.
+        """
+        from unified_ai_client.http import _extract_detail
+
+        self.assertEqual(
+            _extract_detail("<html>502 Bad Gateway</html>"),
+            "<html>502 Bad Gateway</html>",
+        )
+        self.assertEqual(_extract_detail("   "), "")
+        self.assertEqual(_extract_detail(""), "")
+
+    def test_a_huge_body_is_truncated(self) -> None:
+        """An error page belongs in the log, not inside an exception message."""
+        from unified_ai_client.http import _MAX_DETAIL_CHARS, _extract_detail
+
+        detail = _extract_detail("x" * 5000)
+        self.assertTrue(detail.endswith("..."))
+        self.assertLessEqual(len(detail), _MAX_DETAIL_CHARS + 3)

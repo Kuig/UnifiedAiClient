@@ -4,8 +4,6 @@ import json
 import logging
 import os
 import re
-import urllib.error
-import urllib.request
 from typing import Any
 
 from unified_ai_client.exceptions import UnsupportedFileError
@@ -15,6 +13,7 @@ from unified_ai_client.file_utils import (
     inline_text_attachments,
     normalize_file_paths,
 )
+from unified_ai_client.http import get_json, post_json
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
 
@@ -62,27 +61,6 @@ class AnthropicProvider(BaseProvider):
         self.config = config
         self.api_key = api_key or ""
         self.base_url = (config.url or self.DEFAULT_URL).rstrip("/")
-
-    def _require_api_key(self) -> None:
-        """Fail early and clearly when the API key is missing.
-
-        Only enforced when talking to Anthropic's own endpoint. A caller who
-        set an explicit url has pointed the adapter at something else, such as
-        a local proxy, which may well need no credentials.
-
-        Checked at request time rather than in ``__init__`` because
-        ``get_provider()`` instantiates providers eagerly, before it is known
-        whether the caller will ever send a request.
-
-        Raises:
-            ValueError: If no API key was supplied.
-        """
-        if not self.api_key and self.config.url is None:
-            raise ValueError(
-                f"Missing API key for provider '{self.provider_name}'. "
-                f"Add '{self.SECRETS_KEY}' to secrets.json "
-                f"or set {self.SECRETS_KEY.upper()}."
-            )
 
     @staticmethod
     def _model_version(model: str) -> tuple[int, int] | None:
@@ -184,8 +162,23 @@ class AnthropicProvider(BaseProvider):
         payload.pop("top_p", None)
         payload["temperature"] = 1
 
+    def _auth_headers(self) -> dict[str, str]:
+        """Headers that identify this caller to the Anthropic API.
+
+        Returns:
+            The x-api-key credential plus the pinned API version, which the
+            Messages API requires on every request.
+        """
+        return {
+            "x-api-key": self.api_key,
+            "anthropic-version": _ANTHROPIC_VERSION,
+        }
+
     def _post(self, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
         """HTTP POST to the Anthropic /v1/messages endpoint.
+
+        Takes no endpoint argument, unlike its siblings: this provider posts to
+        exactly one path.
 
         Args:
             payload: Request payload dict.
@@ -195,27 +188,18 @@ class AnthropicProvider(BaseProvider):
             Parsed JSON response dict.
 
         Raises:
-            urllib.error.HTTPError: On HTTP error responses.
+            NonRetryableHttpError: On a 4xx other than 408/409/425/429.
+            ProviderHttpError: On any other HTTP error response.
             urllib.error.URLError: On connection errors.
             ValueError: If no API key is set.
         """
         self._require_api_key()
-        url = f"{self.base_url}/v1/messages"
-        headers: dict[str, str] = {
-            "Content-Type": "application/json",
-            "x-api-key": self.api_key,
-            "anthropic-version": _ANTHROPIC_VERSION,
-        }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        return post_json(
+            f"{self.base_url}/v1/messages", payload, timeout, self._auth_headers()
+        )
 
     def _get(self, endpoint: str, timeout: int) -> dict[str, Any]:
-        """HTTP GET against the Anthropic API via urllib.
-
-        Kept separate from ``_post``, which hardcodes the /v1/messages path and
-        sends a JSON body.
+        """HTTP GET against the Anthropic API.
 
         Args:
             endpoint: API path (e.g. '/v1/models').
@@ -225,19 +209,13 @@ class AnthropicProvider(BaseProvider):
             Parsed JSON response dict.
 
         Raises:
-            urllib.error.HTTPError: On HTTP error responses.
+            NonRetryableHttpError: On a 4xx other than 408/409/425/429.
+            ProviderHttpError: On any other HTTP error response.
             urllib.error.URLError: On connection errors.
             ValueError: If no API key is set.
         """
         self._require_api_key()
-        url = f"{self.base_url}{endpoint}"
-        headers: dict[str, str] = {
-            "x-api-key": self.api_key,
-            "anthropic-version": _ANTHROPIC_VERSION,
-        }
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        return get_json(f"{self.base_url}{endpoint}", timeout, self._auth_headers())
 
     def warm_up(
         self,

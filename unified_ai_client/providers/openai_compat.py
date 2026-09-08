@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import urllib.error
-import urllib.request
 from typing import Any
 
 from unified_ai_client.exceptions import UnsupportedFileError
@@ -15,6 +13,7 @@ from unified_ai_client.file_utils import (
     inline_text_attachments,
     normalize_file_paths,
 )
+from unified_ai_client.http import get_json, post_json
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
 
@@ -41,11 +40,8 @@ class OpenAiCompatProvider(BaseProvider):
 
     DEFAULT_URL: str = "http://localhost:8080"
 
-    # Whether a missing API key is an error. False for local servers, where
-    # running without credentials is the normal case.
-    REQUIRES_API_KEY: bool = False
-    # Key name in secrets.json, used to build a useful error message.
-    SECRETS_KEY: str = ""
+    # REQUIRES_API_KEY and SECRETS_KEY are declared on BaseProvider; the eight
+    # cloud subclasses set them, the two local ones leave the defaults.
     # Payload field this provider uses to control reasoning, or None when it
     # has no such control. Only sent when the caller sets `thinking` to True
     # or False: a non-reasoning model rejects the parameter outright, so
@@ -71,32 +67,17 @@ class OpenAiCompatProvider(BaseProvider):
         # is a legitimate thing to do.
         self.base_url = (config.url or self.DEFAULT_URL).rstrip("/")
 
-    def _require_api_key(self) -> None:
-        """Fail early and clearly when a required API key is missing.
+    def _auth_headers(self) -> dict[str, str]:
+        """Headers that identify this caller to the endpoint.
 
-        Only enforced when talking to this provider's own cloud endpoint. A
-        caller who set an explicit url has pointed the adapter somewhere else,
-        which is a supported thing to do: aiming the OpenAI adapter at a local
-        Ollama or LM Studio server that serves /v1/chat/completions needs no
-        credentials, and demanding one would make that impossible.
-
-        Checked here rather than in ``__init__`` because ``get_provider()``
-        instantiates providers eagerly, before it is known whether the caller
-        will ever send a request. ``GoogleProvider`` defers the same check to
-        its lazy client getter for the same reason.
-
-        Raises:
-            ValueError: If this provider needs a key and none was supplied.
+        Returns:
+            A Bearer authorization header, or an empty dict for a local server
+            that authenticates nobody.
         """
-        if self.REQUIRES_API_KEY and not self.api_key and self.config.url is None:
-            raise ValueError(
-                f"Missing API key for provider '{self.provider_name}'. "
-                f"Add '{self.SECRETS_KEY}' to secrets.json "
-                f"or set {self.SECRETS_KEY.upper()}."
-            )
+        return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
 
     def _post(self, endpoint: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
-        """HTTP POST to the OpenAI-compatible endpoint via urllib.
+        """HTTP POST to the OpenAI-compatible endpoint.
 
         Args:
             endpoint: API path (e.g. '/v1/chat/completions').
@@ -107,23 +88,19 @@ class OpenAiCompatProvider(BaseProvider):
             Parsed JSON response dict.
 
         Raises:
-            urllib.error.HTTPError: On HTTP error responses.
+            NonRetryableHttpError: On a 4xx other than 408/409/425/429.
+            ProviderHttpError: On any other HTTP error response.
             urllib.error.URLError: On connection errors.
             json.JSONDecodeError: On unparseable response.
             ValueError: If this provider requires an API key and none is set.
         """
         self._require_api_key()
-        url = f"{self.base_url}{endpoint}"
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        return post_json(
+            f"{self.base_url}{endpoint}", payload, timeout, self._auth_headers()
+        )
 
     def _get(self, endpoint: str, timeout: int) -> dict[str, Any]:
-        """HTTP GET against the OpenAI-compatible endpoint via urllib.
+        """HTTP GET against the OpenAI-compatible endpoint.
 
         Args:
             endpoint: API path (e.g. '/v1/models').
@@ -133,19 +110,14 @@ class OpenAiCompatProvider(BaseProvider):
             Parsed JSON response dict.
 
         Raises:
-            urllib.error.HTTPError: On HTTP error responses.
+            NonRetryableHttpError: On a 4xx other than 408/409/425/429.
+            ProviderHttpError: On any other HTTP error response.
             urllib.error.URLError: On connection errors.
             json.JSONDecodeError: On unparseable response.
             ValueError: If this provider requires an API key and none is set.
         """
         self._require_api_key()
-        url = f"{self.base_url}{endpoint}"
-        headers: dict[str, str] = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        return get_json(f"{self.base_url}{endpoint}", timeout, self._auth_headers())
 
     def _warm_up_completion(self, model: str, timeout: int | None = None) -> None:
         """Send a one-token completion to force a lazy server to load the model.

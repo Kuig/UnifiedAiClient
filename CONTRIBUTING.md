@@ -83,6 +83,13 @@ packaging metadata only. Match the surrounding style by hand rather than adding 
 For an OpenAI-compatible endpoint, most of the work is already done. Subclass
 `OpenAiCompatProvider` and set `DEFAULT_URL`, plus `REQUIRES_API_KEY` and `SECRETS_KEY`
 for a cloud endpoint, and `REASONING_PARAM` if the API exposes a reasoning control.
+`REQUIRES_API_KEY` and `SECRETS_KEY` are declared on `BaseProvider` and read by the
+inherited `_require_api_key()`; setting them is all a cloud endpoint needs.
+
+A provider with an entirely different API shape subclasses `BaseProvider` and speaks HTTP
+through `unified_ai_client/http.py`, overriding `_auth_headers()` for its credentials.
+Do not build requests with `urllib` directly: error classification and body extraction
+live in that module, and an adapter that bypasses it silently loses both.
 
 Set `SUPPORTED_FILE_TYPES` to what you have **verified** the endpoint accepts, and
 `SUPPORTS_UNLOAD` only if the endpoint keeps a model resident and offers a way to release

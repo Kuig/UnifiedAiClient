@@ -41,6 +41,17 @@ class BaseProvider(ABC):
     a provider whose behaviour has not been established.
     """
 
+    REQUIRES_API_KEY: bool = False
+    """Whether a missing credential is an error for this provider.
+
+    False is the safe default: a local server, a subprocess and any adapter
+    whose credential story has not been established all run fine without one.
+    Cloud adapters set it True and name their key in ``SECRETS_KEY``.
+    """
+
+    SECRETS_KEY: str = ""
+    """Key name in secrets.json, used to build a useful error message."""
+
     @property
     def provider_name(self) -> str:
         """The registry name this adapter is reached by.
@@ -53,6 +64,38 @@ class BaseProvider(ABC):
             The lower-case provider name.
         """
         return type(self).__name__.removesuffix("Provider").lower()
+
+    def _require_api_key(self) -> None:
+        """Fail early and clearly when a required credential is missing.
+
+        The one place the rule lives, so the eight cloud adapters cannot drift
+        apart on the wording of an error the user is meant to act on.
+
+        Two things it deliberately does not do. It is not called from
+        ``__init__``, because ``get_provider()`` instantiates providers eagerly,
+        long before anyone knows whether a request will follow;
+        ``GoogleProvider`` defers the same check to its lazy client getter for
+        the same reason. And it stays silent when ``config.url`` is set: a
+        caller who pointed a cloud adapter somewhere else has said "this is a
+        proxy or a gateway", which may legitimately need no credentials, and
+        aiming the OpenAI adapter at a local server that serves
+        /v1/chat/completions is exactly what the url override is for.
+
+        Returns immediately for providers that need no key, before touching
+        ``api_key`` or ``config``, which is what lets ``ollama`` and ``script``
+        inherit it without declaring either.
+
+        Raises:
+            ValueError: If this provider needs a key and none was supplied.
+        """
+        if not self.REQUIRES_API_KEY:
+            return
+        if not self.api_key and self.config.url is None:
+            raise ValueError(
+                f"Missing API key for provider '{self.provider_name}'. "
+                f"Add '{self.SECRETS_KEY}' to secrets.json "
+                f"or set {self.SECRETS_KEY.upper()}."
+            )
 
     def _validate_files(self, paths: list[str]) -> list[tuple[str, str]]:
         """Check attachments against this provider's declared capabilities.

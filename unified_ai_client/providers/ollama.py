@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import urllib.error
-import urllib.request
 from typing import Any
 
 from unified_ai_client.exceptions import UnsupportedFileError
@@ -12,6 +10,7 @@ from unified_ai_client.file_utils import (
     inline_text_attachments,
     normalize_file_paths,
 )
+from unified_ai_client.http import post_json
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
 
@@ -112,7 +111,9 @@ class OllamaProvider(BaseProvider):
             The parsed JSON response.
 
         Raises:
-            urllib.error.HTTPError: On HTTP errors.
+            NonRetryableHttpError: On a 4xx other than 408/409/425/429. An
+                unknown model is a 404 here, so this is the common case.
+            ProviderHttpError: On any other HTTP error response.
             urllib.error.URLError: On network connection issues.
         """
         _log.debug(
@@ -123,16 +124,8 @@ class OllamaProvider(BaseProvider):
             payload.get("keep_alive"),
             sorted(payload.get("options") or {}),
         )
-        url = f"{self.base_url}{endpoint}"
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+        # No auth headers: a local server authenticates nobody.
+        return post_json(f"{self.base_url}{endpoint}", payload, timeout)
 
     def _process_files_for_message(
         self, file_paths: list[str], prompt: str

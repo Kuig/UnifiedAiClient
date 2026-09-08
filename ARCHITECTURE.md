@@ -33,6 +33,7 @@ unified_ai_client/
 ├── file_utils.py         # classify_file, validate_files, encode_file_base64, ...
 ├── exceptions.py         # UnsupportedFileError, MissingFileError, FileDecodeError
 ├── config.py             # load_secrets(), load_config() (utility)
+├── http.py               # Shared urllib transport + HTTP error classification
 ├── retry.py              # Exponential backoff
 ├── silence.py            # silence_sdks()
 ├── verbosity.py          # set_verbosity()
@@ -103,6 +104,12 @@ endpoint, which carries images in a single `images[]` field and maps `context_si
 `num_ctx` and `max_tokens` to `num_predict`. `anthropic` speaks `/v1/messages` over
 `urllib`.
 
+All three of the HTTP-speaking families keep `_post` and `_get` as their own methods, but
+those are now thin wrappers: they resolve the URL, add their authentication headers through
+`_auth_headers()`, and hand the rest to `http.py`. The wrappers stay because the test suite
+intercepts the transport by patching them, and because the three signatures genuinely
+differ, `anthropic` posting to a single fixed path.
+
 **The script provider** spawns an arbitrary executable and exchanges JSON over stdin and
 stdout, dispatching on a `mode` field. It turns any program into a provider, which is how
 a mock, a local binary or a bespoke inference pipeline gets used without changing the
@@ -116,8 +123,12 @@ reference under `docs/`.
 accepts, encodes to base64, and wraps text attachments in delimited blocks. Every adapter
 branches on the classification it returns, which is why adding a file type starts here.
 
-`config.py` resolves credentials and loads JSON config into dataclasses. `retry.py`
-implements the exponential backoff. `exceptions.py` holds the deterministic failures.
+`config.py` resolves credentials and loads JSON config into dataclasses. `http.py` is the
+single urllib transport the three HTTP adapters share: it builds the request, parses the
+response, and turns an error status into a typed exception with the provider's own message
+read out of the body. Classifying which statuses are worth retrying lives there and only
+there, so the answer cannot differ between adapters. `retry.py` implements the exponential
+backoff. `exceptions.py` holds the deterministic failures.
 `silence.py` quiets third-party SDK loggers; `verbosity.py` attaches or removes the
 library's own console handler and is deliberately decoupled from it, see CLAUDE.md.
 

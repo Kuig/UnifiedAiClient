@@ -61,6 +61,12 @@ A timeout is a retryable failure like any other, so the same request is sent aga
 a local model for roughly `(max_retries + 1) x timeout` plus the backoff, not for `timeout`.
 Pass `max_retries=0` where a deadline has to be a real deadline.
 
+An HTTP error is treated differently, because most of them are already settled. A 4xx other
+than 408, 409, 425 and 429 raises [`NonRetryableHttpError`](#nonretryablehttperror) and fails
+on the first attempt: a rejected credential, an unknown model or a malformed payload returns
+the same status however many times it is sent. Those four codes, every 5xx, and any
+connection failure stay retryable.
+
 **Returns:** an [`AiResponse`](#airesponse) with the response text, token counts, any
 reasoning trace, and any tool calls the model requested.
 
@@ -456,3 +462,34 @@ Raised when a file classified as text cannot be decoded as UTF-8, meaning its co
 not match its extension. Subclasses `NonRetryableError` and `ValueError`. The caller is
 expected to fix the file or attach it as something other than text; the library will not
 substitute placeholder content, which a model cannot distinguish from the real thing.
+
+### `ProviderHttpError`
+
+Raised when a provider endpoint answers with an HTTP error status. Subclasses
+`urllib.error.HTTPError`, so handlers written before it existed keep working.
+
+`urllib` reports only the status line, so the reason the provider actually gave, which
+lives in the response body, used to be lost. This reads that body once and carries what it
+found, whatever shape the API uses to report it.
+
+| Attribute | Holds |
+|---|---|
+| `code` | The HTTP status code, inherited from `HTTPError`. |
+| `detail` | The provider's own message, extracted from the body and truncated to a readable length. Falls back to the HTTP reason phrase when the body carried nothing usable. |
+| `body` | The raw response body as text. |
+
+`str(exc)` reads `HTTP Error 401: invalid x-api-key` rather than
+`HTTP Error 401: Unauthorized`.
+
+Only the three adapters that speak `urllib` raise it: `ollama`, `anthropic` and every
+OpenAI-compatible provider. `google` reports failures through its SDK and `script` through
+its exit code.
+
+### `NonRetryableHttpError`
+
+A 4xx that will fail identically on every attempt. Subclasses both `NonRetryableError` and
+`ProviderHttpError`, so it is caught by a handler for either, and the retry wrapper re-raises
+it on the first attempt instead of spending the backoff budget.
+
+Raised for every 4xx except 408, 409, 425 and 429, which are transient by definition and stay
+retryable along with the 5xx range.

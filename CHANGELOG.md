@@ -5,6 +5,48 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-09-08
+
+### Added
+
+- `ProviderHttpError` and `NonRetryableHttpError`, both importable from
+  `unified_ai_client`. An HTTP error from a provider endpoint now carries the message the
+  provider actually sent, read out of the response body, in `detail` and in `str(exc)`.
+  Both subclass `urllib.error.HTTPError`, so existing handlers keep working.
+
+### Fixed
+
+- An HTTP error status no longer arrives as a bare `HTTP Error 400: Bad Request`. The
+  three urllib-backed adapters never read the response body, which is where every one of
+  these APIs says what it rejected, so a wrong model name, a malformed payload and an
+  unsupported parameter were indistinguishable from each other at the call site.
+- A 4xx no longer consumes the retry budget. No HTTP provider raised `NonRetryableError`
+  at all, so a rejected credential (401), an unknown model (404) or a malformed request
+  (400) cost four attempts and 5+10+20 = 35s of backoff before reporting a failure that
+  the first response had already settled. The four transient client codes, 408, 409, 425
+  and 429, plus every 5xx and any connection failure, stay retryable as before.
+
+### Changed
+
+- The urllib transport moved into a single module, `unified_ai_client/http.py`. The three
+  HTTP adapters keep their own `_post`/`_get`, now thin wrappers that resolve the URL and
+  add their authentication headers through a new `_auth_headers()` hook. Status
+  classification and error-body extraction live in one place instead of being absent from
+  three.
+- `REQUIRES_API_KEY`, `SECRETS_KEY` and `_require_api_key()` moved onto `BaseProvider`.
+  `anthropic` and `openai_compat` carried the same check with a character-for-character
+  identical error message; there is now one copy. Adapters that need no credential inherit
+  a check that returns before touching anything they do not define.
+
+### Upgrade note
+
+Not breaking for exception handlers: a handler catching `urllib.error.HTTPError`,
+`OSError` or `Exception` still catches these. What changes is the timing. A 4xx now
+surfaces immediately rather than after roughly 35 seconds of backoff, and the message it
+carries is the provider's own rather than the HTTP reason phrase. Code that relied on a
+4xx eventually being retried into success will now see it fail on the first attempt, which
+is the intended correction: that retry could never have succeeded.
+
 ## [0.5.3] - 2026-09-08
 
 ### Fixed
