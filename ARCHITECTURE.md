@@ -55,9 +55,21 @@ unified_ai_client/
 ### The entry layer
 
 `client.py` is the only module a consumer needs. It holds `call_ai()`, `get_embedding()`,
-`warm_up()`, `preload_model()`, `configure_provider()`, `get_provider()` and `cleanup()`,
-plus the two registries behind them: one mapping a provider name to its registered
-configuration, the other caching the built provider instance.
+`warm_up()`, `preload_model()`, `unload_model()`, `configure_provider()`, `get_provider()`
+and `cleanup()`, plus the four registries behind them: one mapping a provider name to its
+registered configuration, one caching the built provider instance, one recording which models
+a local provider currently holds resident, and one naming every provider built in the process.
+
+All four live at module level rather than on the provider instances, and that is load-bearing
+rather than incidental. `configure_provider()` evicts the cached instance, so anything kept on
+the instance is silently lost the moment a consumer reconfigures. The resident-model set and
+Google's uploaded-file cache both have to outlive that eviction, or the resource they track is
+leaked with nothing left holding a reference to release it.
+
+The fourth registry exists because surviving the eviction is only half the problem. `cleanup()`
+walks providers by name and resolves each one through `get_provider()`, rebuilding whatever was
+evicted, because a set of live references is not enough: something has to still be asked to
+release them.
 
 `call_ai()` does four things and delegates the rest. It packs its arguments into an
 `AiRequest`, resolves a cached provider through `get_provider()`, sleeps for the
@@ -202,10 +214,15 @@ variables first and a `secrets.json` in the consuming project's working director
 The check for a missing key fires at request time rather than at construction, because
 providers are built eagerly, long before anyone knows whether a request will follow.
 
-**Resource lifecycle.** Only Google holds remote resources. Uploaded files go into a cache
-that both `warm_up()` and `call_ai()` read, and `cleanup()` deletes them. Cleanup is
-registered with `atexit` on the first call of either, so a process that warms up and then
-crashes still releases its uploads.
+**Resource lifecycle.** Two kinds of resource outlive a single call. Google holds remote
+files: uploads go into a module-level cache that both `warm_up()` and `call_ai()` read, and
+`cleanup()` deletes them to free cloud quota. Ollama and scripts hold a local model in
+memory: `call_ai()`, `warm_up()`, `preload_model()` and `get_embedding()` record what they
+loaded, and `cleanup()` unloads it to free VRAM. Cleanup is registered with `atexit` on the
+first of those calls, so a process that warms up and then crashes still releases both. That
+`atexit` guarantee is what makes an indefinite residency a policy rather than a leak: the
+caller can pin a model for as long as it needs one, because normal exit, an unhandled
+exception and a Ctrl+C all end with the model released.
 
 **Warm-up.** Every provider pays some cost once per process: an SDK import, a client
 construction, a TLS handshake, a model load, a file upload. Without `warm_up()` all of it

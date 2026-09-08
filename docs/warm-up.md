@@ -1,7 +1,7 @@
-# Warm-up, Preloading and Cleanup
+# Warm-up, Residency and Cleanup
 
-Three calls that bracket the work `call_ai()` does: one prepares the channel, one pins a
-local model in memory, one releases what was uploaded.
+Four calls that bracket the work `call_ai()` does: one prepares the channel, one pins a
+local model in memory, one releases a model, one releases everything still held.
 
 ## Warm-up (all providers)
 
@@ -44,6 +44,27 @@ What each provider does:
 > providers are built for, this is free. If you have pointed either of them at a
 > paid remote endpoint, that request is billable.
 
+`warm_up()` also takes `keep_alive` and `timeout`, which is what lets a caller pin a model
+for exactly as long as it is needed without reconfiguring the provider for the whole
+process:
+
+```python
+from unified_ai_client import warm_up, unload_model
+
+warm_up("ollama", "gemma4:12b", keep_alive=-1, timeout=600)
+...
+unload_model("ollama", "gemma4:12b")
+```
+
+`keep_alive` accepts a number of seconds, `0` to unload once idle, `-1` to stay resident
+indefinitely, or a Go duration string such as `"15m"`. When it is omitted, whatever was
+registered via `configure_provider()` applies, so a warm-up and the calls that follow it
+always agree on the residency. Only `ollama` and `script` have a residency concept; the
+rest accept the argument and ignore it.
+
+Note that the residency timer is an idle countdown that starts when a request *finishes*,
+not a budget for the request. A model serving a call is never evicted mid-wait.
+
 `warm_up()` never raises. A failed warm-up is a missed optimisation, not an error, so it
 returns `False` and lets the `call_ai()` that follows report the real problem through its
 own retries. It is safe to call on every provider without checking first: where there is
@@ -75,23 +96,52 @@ For providers that do not support preloading (Google, Anthropic, OpenAI, and the
 the warm-up part is a no-op, but any provided `context_size` / `extra_options` are still
 registered and will apply to `call_ai()` calls.
 
-## Which of the two to call
+## Releasing a model
 
-| | `preload_model()` | `warm_up()` |
-|---|---|---|
-| What it prepares | A model in resident memory | The whole channel: client, connection, authentication, and on Google the uploaded files |
-| Where it works | Ollama, and scripts that implement it | Every provider |
-| Also does | Registers `context_size` / `extra_options` for later calls | Nothing persistent beyond the warmed resources |
+`unload_model()` is the counterpart to `preload_model()`. On Ollama it sends the request
+`ollama stop` sends, expiring the model's idle timer immediately:
+
+```python
+from unified_ai_client import unload_model
+
+unload_model("ollama", "gemma4:12b")
+```
+
+Doing this through the library rather than through the `ollama` CLI has two advantages:
+nothing needs the `ollama` binary on the PATH, and it reaches whichever server the
+provider is configured for, including a remote one or a non-default port, where the CLI
+would talk to the wrong server.
+
+Like `warm_up()`, it never raises. Failing to free VRAM is not a reason to bring down the
+caller, and the next request simply reloads the model.
+
+Its timeout defaults to a deliberately short value rather than to the provider's
+configured one. The request goes through the same queue as a generation, so it waits
+behind whatever is already running, and an unload that cannot get through must not stall
+the process for the minutes a generation timeout allows.
+
+## Which one to call
+
+| | `preload_model()` | `warm_up()` | `unload_model()` |
+|---|---|---|---|
+| What it does | Pins a model in resident memory | Prepares the whole channel: client, connection, authentication, and on Google the uploaded files | Releases a resident model |
+| Where it works | Ollama, and scripts that implement it | Every provider | Ollama, and scripts that implement it |
+| Also does | Registers `context_size` / `extra_options` for later calls | Nothing persistent beyond the warmed resources | Drops the model from the set `cleanup()` drains |
 
 ## Cleanup
 
-Files uploaded by `warm_up()` go into the same cache `call_ai()` reads from, and are
-deleted by `cleanup()` along with every other uploaded file. Warming up does not change
-the resource lifecycle.
+`cleanup()` releases both kinds of resource: remote files uploaded to a provider are
+deleted to free cloud quota, and local models still resident are unloaded to free VRAM.
+Files uploaded by `warm_up()` go into the same cache `call_ai()` reads from, so warming up
+does not change the resource lifecycle.
 
-`atexit` cleanup is registered automatically on the first `call_ai()` or `warm_up()`,
-whichever comes first, so files uploaded by a warm-up are cleaned up even in a process
-that never reaches a real call. For eager cleanup:
+`atexit` cleanup is registered automatically on the first `call_ai()`, `warm_up()` or
+`get_embedding()`, whichever comes first, so a process that only ever warms up still
+cleans up after itself. Because it runs at exit, it also covers an unhandled exception and
+a Ctrl+C, and that is what makes an indefinite `keep_alive=-1` a safe policy rather than a
+leak: whatever happens to the process, the VRAM comes back.
+
+For eager cleanup:
 
 ```python
 from unified_ai_client import cleanup
@@ -99,5 +149,13 @@ from unified_ai_client import cleanup
 try:
     response = call_ai(...)
 finally:
-    cleanup()   # Deletes uploaded Google AI files
+    cleanup()   # Deletes uploaded files and unloads resident models
+```
+
+Pass `unload_models=False` to release the remote resources but leave the models warm,
+which is what a long-lived process wants when it calls `cleanup()` between batches rather
+than at the end:
+
+```python
+cleanup(unload_models=False)
 ```

@@ -17,7 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Ensure the project root is in sys.path so unified_ai_client is importable
@@ -111,20 +111,40 @@ class ProviderRegistryIsolation(unittest.TestCase):
     invalidates ``client._PROVIDERS``. Tests run in an arbitrary order, so any
     test that touches those registries must leave them exactly as it found
     them or it silently changes the outcome of the next one.
+
+    Two more registries have the same problem and are restored here as well:
+    ``client._LOADED_MODELS``, which any ``call_ai()`` against a provider with
+    a residency concept writes to, and ``google._UPLOADED_FILES``. A leaked
+    entry in the first makes the atexit ``cleanup()`` chase a model that was
+    never really loaded; one in the second makes a later test count an upload
+    it did not make. ``client._BUILT_PROVIDERS`` is restored for the same
+    reason: ``cleanup()`` walks it by name and would otherwise reach providers
+    a later test never asked for.
     """
 
     def setUp(self) -> None:
         super().setUp()
         from unified_ai_client import client as _client
+        from unified_ai_client.providers import google as _google
         self._saved_configs = dict(_client._PROVIDER_CONFIGS)
         self._saved_providers = dict(_client._PROVIDERS)
+        self._saved_loaded = set(_client._LOADED_MODELS)
+        self._saved_built = set(_client._BUILT_PROVIDERS)
+        self._saved_uploads = dict(_google._UPLOADED_FILES)
 
     def tearDown(self) -> None:
         from unified_ai_client import client as _client
+        from unified_ai_client.providers import google as _google
         _client._PROVIDER_CONFIGS.clear()
         _client._PROVIDER_CONFIGS.update(self._saved_configs)
         _client._PROVIDERS.clear()
         _client._PROVIDERS.update(self._saved_providers)
+        _client._LOADED_MODELS.clear()
+        _client._LOADED_MODELS.update(self._saved_loaded)
+        _client._BUILT_PROVIDERS.clear()
+        _client._BUILT_PROVIDERS.update(self._saved_built)
+        _google._UPLOADED_FILES.clear()
+        _google._UPLOADED_FILES.update(self._saved_uploads)
         super().tearDown()
 
 
@@ -181,7 +201,9 @@ class TestImports(unittest.TestCase):
         self.assertTrue(classify_file)
 
     def test_import_client(self) -> None:
-        from unified_ai_client import call_ai, cleanup, preload_model, get_embedding
+        from unified_ai_client import (
+            call_ai, cleanup, preload_model, unload_model, get_embedding,
+        )
         self.assertTrue(call_ai)
 
     def test_import_providers(self) -> None:
@@ -483,7 +505,7 @@ class TestDispatch(ProviderRegistryIsolation):
 # 6. Live tests — Ollama (most likely available locally)
 # ---------------------------------------------------------------------------
 
-class TestOllamaLive(unittest.TestCase):
+class TestOllamaLive(ProviderRegistryIsolation):
     """End-to-end calls against a local Ollama server."""
 
     def _require_model(self) -> str:
@@ -745,7 +767,7 @@ class TestOllamaLive(unittest.TestCase):
 # 7. Script provider
 # ---------------------------------------------------------------------------
 
-class TestScriptProvider(unittest.TestCase):
+class TestScriptProvider(ProviderRegistryIsolation):
     """The subprocess provider and its stdin/stdout JSON protocol."""
 
     def test_script_generate(self) -> None:
@@ -869,6 +891,180 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # 8. Ollama provider — offline unit tests
 # ---------------------------------------------------------------------------
+
+class TestModelResidency(ProviderRegistryIsolation):
+    """cleanup() releases the VRAM that keep_alive=-1 would otherwise hold."""
+
+    def _tracked(self) -> set:
+        from unified_ai_client import client as _client
+        return set(_client._LOADED_MODELS)
+
+    def test_call_ai_tracks_a_local_model(self) -> None:
+        from unified_ai_client import call_ai
+        from unified_ai_client.client import get_provider
+        from unified_ai_client.models import AiResponse
+
+        provider = get_provider("ollama")
+        with patch.object(provider, "call", return_value=AiResponse(text="hi")):
+            call_ai("ollama", "gemma4:12b", "hello")
+
+        self.assertIn(("ollama", "gemma4:12b"), self._tracked())
+
+    def test_a_cloud_model_is_not_tracked(self) -> None:
+        """A cloud endpoint holds nothing, so there is nothing to release."""
+        from unified_ai_client import call_ai
+        from unified_ai_client.client import get_provider
+        from unified_ai_client.models import AiResponse
+
+        provider = get_provider("google")
+        with patch.object(provider, "call", return_value=AiResponse(text="hi")):
+            call_ai("google", "gemini-2.5-flash", "hello")
+
+        self.assertNotIn(("google", "gemini-2.5-flash"), self._tracked())
+
+    def test_cleanup_unloads_tracked_models(self) -> None:
+        from unified_ai_client import cleanup
+        from unified_ai_client.client import get_provider, _LOADED_MODELS
+
+        provider = get_provider("ollama")
+        _LOADED_MODELS.clear()
+        _LOADED_MODELS.add(("ollama", "gemma4:12b"))
+        with patch.object(provider, "unload_model") as unload:
+            cleanup()
+
+        unload.assert_called_once_with("gemma4:12b")
+        self.assertEqual(self._tracked(), set())
+
+    def test_cleanup_can_leave_models_resident(self) -> None:
+        from unified_ai_client import cleanup
+        from unified_ai_client.client import get_provider, _LOADED_MODELS
+
+        provider = get_provider("ollama")
+        _LOADED_MODELS.add(("ollama", "gemma4:12b"))
+        with patch.object(provider, "unload_model") as unload:
+            cleanup(unload_models=False)
+
+        unload.assert_not_called()
+        self.assertIn(("ollama", "gemma4:12b"), self._tracked())
+
+    def test_cleanup_survives_a_failing_unload(self) -> None:
+        """One provider that cannot release must not block the others."""
+        from unified_ai_client import cleanup
+        from unified_ai_client.client import get_provider, _LOADED_MODELS
+
+        ollama = get_provider("ollama")
+        _LOADED_MODELS.clear()
+        _LOADED_MODELS.update({("ollama", "a"), ("ollama", "b")})
+        with patch.object(
+            ollama, "unload_model", side_effect=[RuntimeError("boom"), None]
+        ) as unload:
+            cleanup()
+
+        self.assertEqual(unload.call_count, 2)
+        self.assertEqual(self._tracked(), set())
+
+    def test_explicit_unload_is_not_repeated_at_exit(self) -> None:
+        from unified_ai_client import cleanup, unload_model
+        from unified_ai_client.client import get_provider, _LOADED_MODELS
+
+        provider = get_provider("ollama")
+        _LOADED_MODELS.clear()
+        _LOADED_MODELS.add(("ollama", "gemma4:12b"))
+        with patch.object(provider, "unload_model") as unload:
+            unload_model("ollama", "gemma4:12b")
+            self.assertEqual(self._tracked(), set())
+            cleanup()
+
+        self.assertEqual(unload.call_count, 1)
+
+    def test_cleanup_unloads_after_the_instance_was_evicted(self) -> None:
+        """The registry outlives the instance, and the unload has to follow it.
+
+        configure_provider() drops the cached instance. The model it loaded is
+        still resident, so cleanup() must resolve the provider by name rather
+        than reuse whatever instance happened to be cached when it started.
+        """
+        from unified_ai_client import cleanup
+        from unified_ai_client.client import (
+            configure_provider, get_provider, _LOADED_MODELS,
+        )
+
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        get_provider("ollama")
+        _LOADED_MODELS.clear()
+        _LOADED_MODELS.add(("ollama", "gemma4:12b"))
+
+        # Evict, and deliberately do not resolve the provider again: cleanup()
+        # has to rebuild it. Patching the class rather than an instance is what
+        # makes this test fail if cleanup() reuses its own cache snapshot.
+        configure_provider("ollama", timeout=42)
+
+        with patch.object(OllamaProvider, "unload_model") as unload:
+            cleanup()
+
+        unload.assert_called_once_with("gemma4:12b")
+
+    def test_cleanup_still_purges_remote_resources(self) -> None:
+        """The pre-existing half of cleanup() must survive the restructure."""
+        from unified_ai_client import cleanup
+        from unified_ai_client.client import get_provider
+
+        provider = get_provider("google")
+        with patch.object(provider, "cleanup") as purge:
+            cleanup()
+
+        purge.assert_called_once_with()
+
+
+class TestGoogleUploadCache(ProviderRegistryIsolation):
+    """The upload cache must outlive the provider instance that filled it."""
+
+    def test_cache_survives_reconfiguration(self) -> None:
+        """configure_provider() evicts the instance; the references must stay.
+
+        Held on the instance, they went with it: the files stayed on the remote
+        quota with nothing left to delete them, and the next call re-uploaded
+        every one of them.
+        """
+        from unified_ai_client.client import configure_provider, get_provider
+        from unified_ai_client.providers import google as google_mod
+
+        first = get_provider("google")
+        google_mod._UPLOADED_FILES["/tmp/whatever.pdf"] = object()
+
+        configure_provider("google", timeout=120)
+        second = get_provider("google")
+
+        self.assertIsNot(first, second, "configure_provider must evict the instance")
+        self.assertIn("/tmp/whatever.pdf", google_mod._UPLOADED_FILES)
+
+    def test_cleanup_deletes_what_an_evicted_instance_uploaded(self) -> None:
+        from unified_ai_client.client import cleanup, configure_provider, get_provider
+        from unified_ai_client.providers import google as google_mod
+        from unified_ai_client.providers.google import GoogleProvider
+
+        get_provider("google")
+        # A live test earlier in the run may have left real uploads here, and
+        # this test counts delete calls. Isolation restores them in tearDown.
+        google_mod._UPLOADED_FILES.clear()
+        ref = MagicMock()
+        ref.name = "files/abc123"
+        google_mod._UPLOADED_FILES["/tmp/whatever.pdf"] = ref
+
+        # Evict, and deliberately do not resolve the provider again. Patching
+        # the class rather than an instance is what makes this test fail if
+        # cleanup() only visits the instances still in the cache: the upload
+        # would then sit on the remote quota with nothing able to delete it.
+        configure_provider("google", timeout=120)
+
+        client = MagicMock()
+        with patch.object(GoogleProvider, "_get_client", return_value=client):
+            cleanup(unload_models=False)
+
+        client.files.delete.assert_called_once_with(name="files/abc123")
+        self.assertEqual(google_mod._UPLOADED_FILES, {})
+
 
 class TestOllamaOffline(unittest.TestCase):
     """Payload construction and response parsing, with _post intercepted."""

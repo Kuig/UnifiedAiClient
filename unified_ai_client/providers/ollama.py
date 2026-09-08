@@ -17,6 +17,45 @@ from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.ollama")
 
+_DEFAULT_KEEP_ALIVE: str | int = "15m"
+
+# An unload queues behind any generation already running, so it gets its own
+# short deadline rather than the provider timeout, which is usually minutes.
+_UNLOAD_TIMEOUT: int = 30
+
+_NON_MODEL_OPTIONS: frozenset[str] = frozenset(
+    {"keep_alive", "timeout", "sleep_time", "use_generate", "url"}
+)
+"""Keys this library reads itself, which must never reach Ollama's ``options``.
+
+``extra_options`` carries two unrelated kinds of key: Ollama model parameters,
+which are forwarded verbatim so a caller can reach any of them without this
+library knowing their names, and UAC-level controls that steer the adapter.
+Only the second kind is listed here. Anything absent from this set is assumed
+to be a model parameter and passed through untouched.
+"""
+
+
+def _fold_options(opts: dict[str, Any], options: dict[str, Any]) -> None:
+    """Fold UAC-level options into an Ollama model ``options`` dict, in place.
+
+    Two names are translated to Ollama's own spelling, the control keys in
+    ``_NON_MODEL_OPTIONS`` are dropped, and everything else passes through.
+
+    Args:
+        opts: Source options, from the provider config or from the request.
+        options: The Ollama ``options`` dict to update in place.
+    """
+    for k, v in opts.items():
+        if k in _NON_MODEL_OPTIONS:
+            continue
+        if k == "context_size":
+            options["num_ctx"] = v
+        elif k == "max_tokens":
+            options["num_predict"] = v
+        else:
+            options[k] = v
+
 
 class OllamaProvider(BaseProvider):
     """Ollama provider adapter utilizing native urllib.request.
@@ -37,6 +76,9 @@ class OllamaProvider(BaseProvider):
     # /api/chat carries attachments in images[] and nothing else. Audio-capable
     # models exist, but reaching them needs the OpenAI-compatible endpoint.
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image"})
+
+    # Ollama keeps a model in VRAM between requests and can be told to drop it.
+    SUPPORTS_UNLOAD: bool = True
 
     def __init__(self, config: ProviderConfig) -> None:
         """Initialize the Ollama provider.
@@ -64,6 +106,14 @@ class OllamaProvider(BaseProvider):
             urllib.error.HTTPError: On HTTP errors.
             urllib.error.URLError: On network connection issues.
         """
+        _log.debug(
+            "Ollama POST %s: model=%s timeout=%ss keep_alive=%s options=%s",
+            endpoint,
+            payload.get("model"),
+            timeout,
+            payload.get("keep_alive"),
+            sorted(payload.get("options") or {}),
+        )
         url = f"{self.base_url}{endpoint}"
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -193,23 +243,13 @@ class OllamaProvider(BaseProvider):
         if request.top_p is not None:
             options["top_p"] = request.top_p
 
-        # Populate options from opts
-        for k, v in opts.items():
-            if k not in ("keep_alive", "timeout", "sleep_time"):
-                # Map context_size to num_ctx
-                if k == "context_size":
-                    options["num_ctx"] = v
-                # Map max_tokens to num_predict
-                elif k == "max_tokens":
-                    options["num_predict"] = v
-                else:
-                    options[k] = v
+        _fold_options(opts, options)
 
         # Call-time max_tokens takes precedence
         if request.max_tokens is not None:
             options["num_predict"] = request.max_tokens
 
-        keep_alive = opts.get("keep_alive", "15m")
+        keep_alive = opts.get("keep_alive", _DEFAULT_KEEP_ALIVE)
         use_generate = opts.get("use_generate", False)
 
         if use_generate:
@@ -315,12 +355,45 @@ class OllamaProvider(BaseProvider):
             tool_calls=tool_calls,
         )
 
+    def _resolve_keep_alive(self, keep_alive: str | int | None) -> str | int:
+        """Resolve the residency to request, explicit argument first.
+
+        Precedence is the explicit argument, then the ``keep_alive`` registered
+        via ``configure_provider()``, then the library default. The middle step
+        is the one that matters: ``call()`` reads that same config key, so a
+        warm-up that skipped it would load the model with a different residency
+        than every request that follows it.
+
+        Args:
+            keep_alive: The caller's explicit value, or None to fall back.
+
+        Returns:
+            The value to put on the wire.
+        """
+        if keep_alive is not None:
+            return keep_alive
+        opts = self.config.extra_options or {}
+        return opts.get("keep_alive", _DEFAULT_KEEP_ALIVE)
+
+    def _resolve_timeout(self, timeout: int | None) -> int:
+        """Resolve the socket timeout, explicit argument over configured one.
+
+        Args:
+            timeout: The caller's explicit value, or None to fall back.
+
+        Returns:
+            Seconds to wait.
+        """
+        return timeout if timeout is not None else self.config.timeout
+
     def preload_model(
         self,
         model: str,
-        keep_alive: str = "15m",
+        keep_alive: str | int = _DEFAULT_KEEP_ALIVE,
         context_size: int | None = None,
         extra_options: dict | None = None,
+        *,
+        timeout: int | None = None,
     ) -> None:
         """Pre-load an Ollama model into memory with the specified options.
 
@@ -331,35 +404,23 @@ class OllamaProvider(BaseProvider):
 
         Args:
             model: Model identifier.
-            keep_alive: Duration to keep model loaded.
+            keep_alive: How long to keep the model loaded. A number is seconds,
+                ``0`` unloads it once idle and ``-1`` keeps it resident
+                indefinitely; a string is a Go duration such as ``'15m'``.
             context_size: Context window size in tokens. Mapped to ``num_ctx``.
                 Takes priority over ``context_size`` in ``extra_options``.
             extra_options: Additional provider-specific options merged into the
                 preload request options dict.
+            timeout: Seconds to wait for the request. Defaults to the timeout
+                registered for this provider.
         """
         options: dict[str, Any] = {}
 
         # 1. Config-level extra_options (from configure_provider / previous preload)
-        if self.config.extra_options:
-            for k, v in self.config.extra_options.items():
-                if k not in ("keep_alive", "timeout", "sleep_time"):
-                    if k == "context_size":
-                        options["num_ctx"] = v
-                    elif k == "max_tokens":
-                        options["num_predict"] = v
-                    else:
-                        options[k] = v
+        _fold_options(self.config.extra_options or {}, options)
 
         # 2. Call-time extra_options (override config)
-        if extra_options:
-            for k, v in extra_options.items():
-                if k not in ("keep_alive", "timeout", "sleep_time"):
-                    if k == "context_size":
-                        options["num_ctx"] = v
-                    elif k == "max_tokens":
-                        options["num_predict"] = v
-                    else:
-                        options[k] = v
+        _fold_options(extra_options or {}, options)
 
         # 3. Explicit context_size parameter (highest priority)
         if context_size is not None:
@@ -373,12 +434,15 @@ class OllamaProvider(BaseProvider):
         if options:
             payload["options"] = options
 
-        self._post("/api/chat", payload, self.config.timeout)
+        self._post("/api/chat", payload, self._resolve_timeout(timeout))
 
     def warm_up(
         self,
         model: str,
         file_paths: str | list[str] | None = None,
+        *,
+        keep_alive: str | int | None = None,
+        timeout: int | None = None,
     ) -> bool:
         """Load the model into memory via Ollama's own warm-up request.
 
@@ -390,16 +454,55 @@ class OllamaProvider(BaseProvider):
             model: Model identifier to load.
             file_paths: Ignored. Ollama inlines attachments into the request
                 and keeps no remote file store to populate.
+            keep_alive: How long the model should stay resident. Defaults to the
+                value registered via ``configure_provider()``, so a warm-up and
+                the calls that follow it agree on the residency.
+            timeout: Seconds to wait for the load. Defaults to the timeout
+                registered for this provider.
 
         Returns:
             Always True: loading the model is always real work.
         """
-        opts = self.config.extra_options or {}
-        self.preload_model(model, opts.get("keep_alive", "15m"))
+        effective_keep_alive = self._resolve_keep_alive(keep_alive)
+        _log.debug(
+            "Ollama warm-up: model=%s keep_alive=%s timeout=%ss",
+            model, effective_keep_alive, self._resolve_timeout(timeout),
+        )
+        self.preload_model(model, effective_keep_alive, timeout=timeout)
         return True
+
+    def unload_model(self, model: str, *, timeout: int | None = None) -> None:
+        """Release the model from memory, freeing its VRAM.
+
+        Sends the request Ollama documents for this, and the same one ``ollama
+        stop`` sends: an empty chat with ``keep_alive`` set to zero, which
+        expires the model's idle timer immediately.
+
+        Args:
+            model: Model identifier to release.
+            timeout: Seconds to wait. Defaults to 30 rather than to the
+                provider's configured timeout, which is usually minutes: this
+                request queues behind any generation already in flight, and a
+                failure to free VRAM must not stall the caller for that long.
+        """
+        _log.debug("Ollama unload: model=%s", model)
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [],
+            "keep_alive": 0,
+        }
+        self._post(
+            "/api/chat",
+            payload,
+            timeout if timeout is not None else _UNLOAD_TIMEOUT,
+        )
 
     def get_embedding(self, model: str, text: str) -> list[float]:
         """Generate a text embedding vector using Ollama.
+
+        The embedding model is subject to the same residency policy as a chat
+        model, so that a ``keep_alive`` registered via ``configure_provider()``
+        governs both and ``cleanup()`` can release either.
 
         Args:
             model: Embedding model name.
@@ -411,7 +514,11 @@ class OllamaProvider(BaseProvider):
         Raises:
             RuntimeError: If the server returns no embeddings.
         """
-        payload = {"model": model, "input": text}
+        payload = {
+            "model": model,
+            "input": text,
+            "keep_alive": self._resolve_keep_alive(None),
+        }
         resp = self._post("/api/embed", payload, self.config.timeout)
         embeddings = resp.get("embeddings", [])
         if embeddings and len(embeddings) > 0:

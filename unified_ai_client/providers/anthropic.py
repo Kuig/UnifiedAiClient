@@ -218,6 +218,9 @@ class AnthropicProvider(BaseProvider):
         self,
         model: str,
         file_paths: str | list[str] | None = None,
+        *,
+        keep_alive: str | int | None = None,
+        timeout: int | None = None,
     ) -> bool:
         """Open the connection with a free metadata request.
 
@@ -228,11 +231,14 @@ class AnthropicProvider(BaseProvider):
             model: Unused. Listing models warms the channel regardless.
             file_paths: Ignored. Anthropic takes attachments inline in the
                 request and keeps no remote file store.
+            keep_alive: Ignored. Anthropic holds no model on the caller's
+                behalf, so it has no residency to control.
+            timeout: Seconds to wait. Defaults to the configured timeout.
 
         Returns:
             Always True.
         """
-        self._get("/v1/models", self.config.timeout)
+        self._get("/v1/models", timeout if timeout is not None else self.config.timeout)
         return True
 
     def _build_user_content(
@@ -455,7 +461,7 @@ class AnthropicProvider(BaseProvider):
     def preload_model(
         self,
         model: str,
-        keep_alive: str = "15m",
+        keep_alive: str | int = "15m",
         context_size: int | None = None,
         extra_options: dict | None = None,
     ) -> None:

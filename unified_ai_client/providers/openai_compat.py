@@ -147,7 +147,7 @@ class OpenAiCompatProvider(BaseProvider):
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    def _warm_up_completion(self, model: str) -> None:
+    def _warm_up_completion(self, model: str, timeout: int | None = None) -> None:
         """Send a one-token completion to force a lazy server to load the model.
 
         Only meaningful for local servers that defer the model load until the
@@ -156,6 +156,7 @@ class OpenAiCompatProvider(BaseProvider):
 
         Args:
             model: Model identifier to load.
+            timeout: Seconds to wait. Defaults to the configured timeout.
         """
         payload: dict[str, Any] = {
             "model": model,
@@ -164,12 +165,19 @@ class OpenAiCompatProvider(BaseProvider):
             "temperature": 0.0,
             "stream": False,
         }
-        self._post("/v1/chat/completions", payload, self.config.timeout)
+        self._post(
+            "/v1/chat/completions",
+            payload,
+            timeout if timeout is not None else self.config.timeout,
+        )
 
     def warm_up(
         self,
         model: str,
         file_paths: str | list[str] | None = None,
+        *,
+        keep_alive: str | int | None = None,
+        timeout: int | None = None,
     ) -> bool:
         """Open the connection with a free metadata request.
 
@@ -182,11 +190,14 @@ class OpenAiCompatProvider(BaseProvider):
             model: Unused. Listing models warms the channel regardless.
             file_paths: Ignored. These providers inline attachments into the
                 request and keep no remote file store.
+            keep_alive: Ignored. A cloud endpoint holds no model on the
+                caller's behalf, so it has no residency to control.
+            timeout: Seconds to wait. Defaults to the configured timeout.
 
         Returns:
             Always True: the connection is always worth opening early.
         """
-        self._get("/v1/models", self.config.timeout)
+        self._get("/v1/models", timeout if timeout is not None else self.config.timeout)
         return True
 
     def _build_native_block(self, file_path: str, file_type: str) -> dict[str, Any]:
@@ -435,7 +446,7 @@ class OpenAiCompatProvider(BaseProvider):
     def preload_model(
         self,
         model: str,
-        keep_alive: str = "15m",
+        keep_alive: str | int = "15m",
         context_size: int | None = None,
         extra_options: dict | None = None,
     ) -> None:

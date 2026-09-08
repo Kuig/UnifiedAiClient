@@ -28,6 +28,19 @@ class BaseProvider(ABC):
     provider whose capabilities have not been established.
     """
 
+    SUPPORTS_UNLOAD: bool = False
+    """Whether this provider has a model residency concept at all.
+
+    True only for providers that keep a model loaded between requests and can
+    be told to release it: ``ollama`` and ``script``. A cloud endpoint holds
+    nothing on the caller's behalf, so there is nothing to unload.
+
+    ``client.cleanup()`` reads this to decide which models to track and release
+    at exit, which is why it is a class flag rather than an ``isinstance``
+    check. The ``False`` default means "nothing to release", the safe answer for
+    a provider whose behaviour has not been established.
+    """
+
     @property
     def provider_name(self) -> str:
         """The registry name this adapter is reached by.
@@ -79,7 +92,7 @@ class BaseProvider(ABC):
     def preload_model(
         self,
         model: str,
-        keep_alive: str = "15m",
+        keep_alive: str | int = "15m",
         context_size: int | None = None,
         extra_options: dict | None = None,
     ) -> None:
@@ -87,7 +100,10 @@ class BaseProvider(ABC):
 
         Args:
             model: Model identifier to preload.
-            keep_alive: How long to keep the model in memory.
+            keep_alive: How long to keep the model in memory. A number is
+                seconds, ``0`` unloads the model once idle and ``-1`` keeps
+                it resident indefinitely; a string is a Go duration such as
+                ``'15m'``. Ignored by providers with no residency concept.
             context_size: Context window size in tokens (provider-specific).
                 Ollama maps this to ``num_ctx``. Ignored by providers that
                 do not support preloading.
@@ -120,6 +136,9 @@ class BaseProvider(ABC):
         self,
         model: str,
         file_paths: str | list[str] | None = None,
+        *,
+        keep_alive: str | int | None = None,
+        timeout: int | None = None,
     ) -> bool:
         """Pay this provider's one-off costs ahead of the first real call.
 
@@ -137,12 +156,35 @@ class BaseProvider(ABC):
             file_paths: Optional path or list of paths to pre-upload, for
                 providers that keep a remote file store. Ignored by providers
                 that inline attachments into the request.
+            keep_alive: How long the model should stay resident once loaded.
+                ``None`` leaves the provider's own resolution in place. Accepted
+                and ignored by providers with no residency concept.
+            timeout: Seconds to wait for the warm-up request. ``None`` falls
+                back to the provider's configured timeout.
 
         Returns:
             True if something was actually warmed up, False if this provider
             has nothing to do. Never raises for the "nothing to warm up" case.
         """
         return False
+
+    def unload_model(self, model: str, *, timeout: int | None = None) -> None:
+        """Release a model this provider is holding resident.
+
+        The counterpart to ``preload_model()``. Concrete rather than abstract,
+        for the same reason ``warm_up()`` is: "there is nothing to release" is a
+        valid answer, and a provider written before this hook existed must keep
+        working unchanged.
+
+        Providers that override this declare ``SUPPORTS_UNLOAD = True``.
+
+        Args:
+            model: Model identifier to release.
+            timeout: Seconds to wait for the request. ``None`` lets the provider
+                choose, which is deliberately short: an unload queues behind
+                whatever generation is already running.
+        """
+        return None
 
     def cleanup(self) -> None:
         """Release any remote resources held by this provider.

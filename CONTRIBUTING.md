@@ -29,7 +29,7 @@ the skip behaviour and the helper imports below all assume `unittest`.
 ```bash
 python -m unittest discover -s tests            # everything
 python -m unittest tests.test_warmup            # one module
-python -m unittest tests.test_warmup.TestWarmUpOllama.test_warm_up_delegates_to_preload_model
+python -m unittest tests.test_warmup.TestUnloadModel.test_ollama_sends_the_documented_unload_request
 ```
 
 For a fast feedback loop while working:
@@ -84,7 +84,9 @@ For an OpenAI-compatible endpoint, most of the work is already done. Subclass
 `OpenAiCompatProvider` and set `DEFAULT_URL`, plus `REQUIRES_API_KEY` and `SECRETS_KEY`
 for a cloud endpoint, and `REASONING_PARAM` if the API exposes a reasoning control.
 
-Set `SUPPORTED_FILE_TYPES` to what you have **verified** the endpoint accepts. The
+Set `SUPPORTED_FILE_TYPES` to what you have **verified** the endpoint accepts, and
+`SUPPORTS_UNLOAD` only if the endpoint keeps a model resident and offers a way to release
+it, in which case override `unload_model()` too. The
 inherited default is `{"image"}`, and declaring a class whose content block the builder
 cannot produce raises at request-build time rather than at import.
 
@@ -96,10 +98,12 @@ Then wire it in and document it:
 - `config.json.example`, `secrets.json.example` and `.env.example`;
 - the provider tables in `README.md`, `COMPARISON.md`, `docs/multimodal.md`,
   `docs/reasoning.md`, `docs/tool-calling.md` and `docs/warm-up.md`;
+- an entry under `## [Unreleased]` in `CHANGELOG.md`;
 - a `test_dispatch_<name>` in `TestDispatch`, and a row in every table in
-  `tests/test_provider_contracts.py`. Those tables are keyed by provider name, and
-  `TestFileSupportMatrix._SUPPORT` asserts the declared capabilities against an explicit
-  list, so a provider added without a row there fails the suite.
+  `tests/test_provider_contracts.py`. Those tables are keyed by provider name, and both
+  `TestFileSupportMatrix._SUPPORT` and `TestUnloadSupportMatrix._SUPPORTS_UNLOAD` assert
+  the declared capabilities against an explicit list, so a provider added without a row
+  there fails the suite.
 
 A provider that needs a vendor SDK is a different conversation: the absence of a
 dependency tree is the point of the library.

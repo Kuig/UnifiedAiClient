@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 import warnings
@@ -9,6 +10,8 @@ from pathlib import Path
 from unified_ai_client.file_utils import normalize_file_paths
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
 from unified_ai_client.providers.base import BaseProvider
+
+_log = logging.getLogger("unified_ai_client.providers.script")
 
 
 def _resolve_interpreter(script_path: str) -> list[str]:
@@ -88,6 +91,10 @@ class ScriptProvider(BaseProvider):
     only party that knows what it can open, so refusing a type on its behalf
     would be guesswork.
     """
+
+    # Only the script knows whether it holds a model, so the modes are offered
+    # and a script that does not implement them declines by exiting non-zero.
+    SUPPORTS_UNLOAD: bool = True
 
     def __init__(self, config: ProviderConfig) -> None:
         """Initialize the ScriptProvider.
@@ -173,7 +180,7 @@ class ScriptProvider(BaseProvider):
     def preload_model(
         self,
         model: str,
-        keep_alive: str = "15m",
+        keep_alive: str | int = "15m",
         context_size: int | None = None,
         extra_options: dict | None = None,
     ) -> None:
@@ -188,6 +195,8 @@ class ScriptProvider(BaseProvider):
         Args:
             model: Path to the script file.
             keep_alive: Forwarded to the script, which decides what it means.
+                A number is seconds, ``0`` means unload once idle and ``-1``
+                means keep resident; a string is a Go duration.
             context_size: Context window size in tokens, or None.
             extra_options: Additional script-specific settings, or None.
         """
@@ -213,6 +222,9 @@ class ScriptProvider(BaseProvider):
         self,
         model: str,
         file_paths: str | list[str] | None = None,
+        *,
+        keep_alive: str | int | None = None,
+        timeout: int | None = None,
     ) -> bool:
         """Ask the script to warm itself up via the 'warm_up' protocol mode.
 
@@ -224,22 +236,53 @@ class ScriptProvider(BaseProvider):
             model: Path to the script file.
             file_paths: Optional path or list of paths the script may want to
                 read or index ahead of the first call.
+            keep_alive: Forwarded to the script, which decides what it means.
+                Omitted from the payload when None.
+            timeout: Seconds to allow the script. Defaults to the timeout
+                registered for this provider.
 
         Returns:
             True if the script reported that it warmed up, False if it does not
             implement the mode or reported that it had nothing to do.
         """
         cmd = _resolve_interpreter(model)
+        effective_timeout = timeout if timeout is not None else self.config.timeout
         payload = {
             "mode": "warm_up",
             "file_path": normalize_file_paths(file_paths),
-            "timeout": self.config.timeout,
+            "keep_alive": keep_alive,
+            "timeout": effective_timeout,
         }
         try:
-            data = _run_script(cmd, payload, self.config.timeout)
+            data = _run_script(cmd, payload, effective_timeout)
         except Exception:
             return False
         return bool(data.get("warmed_up", True))
+
+    def unload_model(self, model: str, *, timeout: int | None = None) -> None:
+        """Ask the script to release what it holds, via the 'unload' mode.
+
+        Declining is the normal case, not a misconfiguration: most scripts hold
+        nothing between calls and exit non-zero on a mode they do not implement.
+        That is logged at debug level and otherwise ignored, unlike
+        ``preload_model()``, where a decline warns because the caller explicitly
+        asked for a load.
+
+        Args:
+            model: Path to the script file.
+            timeout: Seconds to allow the script. Defaults to the timeout
+                registered for this provider.
+        """
+        cmd = _resolve_interpreter(model)
+        effective_timeout = timeout if timeout is not None else self.config.timeout
+        payload = {
+            "mode": "unload",
+            "timeout": effective_timeout,
+        }
+        try:
+            _run_script(cmd, payload, effective_timeout)
+        except Exception as exc:
+            _log.debug("Script '%s' does not implement mode 'unload': %s", model, exc)
 
     def get_embedding(self, model: str, text: str) -> list[float]:
         """Generate a text embedding by spawning the target script in embed mode.

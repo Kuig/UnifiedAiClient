@@ -22,6 +22,20 @@ _PROVIDER_CONFIGS_LOCK = threading.Lock()
 _PROVIDERS: dict[str, BaseProvider] = {}
 _PROVIDERS_LOCK = threading.Lock()
 
+# --- Thread-safe registry of models a local provider currently holds resident ---
+# (provider_name, model) pairs, populated for providers declaring SUPPORTS_UNLOAD
+# and drained by cleanup(). Module-level rather than per-provider on purpose:
+# configure_provider() evicts the cached provider instance, so anything tracked
+# on the instance would be silently lost the moment someone reconfigures.
+_LOADED_MODELS: set[tuple[str, str]] = set()
+_LOADED_MODELS_LOCK = threading.Lock()
+
+# --- Names of every provider built in this process ---
+# Distinct from _PROVIDERS, which configure_provider() empties: a provider whose
+# instance was evicted may still hold module-level resources, and cleanup() has
+# to be able to reach it by name to release them.
+_BUILT_PROVIDERS: set[str] = set()
+
 # --- Resource cleanup registration flag ---
 _CLEANUP_REGISTERED = False
 _CLEANUP_LOCK = threading.Lock()
@@ -219,6 +233,7 @@ def get_provider(provider_name: str) -> BaseProvider:
             )
 
         _PROVIDERS[provider_name] = provider_instance
+        _BUILT_PROVIDERS.add(provider_name)
         return provider_instance
 
 
@@ -232,19 +247,78 @@ def _register_cleanup() -> None:
                 _CLEANUP_REGISTERED = True
 
 
-def cleanup() -> None:
-    """Purge all remote resource caches across all cached providers.
+def _record_loaded(provider_name: str, provider: BaseProvider, model: str) -> None:
+    """Remember that a provider now holds ``model`` resident, if it can.
 
-    Specifically deletes uploaded Google AI files to release cloud quota.
-    Called automatically at process exit via atexit, and can also be called
-    explicitly for eager cleanup (e.g. in finally blocks).
+    A no-op for providers that declare no residency, which is every cloud
+    endpoint: they hold nothing on the caller's behalf and have nothing to
+    release. For the rest this is what lets ``cleanup()`` free the VRAM at exit,
+    including after an unhandled exception or a Ctrl+C.
+
+    Args:
+        provider_name: Registry name the provider was reached by.
+        provider: The resolved provider instance.
+        model: Model identifier now loaded.
     """
+    if not provider.SUPPORTS_UNLOAD:
+        return
+    with _LOADED_MODELS_LOCK:
+        _LOADED_MODELS.add((provider_name.strip().lower(), model))
+
+
+def cleanup(*, unload_models: bool = True) -> None:
+    """Release what the providers are holding.
+
+    Two kinds of resource: remote ones, such as files uploaded to Google, which
+    are deleted to free cloud quota; and local models a provider is holding
+    resident, which are unloaded to free VRAM.
+
+    Called automatically at process exit via atexit, so it also covers an
+    unhandled exception and Ctrl+C. That is what makes an indefinite
+    ``keep_alive=-1`` a safe policy rather than a leak. It can also be called
+    explicitly for eager cleanup, for example in a finally block.
+
+    Args:
+        unload_models: Whether to also unload local models. Pass False to keep
+            them resident, for a caller that runs this mid-session to release
+            remote resources and expects the models to stay warm.
+    """
+    # Snapshot under the lock and work outside it. Everything below is network
+    # I/O, and _PROVIDERS_LOCK is not reentrant, so any path reaching
+    # get_provider() while it was held would deadlock.
+    #
+    # Names, not the cached instances: configure_provider() evicts an instance,
+    # but the resources it registered live at module level and outlive it. Going
+    # through get_provider() rebuilds whatever was evicted, so a provider that
+    # uploaded a file and was then reconfigured still gets asked to delete it.
     with _PROVIDERS_LOCK:
-        for provider in _PROVIDERS.values():
-            try:
-                provider.cleanup()
-            except Exception as exc:
-                _log.warning("cleanup() failed for a cached provider: %s", exc)
+        names = sorted(_BUILT_PROVIDERS)
+
+    for provider_name in names:
+        try:
+            get_provider(provider_name).cleanup()
+        except Exception as exc:
+            _log.warning("cleanup() failed for provider '%s': %s", provider_name, exc)
+
+    if not unload_models:
+        return
+
+    with _LOADED_MODELS_LOCK:
+        loaded = sorted(_LOADED_MODELS)
+        _LOADED_MODELS.clear()
+
+    for provider_name, model in loaded:
+        # Resolved by name for the same reason as above, and safe here only
+        # because _PROVIDERS_LOCK was released. One try per model: a provider
+        # that fails to release must not stop the others from being released.
+        try:
+            get_provider(provider_name).unload_model(model)
+        except Exception as exc:
+            _log.warning(
+                "cleanup() failed to unload '%s/%s': %s", provider_name, model, exc
+            )
+        else:
+            _log.info("cleanup() unloaded '%s/%s'", provider_name, model)
 
 
 def call_ai(
@@ -321,6 +395,9 @@ def call_ai(
     )
 
     prov = get_provider(provider)
+    # Recorded before the call, not after: a model that loaded and then timed
+    # out is resident all the same, and still has to be released at exit.
+    _record_loaded(provider, prov, model)
 
     # Resolve centralized sleep rate-limiting delay
     effective_sleep = sleep_time
@@ -370,7 +447,7 @@ def call_ai(
 def preload_model(
     provider: str,
     model: str,
-    keep_alive: str = "15m",
+    keep_alive: str | int = "15m",
     context_size: int | None = None,
     extra_options: dict | None = None,
 ) -> None:
@@ -395,8 +472,17 @@ def preload_model(
     Args:
         provider: Provider name (e.g. ``'ollama'``).
         model: Model identifier.
-        keep_alive: How long to keep model loaded (e.g. ``'15m'``, ``'1h'``).
-            Ollama-specific; ignored by other providers.
+        keep_alive: How long to keep the model loaded. A number is seconds,
+            ``0`` unloads it once idle and ``-1`` keeps it resident
+            indefinitely; a string is a Go duration such as ``'15m'`` or
+            ``'1h'``. Honoured by ``ollama`` and ``script``, ignored by every
+            other provider. Note the timer is an idle countdown that starts
+            when a request *finishes*, not a budget for the request: a model
+            serving a call is never evicted mid-wait.
+
+            Unlike ``context_size`` and ``extra_options``, this is not
+            persisted via ``configure_provider()``, because it is a property of
+            the request rather than of the provider.
         context_size: Context window size in tokens. Ollama maps this to
             ``num_ctx`` in the API payload. If provided, registered via
             ``configure_provider()`` so it persists across all ``call_ai()``
@@ -425,12 +511,16 @@ def preload_model(
     # get_provider after configure_provider so it picks up the new config
     prov = get_provider(provider)
     prov.preload_model(model, keep_alive, context_size=context_size, extra_options=extra_options)
+    _record_loaded(provider, prov, model)
 
 
 def warm_up(
     provider: str,
     model: str,
     file_paths: str | list[str] | None = None,
+    *,
+    keep_alive: str | int | None = None,
+    timeout: int | None = None,
 ) -> bool:
     """Pay a provider's one-off costs before the first real call.
 
@@ -473,6 +563,14 @@ def warm_up(
         file_paths: Optional path or list of paths to pre-upload. Only used by
             providers that keep a remote file store (currently ``google``) and
             by scripts that choose to act on it.
+        keep_alive: How long the model should stay resident once loaded, for
+            the providers that have a residency concept (``ollama``,
+            ``script``). Defaults to whatever was registered via
+            ``configure_provider()``, so a warm-up and the calls that follow it
+            agree. See ``preload_model()`` for the accepted values.
+        timeout: Seconds to wait for the warm-up. Defaults to the timeout
+            registered for the provider. Useful when a cold model takes longer
+            to load than a normal request takes to answer.
 
     Returns:
         True if something was actually warmed up, False if this provider had
@@ -483,13 +581,55 @@ def warm_up(
     _register_cleanup()
 
     try:
-        result = get_provider(provider).warm_up(model, file_paths)
+        prov = get_provider(provider)
+        result = prov.warm_up(
+            model, file_paths, keep_alive=keep_alive, timeout=timeout
+        )
     except Exception as exc:
         _log.warning("Warm-up failed for provider '%s' (%s): %s", provider, model, exc)
         return False
     if result:
+        _record_loaded(provider, prov, model)
         _log.info("Warm-up completed for provider '%s' model '%s'", provider, model)
     return result
+
+
+def unload_model(provider: str, model: str, *, timeout: int | None = None) -> None:
+    """Release a model a local provider is holding resident, freeing its VRAM.
+
+    The counterpart to ``preload_model()``. Only ``ollama`` and ``script`` have
+    a residency concept; for every other provider this is a no-op, because a
+    cloud endpoint holds nothing on the caller's behalf.
+
+    The model is dropped from the set ``cleanup()`` drains, so an explicit
+    unload is not attempted a second time at exit.
+
+    This function never raises. Failing to free VRAM is not a reason to bring
+    down the caller, and the next request will simply reload the model. Call
+    ``get_provider(...).unload_model(...)`` directly if you want the exception.
+
+    Args:
+        provider: Provider name (e.g. ``'ollama'``).
+        model: Model identifier to release.
+        timeout: Seconds to wait. Defaults to a deliberately short value rather
+            than to the provider's configured timeout: the request queues
+            behind any generation already in flight.
+
+    Example::
+
+        warm_up("ollama", "gemma4:12b", keep_alive=-1)
+        ...
+        unload_model("ollama", "gemma4:12b")
+    """
+    with _LOADED_MODELS_LOCK:
+        _LOADED_MODELS.discard((provider.strip().lower(), model))
+
+    try:
+        get_provider(provider).unload_model(model, timeout=timeout)
+    except Exception as exc:
+        _log.warning("Unload failed for provider '%s' (%s): %s", provider, model, exc)
+        return
+    _log.info("Unloaded model '%s' from provider '%s'", model, provider)
 
 
 def get_embedding(
@@ -507,5 +647,10 @@ def get_embedding(
     Returns:
         List of floats representing the embedding vector.
     """
+    # An embedding model occupies VRAM exactly like a chat model does, so it is
+    # registered for release the same way, and cleanup() has to be armed for it.
+    _register_cleanup()
+
     prov = get_provider(provider)
+    _record_loaded(provider, prov, model)
     return prov.get_embedding(model, text)

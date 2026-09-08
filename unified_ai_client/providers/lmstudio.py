@@ -20,6 +20,9 @@ class LmStudioProvider(OpenAiCompatProvider):
         self,
         model: str,
         file_paths: str | list[str] | None = None,
+        *,
+        keep_alive: str | int | None = None,
+        timeout: int | None = None,
     ) -> bool:
         """Load the model with a one-token completion.
 
@@ -31,9 +34,12 @@ class LmStudioProvider(OpenAiCompatProvider):
         Args:
             model: Model identifier to load.
             file_paths: Ignored. LM Studio inlines attachments into the request.
+            keep_alive: Ignored. This server has no residency control on
+                the OpenAI-compatible surface this adapter speaks.
+            timeout: Seconds to wait. Defaults to the configured timeout.
 
         Returns:
             Always True.
         """
-        self._warm_up_completion(model)
+        self._warm_up_completion(model, timeout)
         return True

@@ -537,6 +537,64 @@ class FileFixtureCase(ProviderRegistryIsolation):
         return cache[suffix]
 
 
+class TestUnloadSupportMatrix(unittest.TestCase):
+    """Which providers hold a model resident, and therefore can release one.
+
+    The table is the specification, and it covers every registered provider so
+    that a provider added without a row here fails the suite rather than
+    silently defaulting to "holds nothing".
+    """
+
+    _SUPPORTS_UNLOAD = {
+        "ollama": True,
+        "script": True,
+        "google": False,
+        "anthropic": False,
+        "openai": False,
+        "mistral": False,
+        "cohere": False,
+        "meta": False,
+        "groq": False,
+        "xai": False,
+        "lmstudio": False,
+        "llamacpp": False,
+    }
+
+    def test_table_covers_every_registered_provider(self) -> None:
+        self.assertEqual(
+            set(self._SUPPORTS_UNLOAD), set(_PROVIDER_CLASSES),
+            "a provider was added or removed without updating this table",
+        )
+
+    def test_declared_support_matches_the_table(self) -> None:
+        for name, expected in self._SUPPORTS_UNLOAD.items():
+            with self.subTest(provider=name):
+                cls = _provider_class_by_name(name)
+                self.assertIs(cls.SUPPORTS_UNLOAD, expected)
+
+    def test_every_provider_exposes_the_hook(self) -> None:
+        """Concrete on the base class, so no provider can fail to have it."""
+        for name in self._SUPPORTS_UNLOAD:
+            with self.subTest(provider=name):
+                cls = _provider_class_by_name(name)
+                self.assertTrue(callable(cls.unload_model))
+
+    def test_only_declaring_providers_override_it(self) -> None:
+        """The flag and the implementation must not drift apart.
+
+        A provider that overrides unload_model without declaring the flag would
+        never be asked to unload; one that declares it without overriding would
+        silently do nothing at cleanup.
+        """
+        from unified_ai_client.providers.base import BaseProvider
+
+        for name, declared in self._SUPPORTS_UNLOAD.items():
+            with self.subTest(provider=name):
+                cls = _provider_class_by_name(name)
+                overrides = cls.unload_model is not BaseProvider.unload_model
+                self.assertIs(overrides, declared)
+
+
 class TestFileSupportMatrix(FileFixtureCase):
     """Every provider declares what it can carry, and refuses the rest.
 

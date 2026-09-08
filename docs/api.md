@@ -45,8 +45,8 @@ def call_ai(
 | `temperature` | `float` | `0.7` | Sampling temperature. |
 | `thinking` | `bool \| str` | `"default"` | `True` / `False` to force reasoning on or off, `"default"` to leave it to the provider. See [Thinking and Reasoning](reasoning.md). |
 | `format_json` | `bool` | `False` | Forces the model to respond in valid JSON. |
-| `timeout` | `int` | `300` | Network timeout in seconds. |
-| `max_retries` | `int` | `3` | Retry attempts on network and rate-limit failures. |
+| `timeout` | `int` | `300` | Network timeout in seconds. Since a non-streaming request sends nothing until the answer is complete, this behaves as a deadline for the whole call. |
+| `max_retries` | `int` | `3` | Retry attempts on network and rate-limit failures, a timeout included. See the note below. |
 | `retry_base_delay` | `float` | `5.0` | Initial backoff delay in seconds, doubled on each attempt. |
 | `top_k` | `int` | `64` | Sampling parameter. |
 | `top_p` | `float` | `0.95` | Sampling parameter. |
@@ -55,6 +55,11 @@ def call_ai(
 | `extra_options` | `dict \| None` | `None` | Arbitrary provider-specific options merged into the payload last, overriding config-level values for the same key. |
 | `tools` | `list[ToolDefinition] \| None` | `None` | Tools the model may call. See [Tool Calling](tool-calling.md). |
 | `tool_results` | `list[ToolResult] \| None` | `None` | Results of previously requested tool calls, for the follow-up turn. When present, `prompt` is **not** re-appended to `messages`. |
+
+A timeout is a retryable failure like any other, so the same request is sent again up to
+`max_retries` times with exponential backoff. A call that keeps timing out therefore occupies
+a local model for roughly `(max_retries + 1) x timeout` plus the backoff, not for `timeout`.
+Pass `max_retries=0` where a deadline has to be a real deadline.
 
 **Returns:** an [`AiResponse`](#airesponse) with the response text, token counts, any
 reasoning trace, and any tool calls the model requested.
@@ -99,13 +104,16 @@ own. `RuntimeError` if the provider returns no vector.
 
 Pays a provider's one-off costs before the first real call, so they are not charged to
 whichever `call_ai()` happens to run first. Never raises: see
-[Warm-up, Preloading and Cleanup](warm-up.md).
+[Warm-up, Residency and Cleanup](warm-up.md).
 
 ```python
 def warm_up(
     provider: str,
     model: str,
     file_paths: str | list[str] | None = None,
+    *,
+    keep_alive: str | int | None = None,
+    timeout: int | None = None,
 ) -> bool:
 ```
 
@@ -114,6 +122,8 @@ def warm_up(
 | `provider` | `str` | required | Provider name. |
 | `model` | `str` | required | Model identifier to warm up. |
 | `file_paths` | `str \| list[str] \| None` | `None` | Files to upload ahead of time. Used only by providers with a remote file store (currently `google`) and by scripts that act on it. Ignored elsewhere. |
+| `keep_alive` | `str \| int \| None` | `None` | How long the model stays resident once loaded. `None` uses whatever `configure_provider()` registered, so a warm-up and the calls after it agree. Values as in `preload_model`. Honoured by `ollama` and `script`. |
+| `timeout` | `int \| None` | `None` | Seconds to wait for the warm-up. `None` uses the provider's configured timeout. Useful when a cold model takes longer to load than a normal request takes to answer. |
 
 **Returns:** `True` if something was actually warmed up, `False` if the provider had
 nothing to do or the warm-up failed.
@@ -128,7 +138,7 @@ load as a no-op but still registers the settings.
 def preload_model(
     provider: str,
     model: str,
-    keep_alive: str = "15m",
+    keep_alive: str | int = "15m",
     context_size: int | None = None,
     extra_options: dict | None = None,
 ) -> None:
@@ -138,9 +148,44 @@ def preload_model(
 |---|---|---|---|
 | `provider` | `str` | required | Provider name, for example `"ollama"`. |
 | `model` | `str` | required | Model identifier to preload. |
-| `keep_alive` | `str` | `"15m"` | How long the model stays resident, for example `"15m"`, `"1h"`, `"0"`. Ollama-specific. |
+| `keep_alive` | `str \| int` | `"15m"` | How long the model stays resident. A number is seconds, `0` unloads it once idle, `-1` keeps it resident indefinitely; a string is a Go duration such as `"15m"` or `"1h"`. Honoured by `ollama` and `script`, ignored elsewhere. Unlike the two below it is not persisted via `configure_provider()`, being a property of the request rather than of the provider. |
 | `context_size` | `int \| None` | `None` | Context window in tokens, mapped to `num_ctx`. Registered so it persists across calls. Pass it here rather than per-call to stop Ollama reloading the model with a different window mid-session. |
 | `extra_options` | `dict \| None` | `None` | Further provider-specific settings, for example `{"visual_token_budget": 1120}`. Merged with anything already registered. |
+
+The residency timer is an idle countdown that starts when a request *finishes*, not a
+budget for the request: a model serving a call is never evicted mid-wait.
+
+### `unload_model`
+
+Releases a model a local provider is holding resident, freeing its VRAM. The counterpart
+to `preload_model`. Only `ollama` and `script` have a residency concept; for every other
+provider this is a no-op, because a cloud endpoint holds nothing on the caller's behalf.
+
+The model is dropped from the set `cleanup()` drains, so an explicit unload is not
+attempted a second time at exit. Never raises: failing to free VRAM is not a reason to
+bring down the caller, and the next request simply reloads the model. Call
+`get_provider(...).unload_model(...)` if you want the exception instead.
+
+```python
+def unload_model(
+    provider: str,
+    model: str,
+    *,
+    timeout: int | None = None,
+) -> None:
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `provider` | `str` | required | Provider name, for example `"ollama"`. |
+| `model` | `str` | required | Model identifier to release. |
+| `timeout` | `int \| None` | `None` | Seconds to wait. `None` uses a deliberately short default rather than the provider's configured timeout: the request queues behind any generation already in flight. |
+
+```python
+warm_up("ollama", "gemma4:12b", keep_alive=-1)
+...
+unload_model("ollama", "gemma4:12b")
+```
 
 ### `configure_provider`
 
@@ -242,13 +287,22 @@ response = call_ai(provider="ollama", model="gemma4:12b", prompt="Hello")
 
 ### `cleanup`
 
-Purges remote and local resources held by every cached provider, for example deleting
-uploaded Gemini files to release quota. Registered to run at process exit via `atexit` on
-the first `call_ai()` or `warm_up()`, and callable manually for eager cleanup.
+Releases what every cached provider is holding. Two kinds of resource: remote ones, such
+as files uploaded to Gemini, which are deleted to free cloud quota; and local models still
+resident, which are unloaded to free VRAM.
+
+Registered to run at process exit via `atexit` on the first `call_ai()`, `warm_up()` or
+`get_embedding()`, so it also covers an unhandled exception and a Ctrl+C. That is what
+makes an indefinite `keep_alive=-1` a safe policy rather than a leak. Callable manually
+for eager cleanup.
 
 ```python
-def cleanup() -> None:
+def cleanup(*, unload_models: bool = True) -> None:
 ```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unload_models` | `bool` | `True` | Whether to also unload local models. Pass `False` to release the remote resources but leave the models warm, for a caller that runs this mid-session. |
 
 ### `load_secrets`
 
@@ -365,9 +419,11 @@ to the request.
 
 The abstract base every adapter subclasses. Exported for consumers that call a provider
 directly through `get_provider()`, and for anyone implementing an adapter out of tree. Its
-class-level `SUPPORTED_FILE_TYPES` declares which file classes the adapter accepts; its
-`warm_up()` is concrete and returns `False`, because "nothing to warm up" is a valid
-answer.
+class-level `SUPPORTED_FILE_TYPES` declares which file classes the adapter accepts, and
+`SUPPORTS_UNLOAD` whether it holds a model resident at all. Both `warm_up()` and
+`unload_model()` are concrete rather than abstract, because "nothing to warm up" and
+"nothing to release" are valid answers, and an adapter written before either hook existed
+keeps working unchanged.
 
 ## Exceptions
 

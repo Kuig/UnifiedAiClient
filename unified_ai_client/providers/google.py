@@ -17,6 +17,27 @@ from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.google")
 
+_UPLOADED_FILES: dict[str, Any] = {}
+"""Remote file references, keyed by absolute local path.
+
+Module-level rather than per-instance because ``configure_provider('google')``
+evicts the cached provider instance. Held on the instance, this dict went with
+it: the uploaded files were left on the remote quota with nothing holding a
+reference to delete them, and the next call re-uploaded every one of them.
+
+Assumes a single Google identity per process, which is what ``load_secrets()``
+provides. The key is the path alone, so a second API key in the same process
+would reuse references it cannot read.
+"""
+
+_UPLOADED_FILES_LOCK = threading.Lock()
+"""Guards reads and writes of ``_UPLOADED_FILES``, not the upload itself.
+
+Two threads asking for the same new file can still upload it twice, which is the
+behaviour this cache has always had. Serialising the upload window would mean
+holding a lock across tens of seconds of network I/O.
+"""
+
 
 class GoogleProvider(BaseProvider):
     """Google AI (Gemini) provider adapter utilizing the google.genai SDK.
@@ -40,8 +61,6 @@ class GoogleProvider(BaseProvider):
         """
         self.config = config
         self.api_key = api_key
-        # dict[abs_path, FileRef] — avoids re-uploading the same file
-        self._uploaded_files: dict[str, Any] = {}
         self._client: genai.Client | None = None
         self._client_lock = threading.Lock()
 
@@ -85,12 +104,14 @@ class GoogleProvider(BaseProvider):
             RuntimeError: On upload failure or polling timeout.
         """
         abs_path = os.path.abspath(file_path)
-        if abs_path in self._uploaded_files:
+        with _UPLOADED_FILES_LOCK:
+            cached = _UPLOADED_FILES.get(abs_path)
+        if cached is not None:
             _log.info(
                 "File '%s' already uploaded, reusing cached reference",
                 os.path.basename(file_path),
             )
-            return self._uploaded_files[abs_path]
+            return cached
 
         client = self._get_client()
         from pathlib import Path
@@ -106,14 +127,16 @@ class GoogleProvider(BaseProvider):
                         os.path.basename(file_path),
                         elapsed + 1,
                     )
-                    self._uploaded_files[abs_path] = file_ref
+                    with _UPLOADED_FILES_LOCK:
+                        _UPLOADED_FILES[abs_path] = file_ref
                     return file_ref
                 elif "FAILED" in state_str:
                     raise RuntimeError("Google file processing failed.")
                 elif "PROCESSING" in state_str:
                     time.sleep(1)
                 else:
-                    self._uploaded_files[abs_path] = file_ref
+                    with _UPLOADED_FILES_LOCK:
+                        _UPLOADED_FILES[abs_path] = file_ref
                     return file_ref
             raise TimeoutError(
                 f"Google file upload polling timed out after {upload_poll_timeout}s"
@@ -411,7 +434,7 @@ class GoogleProvider(BaseProvider):
     def preload_model(
         self,
         model: str,
-        keep_alive: str = "15m",
+        keep_alive: str | int = "15m",
         context_size: int | None = None,
         extra_options: dict | None = None,
     ) -> None:
@@ -429,6 +452,9 @@ class GoogleProvider(BaseProvider):
         self,
         model: str,
         file_paths: str | list[str] | None = None,
+        *,
+        keep_alive: str | int | None = None,
+        timeout: int | None = None,
     ) -> bool:
         """Build the client, open the connection, and pre-upload any files.
 
@@ -445,6 +471,11 @@ class GoogleProvider(BaseProvider):
         Args:
             model: Model identifier to validate and warm the connection with.
             file_paths: Optional path or list of paths to upload ahead of time.
+            keep_alive: Ignored. Google holds no model on the caller's
+                behalf, so it has no residency to control.
+            timeout: Ignored. This warm-up goes through the genai SDK,
+                which manages its own deadlines; the upload polling has
+                its own ``upload_poll_timeout`` setting instead.
 
         Returns:
             Always True: this provider always has something to warm up.
@@ -500,17 +531,27 @@ class GoogleProvider(BaseProvider):
         return [float(x) for x in embeddings[0].values]
 
     def cleanup(self) -> None:
-        """Delete all uploaded files from Google remote cloud cache."""
-        if not self._uploaded_files:
+        """Delete every uploaded file from Google's remote store.
+
+        Clears the module-level cache, so files uploaded by an earlier instance
+        of this provider are released too. The client is built from the current
+        credentials; if those have changed since the upload the delete fails and
+        is swallowed, which is the same outcome as any other transient failure
+        here.
+        """
+        with _UPLOADED_FILES_LOCK:
+            refs = list(_UPLOADED_FILES.values())
+        if not refs:
             return
         try:
             client = self._get_client()
         except Exception:
             return
-        for ref in list(self._uploaded_files.values()):
+        for ref in refs:
             try:
                 client.files.delete(name=ref.name)
             except Exception:
                 pass
-        self._uploaded_files.clear()
+        with _UPLOADED_FILES_LOCK:
+            _UPLOADED_FILES.clear()
         _log.info("Google: remote file cache cleared.")

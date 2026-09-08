@@ -34,11 +34,12 @@ Supported providers:
 | [docs/multimodal.md](docs/multimodal.md) | Attaching files, the per-provider support matrix, and how unsupported files are refused. |
 | [docs/reasoning.md](docs/reasoning.md) | The `thinking` parameter, what each provider does with it, and reading the trace back. |
 | [docs/tool-calling.md](docs/tool-calling.md) | Defining tools, the two-turn exchange, provider compatibility. |
-| [docs/warm-up.md](docs/warm-up.md) | `warm_up()`, `preload_model()` and `cleanup()`: preparing a provider and releasing what it holds. |
+| [docs/warm-up.md](docs/warm-up.md) | `warm_up()`, `preload_model()`, `unload_model()` and `cleanup()`: preparing a provider and releasing what it holds. |
 | [docs/script-protocol.md](docs/script-protocol.md) | The JSON stdin/stdout contract any script must satisfy to act as a provider. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Internal design: the codemap, the layer boundaries, and the invariants. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development install, the test suite, and how to add a provider. |
 | [COMPARISON.md](COMPARISON.md) | How this library compares with LiteLLM, aisuite and the OpenAI SDK. |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in every released version. |
 
 ---
 
@@ -54,7 +55,7 @@ pip install -e /path/to/UnifiedAiClient
 **Production / other machines**: declare in your project's `requirements.txt`:
 
 ```text
-unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.4.0
+unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.5.0
 ```
 
 then run `pip install -r requirements.txt`.
@@ -187,21 +188,23 @@ the model and returns any `ToolCall` the model requests. The execution loop stay
 All providers support it. The two-turn exchange is worked through in
 [docs/tool-calling.md](docs/tool-calling.md).
 
-### Warm-up and Preloading
+### Warm-up, Residency and Preloading
 
 Every provider charges some costs once per process: an SDK import, a TLS handshake, a
 model load, a file upload. Without a warm-up, all of it lands on whichever `call_ai()`
 runs first.
 
 ```python
-from unified_ai_client import warm_up
+from unified_ai_client import warm_up, unload_model
 
 warm_up("google", "gemini-2.5-flash", file_paths=["paper.pdf"])
+warm_up("ollama", "gemma4:12b", keep_alive=-1)   # pin it in VRAM
+unload_model("ollama", "gemma4:12b")             # release it
 ```
 
-`warm_up()` works on every provider and never raises. On Ollama, `preload_model()` also
-pins the model in VRAM with the right context window. Both, plus the `cleanup()` that
-releases what they upload, are covered in [docs/warm-up.md](docs/warm-up.md).
+`warm_up()` works on every provider and never raises. Where a model stays resident,
+`keep_alive` sets how long and `unload_model()` releases it early. These, `preload_model()`
+and the `cleanup()` that frees what they hold are in [docs/warm-up.md](docs/warm-up.md).
 
 ### Text Embeddings
 
@@ -244,6 +247,8 @@ response = call_ai(
 
 ### Resource Cleanup
 
-`cleanup()` deletes files uploaded to a remote provider. It is registered with `atexit` on
-the first `call_ai()` or `warm_up()`, so you normally never call it; see
+`cleanup()` deletes files uploaded to a remote provider and unloads local models still
+resident. It is registered with `atexit` on the first `call_ai()`, `warm_up()` or
+`get_embedding()`, so you normally never call it, and it runs after an unhandled exception or
+a Ctrl+C too. Pass `unload_models=False` to keep the models warm; see
 [docs/warm-up.md](docs/warm-up.md) for eager cleanup.

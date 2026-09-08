@@ -148,7 +148,7 @@ behaviour:
 | Option | Providers | Default | Description |
 |---|---|---|---|
 | `context_size` | `ollama` | unset | Context window in tokens, sent as `num_ctx`. Prefer setting it through `preload_model()`, so Ollama allocates VRAM once instead of reloading on the first call. |
-| `keep_alive` | `ollama` | `"15m"` | How long the model stays resident after a call. `"0"` unloads it immediately. |
+| `keep_alive` | `ollama`, `script` | `"15m"` | How long the model stays resident once idle. A number is seconds, `0` unloads it, `-1` keeps it resident indefinitely; a string is a Go duration such as `"15m"`. Set here it governs every call, warm-up and embedding for the provider; `warm_up()` and `preload_model()` take it per call. |
 | `max_tokens` | all | unset | Response length cap, mapped per provider (`num_predict` on Ollama, `max_output_tokens` on Google). Also a per-call argument, which wins. |
 | `use_generate` | `ollama` | `False` | Routes to `/api/generate` instead of `/api/chat`. That endpoint carries no tool calling and does not separate the thinking trace, so leave it off unless a model requires it. |
 | `disable_safety` | `google` | `False` | Turns off Gemini's safety filters. |

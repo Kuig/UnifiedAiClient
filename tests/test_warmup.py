@@ -213,7 +213,7 @@ class TestWarmUpOllama(unittest.TestCase):
             result = provider.warm_up("gemma4:12b")
 
         self.assertIs(result, True)
-        preload.assert_called_once_with("gemma4:12b", "15m")
+        preload.assert_called_once_with("gemma4:12b", "15m", timeout=None)
 
     def test_warm_up_uses_keep_alive_from_config(self) -> None:
         """keep_alive must come from config, not from the signature default.
@@ -233,7 +233,75 @@ class TestWarmUpOllama(unittest.TestCase):
         with patch.object(provider, "preload_model") as preload:
             provider.warm_up("gemma4:12b")
 
-        preload.assert_called_once_with("gemma4:12b", "45m")
+        preload.assert_called_once_with("gemma4:12b", "45m", timeout=None)
+
+    def test_explicit_keep_alive_beats_config(self) -> None:
+        """The argument is the top of the precedence chain.
+
+        Config still wins over the default, but an explicit value has to win
+        over config, or a caller cannot pin one model without reconfiguring the
+        provider for every other call in the process.
+        """
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(
+            ProviderConfig(
+                url="http://localhost:11434",
+                extra_options={"keep_alive": "45m"},
+            )
+        )
+        with patch.object(provider, "preload_model") as preload:
+            provider.warm_up("gemma4:12b", keep_alive=-1)
+
+        preload.assert_called_once_with("gemma4:12b", -1, timeout=None)
+
+    def test_keep_alive_and_timeout_reach_the_wire(self) -> None:
+        """The whole point of A2: no configure_provider() in sight."""
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(ProviderConfig(url="http://localhost:11434"))
+        captured: dict = {}
+
+        def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            captured["timeout"] = timeout
+            return {}
+
+        with patch.object(provider, "_post", side_effect=fake_post):
+            provider.warm_up("gemma4:12b", keep_alive=-1, timeout=600)
+
+        self.assertEqual(captured["endpoint"], "/api/chat")
+        self.assertEqual(captured["payload"]["keep_alive"], -1)
+        self.assertEqual(captured["payload"]["messages"], [])
+        self.assertEqual(captured["timeout"], 600)
+
+    def test_warm_up_falls_back_to_configured_timeout(self) -> None:
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(
+            ProviderConfig(url="http://localhost:11434", timeout=123)
+        )
+        with patch.object(provider, "_post", return_value={}) as post:
+            provider.warm_up("gemma4:12b")
+
+        self.assertEqual(post.call_args.args[2], 123)
+
+    def test_warm_up_logs_the_effective_values(self) -> None:
+        """A1: the numbers that went on the wire must be readable from a log."""
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(ProviderConfig(url="http://localhost:11434"))
+        with patch.object(provider, "_post", return_value={}):
+            with self.assertLogs(
+                "unified_ai_client.providers.ollama", level="DEBUG"
+            ) as cm:
+                provider.warm_up("gemma4:12b", keep_alive=-1, timeout=600)
+
+        self.assertTrue(
+            any("keep_alive=-1" in line and "600" in line for line in cm.output),
+            f"no log line named both the keep_alive and the timeout: {cm.output}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +459,10 @@ def main() -> None:
         with open(SIDECAR, "w", encoding="utf-8") as fh:
             json.dump(req, fh)
         print(json.dumps({"preloaded": True}))
+    elif mode == "unload":
+        with open(SIDECAR, "w", encoding="utf-8") as fh:
+            json.dump(req, fh)
+        print(json.dumps({}))
     else:
         print(f"Unsupported mode: {mode}", file=sys.stderr)
         sys.exit(1)
@@ -531,7 +603,9 @@ class TestClientWarmUp(ProviderRegistryIsolation):
             result = warm_up("google", "gemini-2.5-flash", "/tmp/a.pdf")
 
         self.assertIs(result, True)
-        pw.assert_called_once_with("gemini-2.5-flash", "/tmp/a.pdf")
+        pw.assert_called_once_with(
+            "gemini-2.5-flash", "/tmp/a.pdf", keep_alive=None, timeout=None
+        )
 
     def test_warm_up_swallows_provider_errors(self) -> None:
         """A failed warm-up is a missed optimisation, not an error.
@@ -593,16 +667,15 @@ class TestWarmUpLive(unittest.TestCase):
                 "google_api_key not found in secrets.json or environment variables"
             )
         from unified_ai_client import warm_up
-        from unified_ai_client.client import get_provider
 
         tmp = _make_text_file("Warm-up upload test.")
         try:
             result = warm_up("google", "gemini-2.5-flash", tmp)
             self.assertIs(result, True)
-            provider = get_provider("google")
+            from unified_ai_client.providers import google as google_mod
             self.assertIn(
                 os.path.abspath(tmp),
-                provider._uploaded_files,
+                google_mod._UPLOADED_FILES,
                 "warm_up must leave the file in the same cache call_ai() reads",
             )
         finally:
@@ -621,6 +694,123 @@ class TestWarmUpLive(unittest.TestCase):
             self.skipTest("No models available in LM Studio")
         from unified_ai_client import warm_up
         self.assertIs(warm_up("lmstudio", models[0]["id"]), True)
+
+
+# ---------------------------------------------------------------------------
+# 9. Unloading
+# ---------------------------------------------------------------------------
+
+
+class TestUnloadModel(ProviderRegistryIsolation):
+    """unload_model() is the named counterpart to preload_model()."""
+
+    def test_base_provider_unload_is_a_concrete_no_op(self) -> None:
+        """Like cleanup(), and unlike preload_model(), it must not be abstract.
+
+        A third-party provider written before this hook existed has to keep
+        instantiating and answering "nothing to release".
+        """
+        from unified_ai_client.providers.base import BaseProvider
+
+        class MinimalProvider(BaseProvider):
+            def call(self, request):  # noqa: ANN001, ANN201
+                raise NotImplementedError
+
+            def preload_model(self, model, keep_alive="15m", context_size=None,
+                              extra_options=None):  # noqa: ANN001, ANN201
+                raise NotImplementedError
+
+            def get_embedding(self, model, text):  # noqa: ANN001, ANN201
+                raise NotImplementedError
+
+        provider = MinimalProvider()
+        self.assertIs(provider.SUPPORTS_UNLOAD, False)
+        self.assertIsNone(provider.unload_model("anything"))
+
+    def test_ollama_sends_the_documented_unload_request(self) -> None:
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(ProviderConfig(url="http://localhost:11434"))
+        captured: dict = {}
+
+        def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            captured["timeout"] = timeout
+            return {}
+
+        with patch.object(provider, "_post", side_effect=fake_post):
+            provider.unload_model("gemma4:12b")
+
+        self.assertEqual(captured["endpoint"], "/api/chat")
+        self.assertEqual(
+            captured["payload"],
+            {"model": "gemma4:12b", "messages": [], "keep_alive": 0},
+        )
+
+    def test_ollama_unload_does_not_wait_the_full_provider_timeout(self) -> None:
+        """An unload queues behind a running generation; it must not stall exit."""
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(
+            ProviderConfig(url="http://localhost:11434", timeout=600)
+        )
+        with patch.object(provider, "_post", return_value={}) as post:
+            provider.unload_model("gemma4:12b")
+
+        self.assertLess(post.call_args.args[2], 600)
+
+        with patch.object(provider, "_post", return_value={}) as post:
+            provider.unload_model("gemma4:12b", timeout=5)
+        self.assertEqual(post.call_args.args[2], 5)
+
+    def test_script_forwards_the_unload_mode(self) -> None:
+        from unified_ai_client.providers.script import ScriptProvider
+
+        sidecar = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        sidecar.close()
+        provider = ScriptProvider(ProviderConfig(timeout=30))
+        script = _make_script(
+            _WARMING_SCRIPT.replace("SIDECAR", repr(sidecar.name))
+        )
+        try:
+            provider.unload_model(script)
+            with open(sidecar.name, encoding="utf-8") as fh:
+                payload = json.load(fh)
+        finally:
+            os.unlink(sidecar.name)
+
+        self.assertEqual(payload["mode"], "unload")
+        self.assertEqual(payload["timeout"], 30)
+
+    def test_script_declining_the_mode_is_not_an_error(self) -> None:
+        """Most scripts hold nothing between calls; that is the normal case."""
+        from unified_ai_client.providers.script import ScriptProvider
+
+        provider = ScriptProvider(ProviderConfig(timeout=30))
+        script = _make_script(_LEGACY_SCRIPT.replace("SIDECAR", repr("")))
+
+        self.assertIsNone(provider.unload_model(script))
+
+    def test_client_unload_swallows_provider_errors(self) -> None:
+        """Failing to free VRAM must not bring down the caller."""
+        from unified_ai_client import unload_model
+        from unified_ai_client.client import get_provider
+
+        provider = get_provider("ollama")
+        with patch.object(
+            provider, "unload_model", side_effect=RuntimeError("server gone")
+        ):
+            with self.assertLogs("unified_ai_client.client", level="WARNING") as cm:
+                self.assertIsNone(unload_model("ollama", "gemma4:12b"))
+
+        self.assertTrue(any("server gone" in line for line in cm.output))
+
+    def test_client_unload_on_a_provider_without_residency(self) -> None:
+        """Every cloud provider inherits the no-op and must not raise."""
+        from unified_ai_client import unload_model
+
+        self.assertIsNone(unload_model("google", "gemini-2.5-flash"))
 
 
 if __name__ == "__main__":

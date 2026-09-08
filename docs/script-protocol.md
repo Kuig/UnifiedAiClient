@@ -74,16 +74,23 @@ is being requested:
 | `"embed"` | `get_embedding()` | Embedding vector generation. Optional. |
 | `"warm_up"` | `warm_up()` | Prepare for a later call without generating. Optional. |
 | `"preload"` | `preload_model()` | Load a model or resource into memory. Optional. |
+| `"unload"` | `unload_model()`, `cleanup()` | Release a loaded model or resource. Optional. |
 
 Scripts that only implement `"generate"` may treat any other `mode` as an error
 (exit non-zero with a descriptive stderr message). Scripts that also implement
-`"embed"`, `"warm_up"`, or `"preload"` must branch on this field and handle
-each payload they claim to support.
+`"embed"`, `"warm_up"`, `"preload"`, or `"unload"` must branch on this field and
+handle each payload they claim to support.
 
-Only `"generate"` is mandatory. The other three modes are opt-in, and declining
+Only `"generate"` is mandatory. The other four modes are opt-in, and declining
 them costs nothing: `warm_up()` reports that there was nothing to warm up,
-`preload_model()` emits a warning and moves on, and `get_embedding()` raises for
-the caller who asked for something the script cannot do.
+`preload_model()` emits a warning and moves on, `unload_model()` records the
+decline at debug level and returns, and `get_embedding()` raises for the caller
+who asked for something the script cannot do.
+
+A script that holds a model between calls should implement `"preload"` and
+`"unload"` as a pair. `cleanup()` sends `"unload"` at process exit for every
+model the script was asked to load, which is what stops a long-lived resource
+outliving the process that asked for it.
 
 ### 2.2 Input: `generate` payload (stdin)
 
@@ -391,6 +398,7 @@ run first.
 |---|---|---|---|
 | `mode` | `string` | ✅ Yes | Always `"warm_up"` for this payload. |
 | `file_path` | `array[string]` | ✅ Yes | Files the caller expects to attach later, so the script can read or index them ahead of time. Empty list if none. Never null. |
+| `keep_alive` | `string \| int \| null` | ✅ Yes | How long the caller wants anything loaded here kept resident, or null to let the script decide. Same values as in `preload`. |
 | `timeout` | `int` | ✅ Yes | Maximum seconds allowed for the warm-up. |
 
 The script path is not sent: the script already knows where it lives.
@@ -400,6 +408,7 @@ The script path is not sent: the script already knows where it lives.
 {
     "mode": "warm_up",
     "file_path": ["/home/user/docs/paper.pdf"],
+    "keep_alive": -1,
     "timeout": 300
 }
 ```
@@ -430,7 +439,7 @@ model should be loaded with.
 | Field | Type | Always present | Description |
 |---|---|---|---|
 | `mode` | `string` | ✅ Yes | Always `"preload"` for this payload. |
-| `keep_alive` | `string` | ✅ Yes | How long the caller wants the model kept resident (e.g. `"15m"`). The script decides what this means. |
+| `keep_alive` | `string \| int` | ✅ Yes | How long the caller wants the model kept resident. A number is seconds, `0` means unload once idle, `-1` means keep resident indefinitely; a string is a Go duration such as `"15m"`. The script decides what this means in its own terms. |
 | `context_size` | `int \| null` | ✅ Yes | Context window size in tokens, or null. |
 | `extra_options` | `dict \| null` | ✅ Yes | Script-specific settings, or null. |
 | `timeout` | `int` | ✅ Yes | Maximum seconds allowed for the preload. |
@@ -459,8 +468,43 @@ model should be loaded with.
 }
 ```
 
+### 2.10 Input: `unload` payload (stdin, optional)
+
+Sent by `unload_model()`, and by `cleanup()` at process exit for every model the
+script was asked to load. The counterpart to `preload`: it asks the script to
+release whatever it is holding.
+
+| Field | Type | Always present | Description |
+|---|---|---|---|
+| `mode` | `string` | ✅ Yes | Always `"unload"` for this payload. |
+| `timeout` | `int` | ✅ Yes | Maximum seconds allowed for the unload. |
+
+The model is not named, for the same reason the script path is not: the script
+path *is* the model as far as this provider is concerned.
+
+**Example input:**
+```json
+{
+    "mode": "unload",
+    "timeout": 300
+}
+```
+
+### 2.11 Output: `unload` response (stdout, optional)
+
+No fields are defined and none are inspected. Print `{}`.
+
+**Example output:**
+```json
+{}
+```
+
+Declining this mode is the normal case rather than an error: most scripts hold
+nothing between calls. A non-zero exit is recorded at debug level and otherwise
+ignored, and `unload_model()` returns to its caller either way.
+
 > [!IMPORTANT]
-> Both modes must print a **valid JSON object** on stdout, even an empty `{}`.
+> Every mode must print a **valid JSON object** on stdout, even an empty `{}`.
 > Printing nothing is a protocol violation and will be read as a failure.
 
 ---
@@ -651,13 +695,30 @@ def handle_preload(request: dict) -> dict:
     Returns:
         A response dict with a 'preloaded' key.
     """
-    keep_alive: str = request.get("keep_alive", "15m")
+    keep_alive: str | int = request.get("keep_alive", "15m")
     context_size: int | None = request.get("context_size")
 
     # Replace with a real model load using these settings.
     _ = (keep_alive, context_size)
 
     return {"preloaded": True}
+
+
+def handle_unload(request: dict) -> dict:
+    """Handle an unload request and return the response dict.
+
+    Remove this function entirely if the script holds no resident model. If you
+    kept handle_preload, keep this one too: they are a pair, and cleanup() sends
+    this mode at process exit for every model the script was asked to load.
+
+    Args:
+        request: The parsed request dict.
+
+    Returns:
+        An empty response dict. No fields are inspected.
+    """
+    # Replace with a real model release.
+    return {}
 
 
 def main() -> None:
@@ -674,6 +735,8 @@ def main() -> None:
             response = handle_warm_up(request)
         elif mode == "preload":
             response = handle_preload(request)
+        elif mode == "unload":
+            response = handle_unload(request)
         else:
             print(f"Unsupported mode: '{mode}'", file=sys.stderr)
             sys.exit(1)
@@ -715,12 +778,14 @@ For each pre-existing script to be integrated as a `"script"` provider:
   print statements.
 - [ ] **Respect the timeout** if the script runs long operations (optional but
   recommended).
-- [ ] **Consider `warm_up` and `preload`** if the script pays a startup cost that
-  a first `generate` call would otherwise absorb: loading a model, opening an
-  index, reading large attachments. Both modes are optional and cost nothing to
-  skip, since an unknown mode already exits non-zero and the library treats that
-  as "nothing to do". Implement them only if the script has real work to move
-  out of the first call.
+- [ ] **Consider `warm_up`, `preload` and `unload`** if the script pays a startup
+  cost that a first `generate` call would otherwise absorb: loading a model,
+  opening an index, reading large attachments. All three modes are optional and
+  cost nothing to skip, since an unknown mode already exits non-zero and the
+  library treats that as "nothing to do". Implement them only if the script has
+  real work to move out of the first call. If you implement `preload`, implement
+  `unload` as well: without it, whatever the script loaded outlives the process
+  that asked for it.
 - [ ] **If the script has its own dependencies:** create a `.venv` in the script's
   directory and install requirements there. ScriptProvider will detect and use it
   automatically. No changes to the calling project's environment are needed.
@@ -746,7 +811,14 @@ echo '{"mode": "generate", "prompt": "Summarize this.", "system_prompt": null, "
 echo '{"mode": "generate", "prompt": "What is consciousness?", "system_prompt": null, "messages": null, "file_path": [], "temperature": 0.7, "thinking": true, "format_json": false, "timeout": 60}' | python my_llm_script.py
 ```
 
-Expected: a single line of valid JSON on stdout with at least a `"text"` key.
+**Test the residency modes,** if the script implements them:
+```bash
+echo '{"mode": "preload", "keep_alive": -1, "context_size": 8000, "extra_options": null, "timeout": 30}' | python my_llm_script.py
+echo '{"mode": "unload", "timeout": 30}' | python my_llm_script.py
+```
+
+Expected: a single line of valid JSON on stdout with at least a `"text"` key for
+`generate`, and a JSON object (possibly empty) for the other modes.
 
 **Test `embed` mode (if supported):**
 ```bash
