@@ -64,21 +64,29 @@ def _ollama_available() -> bool:
 
 
 def _first_ollama_model() -> str | None:
-    """Return the first Ollama chat model available, skipping embedding-only models.
+    """Return the smallest Ollama chat model available.
 
     Embedding models (e.g. nomic-embed-text, mxbai-embed-*) return HTTP 400 on
-    /api/chat. We skip them by excluding known embed name patterns.
+    /api/chat, so they are excluded by name pattern.
+
+    The smallest is chosen rather than the first because every live test in this
+    suite loads it: a smaller model means a shorter load, less VRAM pressure and
+    less chance of the server evicting something else to make room. All of these
+    tests assert on the shape of the response, never on its content, so the
+    choice of model does not affect what they verify.
     """
     import urllib.request, json as _json
     _EMBED_PATTERNS = ("embed", "embedding", "bge-", "e5-")
     try:
         with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2) as r:
             data = _json.loads(r.read())
-        for m in data.get("models", []):
-            name: str = m["name"]
-            if not any(p in name.lower() for p in _EMBED_PATTERNS):
-                return name
-        return None
+        chat = [
+            m for m in data.get("models", [])
+            if not any(p in m["name"].lower() for p in _EMBED_PATTERNS)
+        ]
+        if not chat:
+            return None
+        return min(chat, key=lambda m: m.get("size", 0))["name"]
     except Exception:
         return None
 
@@ -506,34 +514,95 @@ class TestDispatch(ProviderRegistryIsolation):
 # ---------------------------------------------------------------------------
 
 class TestOllamaLive(ProviderRegistryIsolation):
-    """End-to-end calls against a local Ollama server."""
+    """End-to-end calls against a local Ollama server.
+
+    These are deliberately gentle. Ollama serves one model at a time on the
+    developer machine that also runs the suite, so a test class that generates
+    freely competes with whatever else is loaded. Three rules keep it cheap:
+
+    - every generation is capped with ``max_tokens``, since all of these tests
+      assert on the *shape* of the response, never on its content;
+    - ``max_retries=0``, so a failing call fails once instead of being sent four
+      times over 35 seconds of backoff onto a server that is already struggling;
+    - the first transport failure fails its own test and makes the rest of the
+      class skip, so one sick server produces one error rather than a cascade.
+    """
+
+    # Enough for "PONG" or a one-word answer, which is all these tests read.
+    _MAX_TOKENS = 32
+    # Thinking needs room for a trace, or reasoning_tokens is always 0.
+    _MAX_TOKENS_THINKING = 160
+
+    # Set by _live_call on the first transport failure. Class-level on purpose:
+    # it has to outlive the test that discovered the server was unhealthy.
+    _server_unhealthy: str | None = None
+
+    # Model actually exercised, so tearDownClass can hand back its VRAM.
+    _model_used: str | None = None
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        """Release the model these tests loaded.
+
+        ProviderRegistryIsolation restores client._LOADED_MODELS after every
+        test, which is right for isolation but means the atexit cleanup no
+        longer knows about the model this class loaded. Without this it would
+        sit in VRAM until Ollama's own idle timer expires, long after the suite
+        has finished.
+        """
+        if cls._model_used:
+            from unified_ai_client import unload_model
+            unload_model("ollama", cls._model_used)   # never raises
+            cls._model_used = None
+        super().tearDownClass()
 
     def _require_model(self) -> str:
         """Skip unless Ollama is reachable and has a chat-capable model."""
         if not _ollama_available():
             self.skipTest("Ollama not reachable at localhost:11434")
+        if TestOllamaLive._server_unhealthy:
+            self.skipTest(
+                f"an earlier live call failed ({TestOllamaLive._server_unhealthy}); "
+                f"not sending more work to this server"
+            )
         model = _first_ollama_model()
         if not model:
             self.skipTest("No chat-capable Ollama models installed")
+        TestOllamaLive._model_used = model
         return model
 
-    def test_ollama_live_generate(self) -> None:
-        model = self._require_model()
+    def _live_call(self, model: str, **kwargs):
+        """Run one capped, un-retried live generation.
+
+        Args:
+            model: Model identifier to call.
+            **kwargs: Passed to ``call_ai``. ``temperature``, ``max_tokens``,
+                ``timeout`` and ``max_retries`` get gentle defaults.
+
+        Returns:
+            The ``AiResponse``.
+        """
         from unified_ai_client import call_ai
+
+        kwargs.setdefault("temperature", 0.0)
+        kwargs.setdefault("max_tokens", self._MAX_TOKENS)
+        kwargs.setdefault("timeout", 60)
         try:
-            response = call_ai(
-                provider="ollama",
-                model=model,
-                prompt="Reply with exactly the word PONG and nothing else.",
-                temperature=0.0,
-                timeout=30,
-            )
+            return call_ai(provider="ollama", model=model, max_retries=0, **kwargs)
         except Exception as exc:
             if "400" in str(exc):
                 self.skipTest(
-                    f"Model '{model}' rejected chat request (400), likely embed-only"
+                    f"Model '{model}' rejected the request (400), likely embed-only"
                 )
+            # Report this one, and spare the server the remaining tests.
+            TestOllamaLive._server_unhealthy = f"{type(exc).__name__}: {exc}"
             raise
+
+    def test_ollama_live_generate(self) -> None:
+        model = self._require_model()
+        response = self._live_call(
+            model, prompt="Reply with exactly the word PONG and nothing else."
+        )
         self.assertIsInstance(response.text, str)
         self.assertGreater(len(response.text), 0)
 
@@ -541,22 +610,11 @@ class TestOllamaLive(ProviderRegistryIsolation):
         model = self._require_model()
         tmp = _make_text_file("The sky is blue.")
         try:
-            from unified_ai_client import call_ai
-            try:
-                response = call_ai(
-                    provider="ollama",
-                    model=model,
-                    prompt="What colour is mentioned in the attached file? Reply in one word.",
-                    file_path=tmp,
-                    temperature=0.0,
-                    timeout=30,
-                )
-            except Exception as exc:
-                if "400" in str(exc):
-                    self.skipTest(
-                        f"Model '{model}' rejected chat request (400), likely embed-only"
-                    )
-                raise
+            response = self._live_call(
+                model,
+                prompt="What colour is mentioned in the attached file? Reply in one word.",
+                file_path=tmp,
+            )
             self.assertIsInstance(response.text, str)
             self.assertGreater(len(response.text), 0)
         finally:
@@ -564,23 +622,13 @@ class TestOllamaLive(ProviderRegistryIsolation):
 
     def test_ollama_live_thinking(self) -> None:
         model = self._require_model()
-        from unified_ai_client import call_ai
         # thinking=True may silently fall back on models that don't support it
-        try:
-            response = call_ai(
-                provider="ollama",
-                model=model,
-                prompt="What is 2+2?",
-                thinking=True,
-                temperature=0.0,
-                timeout=30,
-            )
-        except Exception as exc:
-            if "400" in str(exc):
-                self.skipTest(
-                    f"Model '{model}' rejected chat request (400), likely embed-only"
-                )
-            raise
+        response = self._live_call(
+            model,
+            prompt="What is 2+2?",
+            thinking=True,
+            max_tokens=self._MAX_TOKENS_THINKING,
+        )
         self.assertIsInstance(response.text, str)
         # reasoning_text may be empty if the model doesn't support thinking
         self.assertIsInstance(response.reasoning_text, str)
@@ -612,20 +660,12 @@ class TestOllamaLive(ProviderRegistryIsolation):
         does not support the 'think' parameter.
         """
         model = self._require_model()
-        from unified_ai_client import call_ai
-        try:
-            response = call_ai(
-                provider="ollama",
-                model=model,
-                prompt="What is 2+2? Think step by step.",
-                thinking=True,
-                temperature=0.0,
-                timeout=300,
-            )
-        except Exception as exc:
-            if "400" in str(exc):
-                self.skipTest(f"Model '{model}' rejected thinking request (400)")
-            raise
+        response = self._live_call(
+            model,
+            prompt="What is 2+2? Think step by step.",
+            thinking=True,
+            max_tokens=self._MAX_TOKENS_THINKING,
+        )
         if not response.reasoning_text and response.reasoning_tokens == 0:
             self.skipTest(
                 f"Model '{model}' produced no thinking output, 'think' not supported"
@@ -651,20 +691,7 @@ class TestOllamaLive(ProviderRegistryIsolation):
         result must never be negative and must never raise.
         """
         model = self._require_model()
-        from unified_ai_client import call_ai
-        try:
-            response = call_ai(
-                provider="ollama",
-                model=model,
-                prompt="What is 2+2?",
-                thinking=False,
-                temperature=0.0,
-                timeout=60,
-            )
-        except Exception as exc:
-            if "400" in str(exc):
-                self.skipTest(f"Model '{model}' rejected request (400)")
-            raise
+        response = self._live_call(model, prompt="What is 2+2?", thinking=False)
         self.assertIsInstance(response.text, str)
         self.assertGreaterEqual(
             response.reasoning_tokens,
@@ -673,13 +700,20 @@ class TestOllamaLive(ProviderRegistryIsolation):
         )
 
     def test_ollama_live_tool_calling(self) -> None:
-        """Live Ollama test: gemma4:12b tool calling with get_weather (two-turn).
+        """Live Ollama tool calling with get_weather, over two turns.
 
         The second call must pass the full conversation history including the
         assistant's intermediate tool_calls turn so the model can link the tool
         result back to its own request.
+
+        Uses whichever model ``_require_model`` picks rather than naming one:
+        pinning a second, larger model here would load it alongside the one the
+        rest of the class already has resident, for no extra coverage. A model
+        that does not do tool calling simply skips.
         """
-        from unified_ai_client import call_ai, ToolDefinition, ToolResult
+        from unified_ai_client import ToolDefinition, ToolResult
+
+        model = self._require_model()
 
         tools = [
             ToolDefinition(
@@ -700,20 +734,12 @@ class TestOllamaLive(ProviderRegistryIsolation):
 
         prompt = "What is the weather in Rome right now? Use the get_weather tool."
 
-        try:
-            response = call_ai(
-                provider="ollama",
-                model="gemma4:12b",
-                prompt=prompt,
-                tools=tools,
-                temperature=0.0,
-                timeout=300,
-            )
-        except Exception as exc:
-            self.skipTest(f"Ollama unavailable: {exc}")
+        response = self._live_call(model, prompt=prompt, tools=tools)
 
         if not response.tool_calls:
-            self.skipTest("gemma4:12b did not produce a tool call, model may not support it")
+            self.skipTest(
+                f"'{model}' did not produce a tool call, model may not support it"
+            )
 
         tc = response.tool_calls[0]
         self.assertEqual(tc.name, "get_weather")
@@ -740,24 +766,18 @@ class TestOllamaLive(ProviderRegistryIsolation):
             ],
         }
 
-        try:
-            final = call_ai(
-                provider="ollama",
-                model="gemma4:12b",
-                prompt=prompt,  # stored in history but not re-appended (tool_results present)
-                messages=[
-                    {"role": "user", "content": prompt},
-                    assistant_tool_message,
-                ],
-                tools=tools,
-                tool_results=[
-                    ToolResult(call_id=tc.id, name=tc.name, content=weather_result),
-                ],
-                temperature=0.0,
-                timeout=300,
-            )
-        except Exception as exc:
-            self.skipTest(f"Ollama second call failed: {exc}")
+        final = self._live_call(
+            model,
+            prompt=prompt,  # stored in history but not re-appended (tool_results present)
+            messages=[
+                {"role": "user", "content": prompt},
+                assistant_tool_message,
+            ],
+            tools=tools,
+            tool_results=[
+                ToolResult(call_id=tc.id, name=tc.name, content=weather_result),
+            ],
+        )
 
         self.assertIsInstance(final.text, str)
         self.assertGreater(len(final.text), 0, "Final response must contain text")
