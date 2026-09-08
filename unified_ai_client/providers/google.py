@@ -371,8 +371,15 @@ class GoogleProvider(BaseProvider):
                 config=gen_config,
             )
 
-        # Execute with timeout via thread pool
-        with ThreadPoolExecutor(max_workers=1) as pool:
+        # Execute with timeout via thread pool.
+        #
+        # Deliberately not a `with` block. ThreadPoolExecutor.__exit__ calls
+        # shutdown(wait=True), so raising inside the block does not end it: the
+        # context manager keeps waiting for the call it just gave up on, and the
+        # timeout ends up measuring nothing. shutdown(wait=False) hands the
+        # thread back to the interpreter instead, so the deadline is real.
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
             future = pool.submit(_do_call)
             try:
                 response = future.result(timeout=request.timeout)
@@ -380,6 +387,8 @@ class GoogleProvider(BaseProvider):
                 raise TimeoutError(
                     f"Google AI call timed out after {request.timeout}s"
                 )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         # --- Parse token usage ---
         input_tokens = 0

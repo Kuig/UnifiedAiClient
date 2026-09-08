@@ -71,6 +71,15 @@ class OllamaProvider(BaseProvider):
       endpoint, which this adapter does not use.
     """
 
+    # call_ai() sends no top_k/top_p unless the caller asks, because no single
+    # pair is valid everywhere: OpenAI's Chat Completions API rejects top_k
+    # outright. Ollama accepts both, and these were the values every request
+    # carried before that default moved, so they are kept here rather than
+    # silently handing generation back to Ollama's own 40/0.9 and changing the
+    # output of every existing caller.
+    DEFAULT_TOP_K: int = 64
+    DEFAULT_TOP_P: float = 0.95
+
     DEFAULT_URL: str = "http://localhost:11434"
 
     # /api/chat carries attachments in images[] and nothing else. Audio-capable
@@ -238,10 +247,12 @@ class OllamaProvider(BaseProvider):
 
         options: dict[str, Any] = {"temperature": request.temperature}
 
-        if request.top_k is not None:
-            options["top_k"] = request.top_k
-        if request.top_p is not None:
-            options["top_p"] = request.top_p
+        options["top_k"] = (
+            request.top_k if request.top_k is not None else self.DEFAULT_TOP_K
+        )
+        options["top_p"] = (
+            request.top_p if request.top_p is not None else self.DEFAULT_TOP_P
+        )
 
         _fold_options(opts, options)
 

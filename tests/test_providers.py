@@ -1781,5 +1781,107 @@ class TestToolTypes(unittest.TestCase):
         self.assertEqual(len(r.tool_results), 1)
 
 
+class TestConfigurationReachesTheCall(ProviderRegistryIsolation):
+    """A registered timeout has to apply to generation, not just to warm-up."""
+
+    def _capture_request(self, **call_kwargs):
+        """Run call_ai against a patched transport and return the AiRequest."""
+        from unified_ai_client import call_ai
+        from unified_ai_client.models import AiResponse
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        seen = {}
+
+        def fake_call(self, request):
+            seen["request"] = request
+            return AiResponse(text="ok")
+
+        with patch.object(OllamaProvider, "call", fake_call):
+            call_ai(provider="ollama", model="m", prompt="p", **call_kwargs)
+        return seen["request"]
+
+    def test_configured_timeout_reaches_generation(self) -> None:
+        """Regression: configure_provider(timeout=...) was ignored by call_ai.
+
+        call_ai defaulted timeout to a hard 300 that went straight into the
+        AiRequest, and every adapter reads request.timeout. config.timeout was
+        consulted only by warm-up, preload and embeddings, so a caller who
+        registered a longer deadline got 300 seconds with nothing to say so.
+        """
+        from unified_ai_client import configure_provider
+
+        configure_provider("ollama", timeout=600)
+        self.assertEqual(self._capture_request().timeout, 600)
+
+    def test_an_explicit_timeout_still_wins(self) -> None:
+        from unified_ai_client import configure_provider
+
+        configure_provider("ollama", timeout=600)
+        self.assertEqual(self._capture_request(timeout=30).timeout, 30)
+
+    def test_the_default_is_still_300_when_nothing_is_registered(self) -> None:
+        self.assertEqual(self._capture_request().timeout, 300)
+
+
+class TestConfigureProviderMergesTheFile(ProviderRegistryIsolation):
+    """configure_provider() must add to config.json, not replace it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from unified_ai_client import client as _client
+
+        self._client = _client
+        self._saved_path = _client._effective_config_path
+        self._tmp = tempfile.mkdtemp()
+        path = os.path.join(self._tmp, "config.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"ollama": {"url": "http://box:11434", "timeout": 600,
+                            "keep_alive": "30m"}},
+                fh,
+            )
+        _client._effective_config_path = path
+
+    def tearDown(self) -> None:
+        import shutil
+
+        self._client._effective_config_path = self._saved_path
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        super().tearDown()
+
+    def test_registering_one_extra_keeps_the_rest_of_the_section(self) -> None:
+        """Regression: the whole config.json section was silently discarded.
+
+        get_provider() uses the programmatic config *instead of* the file, so
+        one configure_provider() call for a single extra dropped the url and
+        the timeout the file had set, sending requests to localhost with no log
+        to explain it.
+        """
+        from unified_ai_client import configure_provider, get_provider
+
+        configure_provider("ollama", context_size=8000)
+        provider = get_provider("ollama")
+
+        self.assertEqual(provider.base_url, "http://box:11434")
+        self.assertEqual(provider.config.timeout, 600)
+        self.assertEqual(provider.config.extra_options["context_size"], 8000)
+        self.assertEqual(provider.config.extra_options["keep_alive"], "30m")
+
+    def test_an_explicit_value_still_overrides_the_file(self) -> None:
+        from unified_ai_client import configure_provider, get_provider
+
+        configure_provider("ollama", url="http://other:11434")
+        self.assertEqual(get_provider("ollama").base_url, "http://other:11434")
+
+    def test_a_provider_absent_from_the_file_gets_the_defaults(self) -> None:
+        from unified_ai_client import configure_provider, get_provider
+
+        configure_provider("lmstudio", context_size=4096)
+        provider = get_provider("lmstudio")
+
+        self.assertEqual(provider.base_url, "http://localhost:1234")
+        self.assertEqual(provider.config.timeout, 300)
+
+
 if __name__ == "__main__":
     unittest.main()

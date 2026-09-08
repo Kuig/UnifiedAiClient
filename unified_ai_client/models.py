@@ -118,7 +118,20 @@ class AiRequest:
         thinking: Whether to enable extended thinking/reasoning mode (True/False)
             or use the provider's default behavior ("default").
         format_json: Whether to force JSON output format.
-        timeout: Maximum seconds to wait for a response.
+        timeout: Maximum seconds to wait for a response. ``None`` on the
+            dataclass only; ``call_ai()`` resolves it against the provider's
+            configured timeout before any adapter sees the request, so a
+            provider always receives a concrete number.
+        top_k: Sampling parameter top_k, or ``None`` to send nothing and leave
+            the provider's own default in place. ``None`` is the default
+            because there is no value that is correct everywhere: OpenAI's
+            Chat Completions API rejects the parameter outright.
+        top_p: Sampling parameter top_p, or ``None`` for the provider's own
+            default.
+        max_tokens: Limit on generated tokens, or ``None`` for the provider's
+            own default.
+        sleep_time: Carried for reference only. Rate limiting is applied once
+            in ``call_ai()`` before the retry loop, and no provider reads this.
         tools: Optional list of tool definitions the model can use.
         tool_results: Optional list of tool results to include in the prompt.
         extra_options: Optional dict of arbitrary provider-specific options
@@ -135,9 +148,9 @@ class AiRequest:
     temperature: float = 0.7
     thinking: bool | str = "default"
     format_json: bool = False
-    timeout: int = 300
-    top_k: int = 64
-    top_p: float = 0.95
+    timeout: int | None = None
+    top_k: int | None = None
+    top_p: float | None = None
     max_tokens: int | None = None
     sleep_time: int | None = None
     tools: list[ToolDefinition] | None = None

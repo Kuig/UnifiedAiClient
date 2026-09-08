@@ -94,13 +94,19 @@ class AnthropicProvider(BaseProvider):
         after it, and 'claude-opus-5' carries no minor at all. Taking the first
         numeric group and its optional companion handles all three.
 
+        The minor is capped at two digits and must not be followed by another
+        one, which is what keeps a dated id apart from a versioned one.
+        'claude-opus-4-20250514' carries no minor and would otherwise read as
+        (4, 20250514), clearing every future threshold and picking the wrong
+        thinking form for the whole Claude 4.0 line.
+
         Args:
             model: Model identifier as passed to call_ai().
 
         Returns:
             A (major, minor) tuple, or None if no version could be read.
         """
-        match = re.search(r"(\d+)(?:-(\d+))?", model)
+        match = re.search(r"(\d+)(?:-(\d{1,2}))?(?!\d)", model)
         if not match:
             return None
         major = int(match.group(1))
@@ -158,6 +164,26 @@ class AnthropicProvider(BaseProvider):
         # thinking=False. Older models have no 'disabled' form: for them
         # thinking is off unless explicitly enabled, so omitting is correct.
         return {"type": "disabled"} if adaptive else None
+
+    @staticmethod
+    def _apply_thinking_constraints(payload: dict[str, Any]) -> None:
+        """Strip the sampling controls extended thinking refuses, in place.
+
+        With thinking enabled the Messages API rejects ``top_k`` and ``top_p``
+        outright, and accepts ``temperature`` only at 1. The three were sent on
+        every request regardless, so ``thinking=True`` was a 400 on every model
+        rather than a feature. Dropping them is the only option that keeps the
+        call alive: thinking is what the caller explicitly asked for, while the
+        sampling values are defaults they most likely never chose.
+
+        Args:
+            payload: The request body, modified in place.
+        """
+        if payload.get("thinking", {}).get("type") == "disabled":
+            return
+        payload.pop("top_k", None)
+        payload.pop("top_p", None)
+        payload["temperature"] = 1
 
     def _post(self, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
         """HTTP POST to the Anthropic /v1/messages endpoint.
@@ -415,6 +441,7 @@ class AnthropicProvider(BaseProvider):
         )
         if thinking_payload is not None:
             payload["thinking"] = thinking_payload
+            self._apply_thinking_constraints(payload)
 
         resp = self._post(payload, request.timeout)
 

@@ -21,11 +21,11 @@ def call_ai(
     temperature: float = 0.7,
     thinking: bool | str = "default",
     format_json: bool = False,
-    timeout: int = 300,
+    timeout: int | None = None,
     max_retries: int = 3,
     retry_base_delay: float = 5.0,
-    top_k: int = 64,
-    top_p: float = 0.95,
+    top_k: int | None = None,
+    top_p: float | None = None,
     max_tokens: int | None = None,
     sleep_time: int | None = None,
     extra_options: dict | None = None,
@@ -45,11 +45,11 @@ def call_ai(
 | `temperature` | `float` | `0.7` | Sampling temperature. |
 | `thinking` | `bool \| str` | `"default"` | `True` / `False` to force reasoning on or off, `"default"` to leave it to the provider. See [Thinking and Reasoning](reasoning.md). |
 | `format_json` | `bool` | `False` | Forces the model to respond in valid JSON. |
-| `timeout` | `int` | `300` | Network timeout in seconds. Since a non-streaming request sends nothing until the answer is complete, this behaves as a deadline for the whole call. |
+| `timeout` | `int \| None` | `None` | Network timeout in seconds. `None` uses the timeout registered for the provider via `configure_provider()`, falling back to 300. Since a non-streaming request sends nothing until the answer is complete, this behaves as a deadline for the whole call. |
 | `max_retries` | `int` | `3` | Retry attempts on network and rate-limit failures, a timeout included. See the note below. |
 | `retry_base_delay` | `float` | `5.0` | Initial backoff delay in seconds, doubled on each attempt. |
-| `top_k` | `int` | `64` | Sampling parameter. |
-| `top_p` | `float` | `0.95` | Sampling parameter. |
+| `top_k` | `int \| None` | `None` | Sampling parameter. `None` sends nothing, leaving the provider's own default in place. There is no portable value: OpenAI's Chat Completions API rejects `top_k` as an unknown argument, while Ollama and Anthropic accept it. Ollama applies a house default of 64. |
+| `top_p` | `float \| None` | `None` | Sampling parameter. `None` leaves the provider's own default in place. Ollama applies a house default of 0.95. |
 | `max_tokens` | `int \| None` | `None` | Response length cap, mapped per provider (`num_predict`, `max_output_tokens`). |
 | `sleep_time` | `int \| None` | `None` | Seconds to sleep before the call, for rate limiting. Applied once, not per retry. Falls back to the configured `sleep_time`. |
 | `extra_options` | `dict \| None` | `None` | Arbitrary provider-specific options merged into the payload last, overriding config-level values for the same key. |

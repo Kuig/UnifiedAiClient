@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -83,6 +84,25 @@ class TestProviderUrlResolution(ProviderRegistryIsolation):
         "lmstudio": "http://localhost:1234",
         "llamacpp": "http://localhost:8080",
     }
+
+    # google reaches its endpoint through the genai SDK and script spawns a
+    # subprocess, so neither declares a DEFAULT_URL to fall back to. Naming them
+    # here keeps the table below an assertion about every HTTP provider rather
+    # than a list that quietly stops covering new ones.
+    _NO_DEFAULT_URL = {"google", "script"}
+
+    def test_table_covers_every_http_provider(self) -> None:
+        self.assertEqual(
+            set(self._DEFAULTS), set(_PROVIDER_CLASSES) - self._NO_DEFAULT_URL,
+            "a provider was added or removed without updating this table",
+        )
+
+    def test_providers_without_a_default_url_declare_none(self) -> None:
+        """The exclusion above must stay a fact, not an oversight."""
+        for name in self._NO_DEFAULT_URL:
+            with self.subTest(provider=name):
+                cls = _provider_class_by_name(name)
+                self.assertFalse(hasattr(cls, "DEFAULT_URL"))
 
     def test_provider_config_url_defaults_to_none(self) -> None:
         """None is the 'unset' marker, so no real URL doubles as a sentinel."""
@@ -166,6 +186,19 @@ class TestApiKeyHandling(ProviderRegistryIsolation):
     }
 
     _LOCAL = ("lmstudio", "llamacpp")
+
+    # The three that take neither path: google checks its credential in the lazy
+    # client getter rather than in _require_api_key, ollama talks to a local
+    # server, and script spawns a subprocess. Listing them makes the coverage
+    # assertion below exhaustive instead of merely long.
+    _NO_KEY_CHECK = {"google", "ollama", "script"}
+
+    def test_tables_cover_every_registered_provider(self) -> None:
+        self.assertEqual(
+            set(self._CLOUD) | set(self._LOCAL) | self._NO_KEY_CHECK,
+            set(_PROVIDER_CLASSES),
+            "a provider was added or removed without updating these tables",
+        )
 
     def test_cloud_providers_reject_a_missing_key(self) -> None:
         """The error must name the secrets key, so the fix is obvious."""
@@ -251,6 +284,27 @@ class TestAnthropicThinking(unittest.TestCase):
         for model, expected in cases.items():
             with self.subTest(model=model):
                 self.assertEqual(provider._model_version(model), expected)
+
+    def test_dated_ids_do_not_read_the_date_as_a_minor(self) -> None:
+        """Regression: the release date was parsed as the minor version.
+
+        `claude-opus-4-20250514` carries no minor, but the pattern used to take
+        the date as one and return (4, 20250514). That clears every threshold,
+        so the whole Claude 4.0 line was sent the adaptive form that
+        `_ADAPTIVE_SINCE` exists to withhold, and thinking=True was a hard 400
+        on exactly the models people are calling today.
+        """
+        provider = self._provider()
+        cases = {
+            "claude-opus-4-20250514": (4, 0),
+            "claude-sonnet-4-20250514": (4, 0),
+            "claude-opus-4-1-20250805": (4, 1),
+            "claude-3-5-haiku-20241022": (3, 5),
+        }
+        for model, expected in cases.items():
+            with self.subTest(model=model):
+                self.assertEqual(provider._model_version(model), expected)
+                self.assertFalse(provider._uses_adaptive_thinking(model))
 
     def test_older_models_get_the_budget_form(self) -> None:
         """Regression: 'adaptive' is a 400 on everything below Claude 4.6.
@@ -615,9 +669,19 @@ class TestFileSupportMatrix(FileFixtureCase):
         "groq": {"image"},
         "xai": {"image"},
         "lmstudio": {"image"},
+        # Empty by contract: only the script knows what it can open, so it
+        # declares nothing and never calls validate_files(). See
+        # docs/script-protocol.md.
+        "script": frozenset(),
     }
 
     _SAMPLE = {"image": ".png", "audio": ".mp3", "document": ".pdf"}
+
+    def test_table_covers_every_registered_provider(self) -> None:
+        self.assertEqual(
+            set(self._SUPPORT), set(_PROVIDER_CLASSES),
+            "a provider was added or removed without updating this table",
+        )
 
     def test_declared_support_matches_the_table(self) -> None:
         for name, expected in self._SUPPORT.items():
@@ -653,6 +717,33 @@ class TestFileSupportMatrix(FileFixtureCase):
                         validate_files([path], name, frozenset(supported)),
                         [(path, file_type)],
                     )
+
+    def test_script_passes_unsupported_files_straight_through(self) -> None:
+        """The one provider that must NOT refuse: only the script knows.
+
+        Its empty SUPPORTED_FILE_TYPES row above says what it declares; this
+        says what it does. The passthrough is a public contract
+        (docs/script-protocol.md), and without this the row would read as
+        "refuses everything", which is the opposite of the truth.
+        """
+        from unified_ai_client.models import AiRequest
+        from unified_ai_client.providers import script as script_module
+        from unified_ai_client.providers.script import ScriptProvider
+
+        audio = self.sample(".mp3")
+        captured: dict = {}
+
+        def fake_run(cmd, payload, timeout):
+            captured.update(payload)
+            return {"text": "ok"}
+
+        provider = ScriptProvider(ProviderConfig())
+        request = AiRequest(provider="script", model="fake.py", prompt="hi",
+                            file_path=audio)
+        with patch.object(script_module, "_run_script", side_effect=fake_run):
+            provider.call(request)
+
+        self.assertEqual(captured["file_path"], [audio])
 
     def test_text_is_accepted_everywhere(self) -> None:
         """No provider has a native text block, so inlining must stay open."""
@@ -995,6 +1086,186 @@ class TestFileHandlingLive(FileFixtureCase):
             max_retries=1,
         )
         self.assertIsInstance(response.text, str)
+
+
+# ---------------------------------------------------------------------------
+# Sampling parameters
+# ---------------------------------------------------------------------------
+
+_OK_RESPONSE = {
+    "choices": [{"message": {"content": "x"}}],
+    "usage": {},
+    "content": [{"type": "text", "text": "x"}],
+    "message": {"content": "x"},
+}
+
+
+class TestSamplingParameters(unittest.TestCase):
+    """What reaches the wire when the caller asks for nothing.
+
+    top_k and top_p used to default to 64 and 0.95 on AiRequest, so the
+    `if ... is not None` guards in every adapter were always true and both
+    values were sent on every request. OpenAI's Chat Completions API rejects
+    top_k as an unknown argument, so the provider was unusable with library
+    defaults, and no test looked at the set of payload keys.
+    """
+
+    def _openai_payload(self, **request_kwargs) -> dict:
+        from unified_ai_client.providers.openai import OpenAiProvider
+
+        provider = OpenAiProvider(ProviderConfig(), api_key="fake-key")
+        seen = {}
+
+        def fake_post(self, endpoint, payload, timeout):
+            seen["payload"] = payload
+            return _OK_RESPONSE
+
+        with patch.object(OpenAiProvider, "_post", fake_post):
+            provider.call(AiRequest(
+                provider="openai", model="gpt-4o", prompt="hi",
+                timeout=30, **request_kwargs,
+            ))
+        return seen["payload"]
+
+    def _anthropic_payload(self, **request_kwargs) -> dict:
+        from unified_ai_client.providers.anthropic import AnthropicProvider
+
+        provider = AnthropicProvider(ProviderConfig(), api_key="fake-key")
+        seen = {}
+
+        def fake_post(self, payload, timeout):
+            seen["payload"] = payload
+            return _OK_RESPONSE
+
+        with patch.object(AnthropicProvider, "_post", fake_post):
+            provider.call(AiRequest(
+                provider="anthropic", model="claude-opus-4-6", prompt="hi",
+                timeout=30, **request_kwargs,
+            ))
+        return seen["payload"]
+
+    def _ollama_options(self, **request_kwargs) -> dict:
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(ProviderConfig())
+        seen = {}
+
+        def fake_post(self, endpoint, payload, timeout):
+            seen["payload"] = payload
+            return _OK_RESPONSE
+
+        with patch.object(OllamaProvider, "_post", fake_post):
+            provider.call(AiRequest(
+                provider="ollama", model="m", prompt="hi",
+                timeout=30, **request_kwargs,
+            ))
+        return seen["payload"]["options"]
+
+    def test_openai_is_sent_no_top_k(self) -> None:
+        """Regression: an unasked-for top_k made every openai call a 400."""
+        self.assertNotIn("top_k", self._openai_payload())
+
+    def test_openai_sends_top_k_when_asked(self) -> None:
+        """Omitting by default must not mean ignoring an explicit value."""
+        self.assertEqual(self._openai_payload(top_k=10)["top_k"], 10)
+
+    def test_config_level_top_p_is_reachable(self) -> None:
+        """Regression: `opts.get("top_p")` was dead code.
+
+        request.top_p was never None, so the fallback to a value registered
+        via configure_provider() could not be reached.
+        """
+        from unified_ai_client.providers.openai import OpenAiProvider
+
+        provider = OpenAiProvider(
+            ProviderConfig(extra_options={"top_p": 0.1}), api_key="fake-key"
+        )
+        seen = {}
+
+        def fake_post(self, endpoint, payload, timeout):
+            seen["payload"] = payload
+            return _OK_RESPONSE
+
+        with patch.object(OpenAiProvider, "_post", fake_post):
+            provider.call(AiRequest(
+                provider="openai", model="gpt-4o", prompt="hi", timeout=30,
+            ))
+        self.assertEqual(seen["payload"]["top_p"], 0.1)
+
+    def test_ollama_keeps_its_house_defaults(self) -> None:
+        """The local provider's output must not change with this.
+
+        Ollama's own defaults are 40/0.9, so falling through to them would
+        quietly alter generation for every existing caller.
+        """
+        options = self._ollama_options()
+        self.assertEqual(options["top_k"], 64)
+        self.assertEqual(options["top_p"], 0.95)
+
+    def test_ollama_still_honours_an_explicit_value(self) -> None:
+        self.assertEqual(self._ollama_options(top_k=10)["top_k"], 10)
+
+    def test_thinking_strips_what_anthropic_refuses(self) -> None:
+        """Regression: thinking=True was a 400 on every Claude model.
+
+        The Messages API rejects top_k and top_p with thinking enabled, and
+        accepts temperature only at 1, but all three were sent unconditionally.
+        """
+        payload = self._anthropic_payload(thinking=True)
+        self.assertIn("thinking", payload)
+        self.assertNotIn("top_k", payload)
+        self.assertNotIn("top_p", payload)
+        self.assertEqual(payload["temperature"], 1)
+
+    def test_an_explicit_top_k_is_dropped_too_when_thinking(self) -> None:
+        """The API refuses it whoever asked for it."""
+        payload = self._anthropic_payload(thinking=True, top_k=10)
+        self.assertNotIn("top_k", payload)
+
+    def test_without_thinking_temperature_is_left_alone(self) -> None:
+        payload = self._anthropic_payload(temperature=0.3)
+        self.assertEqual(payload["temperature"], 0.3)
+
+
+# ---------------------------------------------------------------------------
+# Google call deadline
+# ---------------------------------------------------------------------------
+
+class TestGoogleCallTimeout(unittest.TestCase):
+    """The timeout has to end the wait, not just describe it."""
+
+    def test_timeout_returns_without_waiting_for_the_call(self) -> None:
+        """Regression: the deadline was reported but never enforced.
+
+        The thread pool ran inside a `with` block, and
+        ThreadPoolExecutor.__exit__ calls shutdown(wait=True). TimeoutError was
+        raised on schedule but the block would not close until the underlying
+        call finished, so a request hanging for ten minutes blocked the caller
+        for ten minutes and the number passed as `timeout` measured nothing.
+        And since TimeoutError is retryable, with_retry paid that cost four
+        times over.
+        """
+        from unified_ai_client.providers.google import GoogleProvider
+
+        provider = GoogleProvider(ProviderConfig(), api_key="fake-key")
+        fake_client = MagicMock()
+        fake_client.models.generate_content.side_effect = lambda **kw: time.sleep(5)
+
+        request = AiRequest(
+            provider="google", model="gemini-2.5-flash", prompt="hi", timeout=1
+        )
+
+        started = time.perf_counter()
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client):
+            with self.assertRaises(TimeoutError):
+                provider.call(request)
+        elapsed = time.perf_counter() - started
+
+        # Generous margin: the point is 1s rather than 5s, not the exact figure.
+        self.assertLess(
+            elapsed, 3.0,
+            f"timeout did not end the wait: returned after {elapsed:.2f}s",
+        )
 
 
 if __name__ == "__main__":

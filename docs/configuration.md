@@ -116,7 +116,7 @@ forwarded to the API payload.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `url` | `str` or `None` | `None` | Base URL of the endpoint. `None` means "use this provider's own default", listed below. An explicit value is always honoured as given. |
-| `timeout` | `int` | `300` | Seconds to wait for a response. |
+| `timeout` | `int` | `300` | Seconds to wait for a response. Applies to generation, warm-up, preload and embeddings alike; a `timeout` passed to `call_ai()` overrides it for that call. |
 | `sleep_time` | `int` | `0` | Seconds to sleep before a call, for rate limiting. Applied once per `call_ai()`, before the retry loop, so retries do not multiply it. |
 
 ### Default endpoint per provider

@@ -64,6 +64,11 @@ def configure_provider(name: str, **kwargs: Any) -> None:
     ``configure_provider("ollama", context_size=8000)`` results in both
     ``url`` and ``context_size`` being active simultaneously.
 
+    The first call for a given provider merges on top of that provider's
+    section in the library's ``config.json``, so registering one option does
+    not discard the rest of the file. The precedence is per field:
+    programmatic > ``config.json`` > ``ProviderConfig`` defaults.
+
     Invalidates any cached provider instance for ``name`` so the next call
     picks up the new configuration.
 
@@ -96,21 +101,32 @@ def configure_provider(name: str, **kwargs: Any) -> None:
 
     with _PROVIDER_CONFIGS_LOCK:
         existing = _PROVIDER_CONFIGS.get(name)
-        if existing is not None:
-            # Merge: keep existing values, override only explicitly supplied fields
-            merged_known: dict[str, Any] = {}
-            if existing.url is not None:
-                merged_known["url"] = existing.url
-            if existing.timeout is not None:
-                merged_known["timeout"] = existing.timeout
-            if existing.sleep_time is not None:
-                merged_known["sleep_time"] = existing.sleep_time
-            merged_known.update(new_known)
-            merged_extra = dict(existing.extra_options or {})
-            merged_extra.update(new_extra)
-            config = ProviderConfig(**merged_known, extra_options=merged_extra)
-        else:
-            config = ProviderConfig(**new_known, extra_options=new_extra)
+        if existing is None:
+            # Seed from the file, so the documented "programmatic > config.json
+            # > defaults" chain resolves per field rather than per provider.
+            # Registering a single extra used to replace the whole section:
+            # configure_provider("ollama", context_size=8000) silently dropped
+            # the url and timeout config.json had set, with no log to say so.
+            # load_config() always returns an instance, falling back to the
+            # dataclass defaults when there is no file, so there is no second
+            # branch to keep in step.
+            from unified_ai_client.config import load_config
+            existing = load_config(
+                _effective_config_path, ProviderConfig, section=name
+            )
+
+        # Merge: keep existing values, override only explicitly supplied fields
+        merged_known: dict[str, Any] = {}
+        if existing.url is not None:
+            merged_known["url"] = existing.url
+        if existing.timeout is not None:
+            merged_known["timeout"] = existing.timeout
+        if existing.sleep_time is not None:
+            merged_known["sleep_time"] = existing.sleep_time
+        merged_known.update(new_known)
+        merged_extra = dict(existing.extra_options or {})
+        merged_extra.update(new_extra)
+        config = ProviderConfig(**merged_known, extra_options=merged_extra)
         _PROVIDER_CONFIGS[name] = config
 
     _log.info(
@@ -255,6 +271,12 @@ def _record_loaded(provider_name: str, provider: BaseProvider, model: str) -> No
     release. For the rest this is what lets ``cleanup()`` free the VRAM at exit,
     including after an unhandled exception or a Ctrl+C.
 
+    Registering a resource and arming its release are the same event, so the
+    ``atexit`` hook is installed here rather than at each entry point. Doing it
+    per entry point is what let ``preload_model()`` track a model it had no way
+    to free: it never called ``_register_cleanup()``, so a process that only
+    preloaded left the model resident for good.
+
     Args:
         provider_name: Registry name the provider was reached by.
         provider: The resolved provider instance.
@@ -262,6 +284,7 @@ def _record_loaded(provider_name: str, provider: BaseProvider, model: str) -> No
     """
     if not provider.SUPPORTS_UNLOAD:
         return
+    _register_cleanup()
     with _LOADED_MODELS_LOCK:
         _LOADED_MODELS.add((provider_name.strip().lower(), model))
 
@@ -332,11 +355,11 @@ def call_ai(
     temperature: float = 0.7,
     thinking: bool | str = "default",
     format_json: bool = False,
-    timeout: int = 300,
+    timeout: int | None = None,
     max_retries: int = 3,
     retry_base_delay: float = 5.0,
-    top_k: int = 64,
-    top_p: float = 0.95,
+    top_k: int | None = None,
+    top_p: float | None = None,
     max_tokens: int | None = None,
     sleep_time: int | None = None,
     extra_options: dict | None = None,
@@ -363,11 +386,20 @@ def call_ai(
         thinking: Enable extended reasoning/thinking mode (``True``/``False``)
             or use the provider's default behavior (``"default"``).
         format_json: Force JSON-formatted response.
-        timeout: Maximum seconds to wait for a response.
+        timeout: Maximum seconds to wait for a response. Defaults to the
+            timeout registered for the provider via ``configure_provider()``,
+            or 300 seconds when none was registered. Applies per attempt, so a
+            call that keeps timing out costs roughly
+            ``(max_retries + 1) x timeout`` plus the backoff.
         max_retries: Number of retry attempts on failure.
         retry_base_delay: Initial exponential backoff delay in seconds.
-        top_k: Sampling parameter top_k (default 64).
-        top_p: Sampling parameter top_p (default 0.95).
+        top_k: Sampling parameter top_k. ``None`` sends nothing and leaves the
+            provider's own default in place, which is the only portable
+            answer: OpenAI's Chat Completions API rejects ``top_k`` as an
+            unknown argument, while Ollama and Anthropic accept it. Providers
+            with a house default of their own document it.
+        top_p: Sampling parameter top_p. ``None`` leaves the provider's own
+            default in place.
         max_tokens: Limit on the number of generated tokens.
         sleep_time: Rate limit delay in seconds before calling the API.
             Overrides the value set via ``configure_provider()`` for this call.
@@ -407,6 +439,15 @@ def call_ai(
     if effective_sleep > 0:
         time.sleep(effective_sleep)
 
+    # Resolve the deadline the same way, and here rather than in each adapter:
+    # every provider reads request.timeout directly, so a None arriving there
+    # would be twelve separate fallbacks to get right. Before this, call_ai()
+    # defaulted to a hard 300 that silently outranked configure_provider(),
+    # and a configured timeout only ever reached warm-up and embeddings.
+    effective_timeout = timeout
+    if effective_timeout is None:
+        effective_timeout = getattr(getattr(prov, "config", None), "timeout", 300)
+
     request = AiRequest(
         provider=provider,
         model=model,
@@ -417,7 +458,7 @@ def call_ai(
         temperature=temperature,
         thinking=thinking,
         format_json=format_json,
-        timeout=timeout,
+        timeout=effective_timeout,
         top_k=top_k,
         top_p=top_p,
         max_tokens=max_tokens,

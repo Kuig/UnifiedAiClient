@@ -813,5 +813,65 @@ class TestUnloadModel(ProviderRegistryIsolation):
         self.assertIsNone(unload_model("google", "gemini-2.5-flash"))
 
 
+# ---------------------------------------------------------------------------
+# Cleanup arming
+# ---------------------------------------------------------------------------
+
+class TestCleanupIsArmedWhenAModelIsTracked(ProviderRegistryIsolation):
+    """Tracking a resident model and arming its release are the same event.
+
+    Regression: preload_model() recorded the model in _LOADED_MODELS but never
+    called _register_cleanup(), so a process that only preloaded — the very
+    thing keep_alive=-1 is for — exited with the model still in VRAM and no
+    atexit hook to free it.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        from unified_ai_client import client as client_module
+
+        self._client = client_module
+        self._was_registered = client_module._CLEANUP_REGISTERED
+        client_module._CLEANUP_REGISTERED = False
+
+    def tearDown(self) -> None:
+        self._client._CLEANUP_REGISTERED = self._was_registered
+        super().tearDown()
+
+    def test_preload_model_arms_atexit(self) -> None:
+        from unified_ai_client import preload_model
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        with patch.object(OllamaProvider, "preload_model", return_value=None):
+            with patch.object(self._client, "atexit") as fake_atexit:
+                preload_model("ollama", "gemma4:12b", keep_alive=-1)
+
+        self.assertTrue(self._client._CLEANUP_REGISTERED)
+        fake_atexit.register.assert_called_once_with(self._client.cleanup)
+
+    def test_the_model_is_tracked_for_release(self) -> None:
+        """Arming is only useful if cleanup() has something to drain."""
+        from unified_ai_client import preload_model
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        with patch.object(OllamaProvider, "preload_model", return_value=None):
+            preload_model("ollama", "gemma4:12b")
+
+        self.assertIn(("ollama", "gemma4:12b"), self._client._LOADED_MODELS)
+
+    def test_a_provider_without_residency_arms_nothing_here(self) -> None:
+        """Cloud providers hold no model, so this path must stay a no-op.
+
+        They arm cleanup through call_ai/warm_up/get_embedding instead, for the
+        remote files they do hold.
+        """
+        from unified_ai_client.client import _record_loaded, get_provider
+
+        provider = get_provider("google")
+        _record_loaded("google", provider, "gemini-2.5-flash")
+
+        self.assertFalse(self._client._CLEANUP_REGISTERED)
+
+
 if __name__ == "__main__":
     unittest.main()

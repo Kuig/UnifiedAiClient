@@ -107,8 +107,8 @@ The script reads **one JSON object** from stdin. The object contains the followi
 | `thinking` | `bool \| string` | ✅ Yes | Whether extended reasoning was requested (`true`/`false`) or let the provider decide (`"default"`). |
 | `format_json` | `bool` | ✅ Yes | Whether JSON-formatted output was requested. |
 | `timeout` | `int` | ✅ Yes | Maximum seconds allowed for the entire call. |
-| `top_k` | `int` | ✅ Yes | Sampling parameter top_k. |
-| `top_p` | `float` | ✅ Yes | Sampling parameter top_p. |
+| `top_k` | `int \| null` | ✅ Yes | Sampling parameter top_k, or null when the caller did not set one. Null means "use your own default": there is no value valid across every backend, so the library no longer invents one. |
+| `top_p` | `float \| null` | ✅ Yes | Sampling parameter top_p, or null when the caller did not set one. Same rule as `top_k`. |
 | `max_tokens` | `int \| null` | ✅ Yes | Limit on the number of generated tokens, or null. |
 | `extra_options` | `dict \| null` | ✅ Yes | Dictionary of provider-specific options, or null. |
 | `tools` | `array \| null` | ✅ Yes | List of tool definitions the model may call, or null if no tools are provided. |
@@ -162,8 +162,8 @@ Rules:
     "thinking": false,
     "format_json": false,
     "timeout": 300,
-    "top_k": 64,
-    "top_p": 0.95,
+    "top_k": null,
+    "top_p": null,
     "max_tokens": null,
     "extra_options": null
 }
