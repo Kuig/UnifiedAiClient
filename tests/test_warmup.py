@@ -28,10 +28,12 @@ for _path in (str(_PROJECT_ROOT), str(_TESTS_DIR)):
 # and so does running this file directly.
 from test_providers import (  # noqa: E402
     ProviderRegistryIsolation,
+    RequiresCredential,
     _make_script,
     _make_text_file,
     _first_ollama_model,
     _ollama_available,
+    _PROVIDER_CLASSES,
 )
 
 from unified_ai_client.models import ProviderConfig  # noqa: E402
@@ -50,19 +52,13 @@ def _fake_http_response(payload: dict) -> MagicMock:
     return resp
 
 
-_ALL_PROVIDER_CLASSES = (
-    ("ollama", "unified_ai_client.providers.ollama", "OllamaProvider"),
-    ("google", "unified_ai_client.providers.google", "GoogleProvider"),
-    ("anthropic", "unified_ai_client.providers.anthropic", "AnthropicProvider"),
-    ("openai", "unified_ai_client.providers.openai", "OpenAiProvider"),
-    ("mistral", "unified_ai_client.providers.mistral", "MistralProvider"),
-    ("cohere", "unified_ai_client.providers.cohere", "CohereProvider"),
-    ("meta", "unified_ai_client.providers.meta", "MetaProvider"),
-    ("groq", "unified_ai_client.providers.groq", "GroqProvider"),
-    ("xai", "unified_ai_client.providers.xai", "XAiProvider"),
-    ("lmstudio", "unified_ai_client.providers.lmstudio", "LmStudioProvider"),
-    ("llamacpp", "unified_ai_client.providers.llamacpp", "LlamaCppProvider"),
-    ("script", "unified_ai_client.providers.script", "ScriptProvider"),
+# Same 12 providers as _PROVIDER_CLASSES, reshaped to the (name, dotted
+# module path, class name) triple this file's own tests expect. Derived
+# rather than hand-typed a second time: until 0.5.8 this was an independent
+# copy, unsynchronized with test_provider_contracts.py's table.
+_ALL_PROVIDER_CLASSES = tuple(
+    (name, f"unified_ai_client.providers.{module}", class_name)
+    for name, (module, class_name) in _PROVIDER_CLASSES.items()
 )
 
 
@@ -601,7 +597,7 @@ class TestClientWarmUp(ProviderRegistryIsolation):
 
     def test_warm_up_delegates_to_the_provider(self) -> None:
         from unified_ai_client import warm_up
-        from unified_ai_client.client import get_provider
+        from unified_ai_client.registry import get_provider
 
         provider = get_provider("google")
         with patch.object(provider, "warm_up", return_value=True) as pw:
@@ -619,7 +615,7 @@ class TestClientWarmUp(ProviderRegistryIsolation):
         real failure with a useful message.
         """
         from unified_ai_client import warm_up
-        from unified_ai_client.client import get_provider
+        from unified_ai_client.registry import get_provider
 
         provider = get_provider("google")
         with patch.object(
@@ -643,6 +639,10 @@ class TestClientWarmUp(ProviderRegistryIsolation):
         """
         from unified_ai_client import client as client_module
 
+        # warm_up() imports _register_cleanup by name from registry.py, so the
+        # binding client.py actually calls lives on the client module, not on
+        # registry: patching registry._register_cleanup here would leave
+        # client.py's already-bound reference untouched.
         with patch.object(client_module, "_register_cleanup") as register:
             with self.assertLogs("unified_ai_client.client", level="WARNING"):
                 client_module.warm_up("nonexistent_provider_xyz", "m")
@@ -653,7 +653,7 @@ class TestClientWarmUp(ProviderRegistryIsolation):
 # 8. Live warm-up tests
 # ---------------------------------------------------------------------------
 
-class TestWarmUpLive(unittest.TestCase):
+class TestWarmUpLive(RequiresCredential, unittest.TestCase):
     """Real warm-up calls, skipped when the provider is not available."""
 
     def test_ollama_live_warm_up(self) -> None:
@@ -666,11 +666,7 @@ class TestWarmUpLive(unittest.TestCase):
         self.assertIs(warm_up("ollama", model), True)
 
     def test_google_live_warm_up_populates_the_upload_cache(self) -> None:
-        from unified_ai_client.config import load_secrets
-        if not load_secrets(os.getcwd()).get("google_api_key"):
-            self.skipTest(
-                "google_api_key not found in secrets.json or environment variables"
-            )
+        self._require_credential("google_api_key")
         from unified_ai_client import warm_up
 
         tmp = _make_text_file("Warm-up upload test.")
@@ -800,13 +796,13 @@ class TestUnloadModel(ProviderRegistryIsolation):
     def test_client_unload_swallows_provider_errors(self) -> None:
         """Failing to free VRAM must not bring down the caller."""
         from unified_ai_client import unload_model
-        from unified_ai_client.client import get_provider
+        from unified_ai_client.registry import get_provider
 
         provider = get_provider("ollama")
         with patch.object(
             provider, "unload_model", side_effect=RuntimeError("server gone")
         ):
-            with self.assertLogs("unified_ai_client.client", level="WARNING") as cm:
+            with self.assertLogs("unified_ai_client.registry", level="WARNING") as cm:
                 self.assertIsNone(unload_model("ollama", "gemma4:12b"))
 
         self.assertTrue(any("server gone" in line for line in cm.output))
@@ -833,7 +829,7 @@ class TestCleanupIsArmedWhenAModelIsTracked(ProviderRegistryIsolation):
 
     def setUp(self) -> None:
         super().setUp()
-        from unified_ai_client import client as client_module
+        from unified_ai_client import registry as client_module
 
         self._client = client_module
         self._was_registered = client_module._CLEANUP_REGISTERED
@@ -870,7 +866,7 @@ class TestCleanupIsArmedWhenAModelIsTracked(ProviderRegistryIsolation):
         They arm cleanup through call_ai/warm_up/get_embedding instead, for the
         remote files they do hold.
         """
-        from unified_ai_client.client import _record_loaded, get_provider
+        from unified_ai_client.registry import _record_loaded, get_provider
 
         provider = get_provider("google")
         _record_loaded("google", provider, "gemini-2.5-flash")
@@ -888,7 +884,7 @@ class TestCleanupKeepsTrackingAFailedUnload(ProviderRegistryIsolation):
     """
 
     def test_the_failed_model_survives_the_successful_ones(self) -> None:
-        from unified_ai_client import client as client_module
+        from unified_ai_client import registry as client_module
         from unified_ai_client.providers.ollama import OllamaProvider
 
         client_module._LOADED_MODELS.clear()

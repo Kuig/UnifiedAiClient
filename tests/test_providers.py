@@ -7,10 +7,11 @@ server, model that does not support the feature under test) call
 Usage:
     python -m unittest discover -s tests     # from project root
     python tests/test_providers.py           # direct execution
-    python -m unittest tests.test_providers.TestDispatch.test_dispatch_ollama
+    python -m unittest tests.test_providers.TestDispatch.test_dispatch
 """
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sys
@@ -115,24 +116,24 @@ def _first_ollama_embed_model() -> str | None:
 class ProviderRegistryIsolation(unittest.TestCase):
     """Base class that restores the global provider registries after each test.
 
-    ``configure_provider()`` writes into ``client._PROVIDER_CONFIGS`` and
-    invalidates ``client._PROVIDERS``. Tests run in an arbitrary order, so any
+    ``configure_provider()`` writes into ``registry._PROVIDER_CONFIGS`` and
+    invalidates ``registry._PROVIDERS``. Tests run in an arbitrary order, so any
     test that touches those registries must leave them exactly as it found
     them or it silently changes the outcome of the next one.
 
     Two more registries have the same problem and are restored here as well:
-    ``client._LOADED_MODELS``, which any ``call_ai()`` against a provider with
+    ``registry._LOADED_MODELS``, which any ``call_ai()`` against a provider with
     a residency concept writes to, and ``google._UPLOADED_FILES``. A leaked
     entry in the first makes the atexit ``cleanup()`` chase a model that was
     never really loaded; one in the second makes a later test count an upload
-    it did not make. ``client._BUILT_PROVIDERS`` is restored for the same
+    it did not make. ``registry._BUILT_PROVIDERS`` is restored for the same
     reason: ``cleanup()`` walks it by name and would otherwise reach providers
     a later test never asked for.
     """
 
     def setUp(self) -> None:
         super().setUp()
-        from unified_ai_client import client as _client
+        from unified_ai_client import registry as _client
         from unified_ai_client.providers import google as _google
         self._saved_configs = dict(_client._PROVIDER_CONFIGS)
         self._saved_providers = dict(_client._PROVIDERS)
@@ -141,7 +142,7 @@ class ProviderRegistryIsolation(unittest.TestCase):
         self._saved_uploads = dict(_google._UPLOADED_FILES)
 
     def tearDown(self) -> None:
-        from unified_ai_client import client as _client
+        from unified_ai_client import registry as _client
         from unified_ai_client.providers import google as _google
         _client._PROVIDER_CONFIGS.clear()
         _client._PROVIDER_CONFIGS.update(self._saved_configs)
@@ -154,6 +155,45 @@ class ProviderRegistryIsolation(unittest.TestCase):
         _google._UPLOADED_FILES.clear()
         _google._UPLOADED_FILES.update(self._saved_uploads)
         super().tearDown()
+
+
+# Every provider, keyed by the name call_ai() accepts, derived from the
+# library's own registry rather than hand-typed a second time. Until 0.5.8
+# this was an independent copy in test_provider_contracts.py, and test_warmup.py
+# kept a third, unsynchronized one of its own: a 13th provider added only to
+# unified_ai_client.registry would not have failed either. Both now derive
+# from this one.
+from unified_ai_client.registry import _PROVIDER_SPECS  # noqa: E402
+
+_PROVIDER_CLASSES: dict[str, tuple[str, str]] = {
+    name: (spec.module.rsplit(".", 1)[-1], spec.class_name)
+    for name, spec in _PROVIDER_SPECS.items()
+}
+
+
+class RequiresCredential:
+    """Skip the test when the named secret is not configured.
+
+    Replaces the ``load_secrets(...).get(key) or self.skipTest(...)`` guard
+    that used to be hand-copied verbatim in every live test needing one
+    specific provider's key.
+    """
+
+    def _require_credential(self, secrets_key: str) -> None:
+        from unified_ai_client.config import load_secrets
+        if not load_secrets(os.getcwd()).get(secrets_key):
+            self.skipTest(
+                f"{secrets_key} not found in secrets.json or environment variables"
+            )
+
+
+class TestRequiresCredential(RequiresCredential, unittest.TestCase):
+    """The mixin itself must actually skip, not silently pass through."""
+
+    def test_a_missing_key_raises_skip_test(self) -> None:
+        with patch("unified_ai_client.config.load_secrets", return_value={}):
+            with self.assertRaises(unittest.SkipTest):
+                self._require_credential("does_not_exist_api_key")
 
 
 _ECHO_SCRIPT = '''\
@@ -215,24 +255,17 @@ class TestImports(unittest.TestCase):
         self.assertTrue(call_ai)
 
     def test_import_providers(self) -> None:
-        from unified_ai_client.providers.ollama import OllamaProvider
-        from unified_ai_client.providers.google import GoogleProvider
-        from unified_ai_client.providers.anthropic import AnthropicProvider
-        from unified_ai_client.providers.openai import OpenAiProvider
-        from unified_ai_client.providers.mistral import MistralProvider
-        from unified_ai_client.providers.cohere import CohereProvider
-        from unified_ai_client.providers.meta import MetaProvider
-        from unified_ai_client.providers.groq import GroqProvider
-        from unified_ai_client.providers.xai import XAiProvider
-        from unified_ai_client.providers.lmstudio import LmStudioProvider
-        from unified_ai_client.providers.llamacpp import LlamaCppProvider
-        from unified_ai_client.providers.script import ScriptProvider
-        self.assertTrue(all([
-            OllamaProvider, GoogleProvider, AnthropicProvider,
-            OpenAiProvider, MistralProvider, CohereProvider,
-            MetaProvider, GroqProvider, XAiProvider,
-            LmStudioProvider, LlamaCppProvider, ScriptProvider,
-        ]))
+        """Every provider named in the registry must actually import.
+
+        Looped over unified_ai_client.registry._PROVIDER_SPECS instead of
+        12 hand-typed import lines, so a provider added there is covered
+        here for free.
+        """
+        from unified_ai_client.registry import _PROVIDER_SPECS
+        for name, spec in _PROVIDER_SPECS.items():
+            with self.subTest(provider=name):
+                module = importlib.import_module(spec.module)
+                self.assertTrue(getattr(module, spec.class_name))
 
 
 # ---------------------------------------------------------------------------
@@ -449,62 +482,22 @@ class TestConfigLoading(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestDispatch(ProviderRegistryIsolation):
-    """get_provider() must return the right adapter for every provider name."""
+    """get_provider() must return the right adapter for every provider name.
 
-    def _assert_dispatch(self, name: str, expected_type: type) -> None:
-        from unified_ai_client.client import get_provider
-        self.assertIsInstance(get_provider(name), expected_type)
+    One subTest per name in _PROVIDER_CLASSES instead of a hand-typed
+    test_dispatch_<name> per provider: adding a provider to the registry
+    covers it here automatically, with nothing to remember to add by hand.
+    """
 
-    def test_dispatch_ollama(self) -> None:
-        from unified_ai_client.providers.ollama import OllamaProvider
-        self._assert_dispatch("ollama", OllamaProvider)
-
-    def test_dispatch_google(self) -> None:
-        from unified_ai_client.providers.google import GoogleProvider
-        self._assert_dispatch("google", GoogleProvider)
-
-    def test_dispatch_anthropic(self) -> None:
-        from unified_ai_client.providers.anthropic import AnthropicProvider
-        self._assert_dispatch("anthropic", AnthropicProvider)
-
-    def test_dispatch_openai(self) -> None:
-        from unified_ai_client.providers.openai import OpenAiProvider
-        self._assert_dispatch("openai", OpenAiProvider)
-
-    def test_dispatch_mistral(self) -> None:
-        from unified_ai_client.providers.mistral import MistralProvider
-        self._assert_dispatch("mistral", MistralProvider)
-
-    def test_dispatch_cohere(self) -> None:
-        from unified_ai_client.providers.cohere import CohereProvider
-        self._assert_dispatch("cohere", CohereProvider)
-
-    def test_dispatch_meta(self) -> None:
-        from unified_ai_client.providers.meta import MetaProvider
-        self._assert_dispatch("meta", MetaProvider)
-
-    def test_dispatch_groq(self) -> None:
-        from unified_ai_client.providers.groq import GroqProvider
-        self._assert_dispatch("groq", GroqProvider)
-
-    def test_dispatch_xai(self) -> None:
-        from unified_ai_client.providers.xai import XAiProvider
-        self._assert_dispatch("xai", XAiProvider)
-
-    def test_dispatch_lmstudio(self) -> None:
-        from unified_ai_client.providers.lmstudio import LmStudioProvider
-        self._assert_dispatch("lmstudio", LmStudioProvider)
-
-    def test_dispatch_llamacpp(self) -> None:
-        from unified_ai_client.providers.llamacpp import LlamaCppProvider
-        self._assert_dispatch("llamacpp", LlamaCppProvider)
-
-    def test_dispatch_script(self) -> None:
-        from unified_ai_client.providers.script import ScriptProvider
-        self._assert_dispatch("script", ScriptProvider)
+    def test_dispatch(self) -> None:
+        from unified_ai_client.registry import get_provider
+        for name, (module, class_name) in _PROVIDER_CLASSES.items():
+            with self.subTest(provider=name):
+                mod = importlib.import_module(f"unified_ai_client.providers.{module}")
+                self.assertIsInstance(get_provider(name), getattr(mod, class_name))
 
     def test_dispatch_invalid(self) -> None:
-        from unified_ai_client.client import get_provider
+        from unified_ai_client.registry import get_provider
         with self.assertRaises(ValueError):
             get_provider("nonexistent_provider_xyz")
 
@@ -943,12 +936,12 @@ class TestModelResidency(ProviderRegistryIsolation):
     """cleanup() releases the VRAM that keep_alive=-1 would otherwise hold."""
 
     def _tracked(self) -> set:
-        from unified_ai_client import client as _client
+        from unified_ai_client import registry as _client
         return set(_client._LOADED_MODELS)
 
     def test_call_ai_tracks_a_local_model(self) -> None:
         from unified_ai_client import call_ai
-        from unified_ai_client.client import get_provider
+        from unified_ai_client.registry import get_provider
         from unified_ai_client.models import AiResponse
 
         provider = get_provider("ollama")
@@ -960,7 +953,7 @@ class TestModelResidency(ProviderRegistryIsolation):
     def test_a_cloud_model_is_not_tracked(self) -> None:
         """A cloud endpoint holds nothing, so there is nothing to release."""
         from unified_ai_client import call_ai
-        from unified_ai_client.client import get_provider
+        from unified_ai_client.registry import get_provider
         from unified_ai_client.models import AiResponse
 
         provider = get_provider("google")
@@ -971,7 +964,7 @@ class TestModelResidency(ProviderRegistryIsolation):
 
     def test_cleanup_unloads_tracked_models(self) -> None:
         from unified_ai_client import cleanup
-        from unified_ai_client.client import get_provider, _LOADED_MODELS
+        from unified_ai_client.registry import get_provider, _LOADED_MODELS
 
         provider = get_provider("ollama")
         _LOADED_MODELS.clear()
@@ -984,7 +977,7 @@ class TestModelResidency(ProviderRegistryIsolation):
 
     def test_cleanup_can_leave_models_resident(self) -> None:
         from unified_ai_client import cleanup
-        from unified_ai_client.client import get_provider, _LOADED_MODELS
+        from unified_ai_client.registry import get_provider, _LOADED_MODELS
 
         provider = get_provider("ollama")
         _LOADED_MODELS.add(("ollama", "gemma4:12b"))
@@ -1000,7 +993,7 @@ class TestModelResidency(ProviderRegistryIsolation):
         to retry instead of being cleared along with the one that succeeded.
         """
         from unified_ai_client import cleanup
-        from unified_ai_client.client import get_provider, _LOADED_MODELS
+        from unified_ai_client.registry import get_provider, _LOADED_MODELS
 
         ollama = get_provider("ollama")
         _LOADED_MODELS.clear()
@@ -1017,7 +1010,7 @@ class TestModelResidency(ProviderRegistryIsolation):
 
     def test_explicit_unload_is_not_repeated_at_exit(self) -> None:
         from unified_ai_client import cleanup, unload_model
-        from unified_ai_client.client import get_provider, _LOADED_MODELS
+        from unified_ai_client.registry import get_provider, _LOADED_MODELS
 
         provider = get_provider("ollama")
         _LOADED_MODELS.clear()
@@ -1037,7 +1030,7 @@ class TestModelResidency(ProviderRegistryIsolation):
         than reuse whatever instance happened to be cached when it started.
         """
         from unified_ai_client import cleanup
-        from unified_ai_client.client import (
+        from unified_ai_client.registry import (
             configure_provider, get_provider, _LOADED_MODELS,
         )
 
@@ -1060,7 +1053,7 @@ class TestModelResidency(ProviderRegistryIsolation):
     def test_cleanup_still_purges_remote_resources(self) -> None:
         """The pre-existing half of cleanup() must survive the restructure."""
         from unified_ai_client import cleanup
-        from unified_ai_client.client import get_provider
+        from unified_ai_client.registry import get_provider
 
         provider = get_provider("google")
         with patch.object(provider, "cleanup") as purge:
@@ -1079,7 +1072,7 @@ class TestGoogleUploadCache(ProviderRegistryIsolation):
         quota with nothing left to delete them, and the next call re-uploaded
         every one of them.
         """
-        from unified_ai_client.client import configure_provider, get_provider
+        from unified_ai_client.registry import configure_provider, get_provider
         from unified_ai_client.providers import google as google_mod
 
         first = get_provider("google")
@@ -1092,7 +1085,7 @@ class TestGoogleUploadCache(ProviderRegistryIsolation):
         self.assertIn("/tmp/whatever.pdf", google_mod._UPLOADED_FILES)
 
     def test_cleanup_deletes_what_an_evicted_instance_uploaded(self) -> None:
-        from unified_ai_client.client import cleanup, configure_provider, get_provider
+        from unified_ai_client.registry import cleanup, configure_provider, get_provider
         from unified_ai_client.providers import google as google_mod
         from unified_ai_client.providers.google import GoogleProvider
 
@@ -1123,7 +1116,7 @@ class TestGoogleUploadCache(ProviderRegistryIsolation):
         Google's quota. Must still not raise, and must not stop the delete
         of the other uploads in the same cleanup() call.
         """
-        from unified_ai_client.client import cleanup, configure_provider, get_provider
+        from unified_ai_client.registry import cleanup, configure_provider, get_provider
         from unified_ai_client.providers import google as google_mod
         from unified_ai_client.providers.google import GoogleProvider
 
@@ -1423,31 +1416,51 @@ class TestReasoningContract(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 9b. Live smoke test shared by the three cloud chat providers
+# ---------------------------------------------------------------------------
+
+class TestLivePongSmoke(RequiresCredential, unittest.TestCase):
+    """The same trivial live round-trip, once, for every cloud chat provider.
+
+    Until 0.5.8 this was the same test body copied three times
+    (TestGoogleLive.test_google_live_generate, TestAnthropicLive,
+    TestOpenAiLive), differing only in provider/model/secrets key. Ollama
+    does not participate: its live tests go through _require_model() and
+    _live_call(), a different mechanism not worth forcing into this shape.
+    """
+
+    _CASES: dict[str, tuple[str, str]] = {
+        "google": ("gemini-2.5-flash", "google_api_key"),
+        "anthropic": ("claude-3-5-haiku-latest", "anthropic_api_key"),
+        "openai": ("gpt-4o-mini", "openai_api_key"),
+    }
+
+    def test_replies_to_a_trivial_prompt(self) -> None:
+        from unified_ai_client import call_ai
+        for provider, (model, secrets_key) in self._CASES.items():
+            with self.subTest(provider=provider):
+                self._require_credential(secrets_key)
+                response = call_ai(
+                    provider=provider,
+                    model=model,
+                    prompt="Reply with exactly the word PONG and nothing else.",
+                    temperature=0.0,
+                    timeout=30,
+                )
+                self.assertIsInstance(response.text, str)
+                self.assertGreater(len(response.text), 0)
+
+
+# ---------------------------------------------------------------------------
 # 10. Google (skip if no API key)
 # ---------------------------------------------------------------------------
 
-class TestGoogleLive(unittest.TestCase):
+class TestGoogleLive(RequiresCredential, unittest.TestCase):
     """End-to-end calls against the Google AI API."""
 
     def setUp(self) -> None:
         super().setUp()
-        from unified_ai_client.config import load_secrets
-        if not load_secrets(os.getcwd()).get("google_api_key"):
-            self.skipTest(
-                "google_api_key not found in secrets.json or environment variables"
-            )
-
-    def test_google_live_generate(self) -> None:
-        from unified_ai_client import call_ai
-        response = call_ai(
-            provider="google",
-            model="gemini-2.5-flash",
-            prompt="Reply with exactly the word PONG and nothing else.",
-            temperature=0.0,
-            timeout=30,
-        )
-        self.assertIsInstance(response.text, str)
-        self.assertGreater(len(response.text), 0)
+        self._require_credential("google_api_key")
 
     def test_google_live_with_text_file(self) -> None:
         tmp = _make_text_file("The sky is blue.")
@@ -1654,26 +1667,6 @@ class TestAnthropicOffline(unittest.TestCase):
         self.assertEqual(resp.tool_calls[0].arguments, {"location": "Rome"})
 
 
-class TestAnthropicLive(unittest.TestCase):
-    """End-to-end call against the Anthropic API."""
-
-    def test_anthropic_live_generate(self) -> None:
-        from unified_ai_client.config import load_secrets
-        if not load_secrets(os.getcwd()).get("anthropic_api_key"):
-            self.skipTest(
-                "anthropic_api_key not found in secrets.json or environment variables"
-            )
-        from unified_ai_client import call_ai
-        response = call_ai(
-            provider="anthropic",
-            model="claude-3-5-haiku-latest",
-            prompt="Reply with exactly the word PONG and nothing else.",
-            temperature=0.0,
-            timeout=30,
-        )
-        self.assertIsInstance(response.text, str)
-
-
 # ---------------------------------------------------------------------------
 # 12. OpenAI-compatible providers
 # ---------------------------------------------------------------------------
@@ -1801,26 +1794,6 @@ class TestOpenAiCompatOffline(unittest.TestCase):
         self.assertEqual(len(tool_msgs), 1)
         self.assertEqual(tool_msgs[0]["tool_call_id"], "call_xyz")
         self.assertEqual(tool_msgs[0]["content"], "22C, sunny")
-
-
-class TestOpenAiLive(unittest.TestCase):
-    """End-to-end call against the OpenAI API."""
-
-    def test_openai_live_generate(self) -> None:
-        from unified_ai_client.config import load_secrets
-        if not load_secrets(os.getcwd()).get("openai_api_key"):
-            self.skipTest(
-                "openai_api_key not found in secrets.json or environment variables"
-            )
-        from unified_ai_client import call_ai
-        response = call_ai(
-            provider="openai",
-            model="gpt-4o-mini",
-            prompt="Reply with exactly the word PONG and nothing else.",
-            temperature=0.0,
-            timeout=30,
-        )
-        self.assertIsInstance(response.text, str)
 
 
 # ---------------------------------------------------------------------------
@@ -1960,7 +1933,7 @@ class TestConfigureProviderMergesTheFile(ProviderRegistryIsolation):
 
     def setUp(self) -> None:
         super().setUp()
-        from unified_ai_client import client as _client
+        from unified_ai_client import registry as _client
 
         self._client = _client
         self._saved_path = _client._effective_config_path

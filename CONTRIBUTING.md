@@ -102,18 +102,20 @@ cannot produce raises at request-build time rather than at import.
 
 Then wire it in and document it:
 
-- a branch in the dispatch chain in `client.py`, including the name in its `ValueError`
-  message, and the API-key lookup beside it;
+- an entry in `_PROVIDER_SPECS` in `registry.py` (module path, class name, and the secrets key
+  name if it needs one) — the dispatch, the `ValueError` message and the api-key lookup are all
+  derived from it, so that one entry is the whole of it;
 - the entry in the environment-variable map in `config.py`;
 - `config.json.example`, `secrets.json.example` and `.env.example`;
 - the provider tables in `README.md`, `COMPARISON.md`, `docs/multimodal.md`,
   `docs/reasoning.md`, `docs/tool-calling.md` and `docs/warm-up.md`;
 - an entry under `## [Unreleased]` in `CHANGELOG.md`;
-- a `test_dispatch_<name>` in `TestDispatch`, and a row in every table in
-  `tests/test_provider_contracts.py`. Those tables are keyed by provider name, and both
-  `TestFileSupportMatrix._SUPPORT` and `TestUnloadSupportMatrix._SUPPORTS_UNLOAD` assert
-  the declared capabilities against an explicit list, so a provider added without a row
-  there fails the suite.
+- a row in every hand-written table in `tests/test_provider_contracts.py`. Those tables are
+  keyed by provider name, and both `TestFileSupportMatrix._SUPPORT` and
+  `TestUnloadSupportMatrix._SUPPORTS_UNLOAD` assert the declared capabilities against an
+  explicit list, so a provider added without a row there fails the suite. `TestDispatch` and
+  the import tests need no new entry: they loop over `_PROVIDER_CLASSES`, itself derived from
+  `_PROVIDER_SPECS`, so the registry entry above already covers them.
 
 If the endpoint takes an option this library already names, such as `context_size` or
 `keep_alive`, read it explicitly and add it to the adapter's `_CONSUMED_OPTION_KEYS`.

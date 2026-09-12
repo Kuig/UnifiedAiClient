@@ -31,28 +31,16 @@ for _path in (str(_PROJECT_ROOT), str(_TESTS_DIR)):
         sys.path.insert(0, _path)
 
 # Imported as a top-level module: unittest discovery puts tests/ on sys.path.
-from test_providers import ProviderRegistryIsolation  # noqa: E402
+# _PROVIDER_CLASSES lives there too (derived from unified_ai_client.registry),
+# alongside ProviderRegistryIsolation, so both test modules read the same table
+# instead of keeping their own hand-typed copy.
+from test_providers import (  # noqa: E402
+    ProviderRegistryIsolation,
+    RequiresCredential,
+    _PROVIDER_CLASSES,
+)
 
 from unified_ai_client.models import AiRequest, ProviderConfig  # noqa: E402
-
-
-# Every provider, keyed by the name call_ai() accepts. The single source the
-# credential, capability and file-support tables below are all driven from, so a
-# renamed class is one edit rather than three.
-_PROVIDER_CLASSES: dict[str, tuple[str, str]] = {
-    "ollama": ("ollama", "OllamaProvider"),
-    "google": ("google", "GoogleProvider"),
-    "anthropic": ("anthropic", "AnthropicProvider"),
-    "openai": ("openai", "OpenAiProvider"),
-    "mistral": ("mistral", "MistralProvider"),
-    "cohere": ("cohere", "CohereProvider"),
-    "meta": ("meta", "MetaProvider"),
-    "groq": ("groq", "GroqProvider"),
-    "xai": ("xai", "XAiProvider"),
-    "lmstudio": ("lmstudio", "LmStudioProvider"),
-    "llamacpp": ("llamacpp", "LlamaCppProvider"),
-    "script": ("script", "ScriptProvider"),
-}
 
 
 def _provider_class(module: str, class_name: str):
@@ -111,7 +99,7 @@ class TestProviderUrlResolution(ProviderRegistryIsolation):
         self.assertIsNone(ProviderConfig().url)
 
     def test_unset_url_resolves_to_each_provider_default(self) -> None:
-        from unified_ai_client.client import get_provider
+        from unified_ai_client.registry import get_provider
         for name, expected in self._DEFAULTS.items():
             with self.subTest(provider=name):
                 self.assertEqual(get_provider(name).base_url, expected)
@@ -125,7 +113,7 @@ class TestProviderUrlResolution(ProviderRegistryIsolation):
         request, and the OpenAI key with it, to api.openai.com instead.
         """
         from unified_ai_client import configure_provider
-        from unified_ai_client.client import get_provider
+        from unified_ai_client.registry import get_provider
 
         configure_provider("openai", url="http://localhost:11434")
         self.assertEqual(get_provider("openai").base_url, "http://localhost:11434")
@@ -138,7 +126,7 @@ class TestProviderUrlResolution(ProviderRegistryIsolation):
         configuration beyond recovery.
         """
         from unified_ai_client import configure_provider
-        from unified_ai_client.client import get_provider, _PROVIDER_CONFIGS
+        from unified_ai_client.registry import get_provider, _PROVIDER_CONFIGS
 
         configure_provider("openai", url="http://localhost:11434")
         get_provider("openai")
@@ -161,7 +149,7 @@ class TestProviderNameRoundTrip(ProviderRegistryIsolation):
     """
 
     def test_every_registered_provider_reports_its_registry_name(self) -> None:
-        from unified_ai_client.client import get_provider
+        from unified_ai_client.registry import get_provider
 
         for name in _PROVIDER_CLASSES:
             if name == "script":
@@ -269,11 +257,35 @@ class TestApiKeyHandling(ProviderRegistryIsolation):
                 self.assertIsNone(provider._require_api_key())
 
     def test_get_provider_never_passes_none(self) -> None:
-        from unified_ai_client.client import get_provider
+        from unified_ai_client.registry import get_provider
         with patch.dict(os.environ, {}, clear=True):
             for name in self._CLOUD:
                 with self.subTest(provider=name):
                     self.assertIsInstance(get_provider(name).api_key, str)
+
+    def test_get_provider_reads_only_its_own_key(self) -> None:
+        """Regression: every cache miss looked up all eight secrets, even for
+        the one provider whose ProviderSpec names as the only one that matters
+        for this build. Ollama and script need none of them at all and used to
+        pay for all eight lookups anyway.
+        """
+        from unified_ai_client.registry import _PROVIDERS, get_provider
+
+        accessed: list[str] = []
+
+        class RecordingSecrets(dict):
+            def get(self, key, default=None):
+                accessed.append(key)
+                return super().get(key, default)
+
+        secrets = RecordingSecrets({"anthropic_api_key": "sk-ant-x"})
+        _PROVIDERS.pop("anthropic", None)
+
+        with patch("unified_ai_client.config.load_secrets", return_value=secrets):
+            provider = get_provider("anthropic")
+
+        self.assertEqual(accessed, ["anthropic_api_key"])
+        self.assertEqual(provider.api_key, "sk-ant-x")
 
 
 # ---------------------------------------------------------------------------
@@ -543,15 +555,11 @@ class TestGoogleEmbeddings(unittest.TestCase):
             provider.get_embedding("any", "text")
 
 
-class TestGoogleEmbeddingsLive(unittest.TestCase):
+class TestGoogleEmbeddingsLive(RequiresCredential, unittest.TestCase):
     """Real embedding call, skipped without a key."""
 
     def test_google_live_embedding(self) -> None:
-        from unified_ai_client.config import load_secrets
-        if not load_secrets(os.getcwd()).get("google_api_key"):
-            self.skipTest(
-                "google_api_key not found in secrets.json or environment variables"
-            )
+        self._require_credential("google_api_key")
         from unified_ai_client import get_embedding
 
         vector = get_embedding(
@@ -1183,7 +1191,7 @@ class TestProviderRefusalsEndToEnd(FileFixtureCase):
         self.assertIn("what colour?", content)
 
 
-class TestFileHandlingLive(FileFixtureCase):
+class TestFileHandlingLive(RequiresCredential, FileFixtureCase):
     """Real requests confirming the block shapes the offline tests assert.
 
     These are the checks the documentation could not settle. Each skips when
@@ -1234,11 +1242,7 @@ class TestFileHandlingLive(FileFixtureCase):
 
     def test_openai_live_pdf(self) -> None:
         """The 'file' block must be accepted where 'input_file' was not."""
-        from unified_ai_client.config import load_secrets
-        if not load_secrets(os.getcwd()).get("openai_api_key"):
-            self.skipTest(
-                "openai_api_key not found in secrets.json or environment variables"
-            )
+        self._require_credential("openai_api_key")
         from unified_ai_client import call_ai
 
         pdf = (
@@ -1263,11 +1267,7 @@ class TestFileHandlingLive(FileFixtureCase):
 
     def test_cohere_live_image(self) -> None:
         """The one support-table row the documentation left ambiguous."""
-        from unified_ai_client.config import load_secrets
-        if not load_secrets(os.getcwd()).get("cohere_api_key"):
-            self.skipTest(
-                "cohere_api_key not found in secrets.json or environment variables"
-            )
+        self._require_credential("cohere_api_key")
         from unified_ai_client import call_ai
 
         # 1x1 transparent PNG.

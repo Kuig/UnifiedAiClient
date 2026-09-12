@@ -3,11 +3,13 @@ from unified_ai_client.client import (
     call_ai,
     get_embedding,
     preload_model,
-    unload_model,
     warm_up,
+)
+from unified_ai_client.registry import (
     cleanup,
     configure_provider,
     get_provider,
+    unload_model,
 )
 from unified_ai_client.config import load_secrets, load_config
 from unified_ai_client.exceptions import (

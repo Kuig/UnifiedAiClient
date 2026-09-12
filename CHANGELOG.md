@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.8] - 2026-09-12
+
+### Changed
+
+- The provider registry (`get_provider()`, `configure_provider()`, `cleanup()`,
+  `unload_model()`, and the four module-level registries behind them) moved out of
+  `client.py` into a new `unified_ai_client/registry.py`. `client.py` keeps `call_ai()`,
+  `preload_model()`, `warm_up()` and `get_embedding()`. Purely internal: `__init__.py`
+  re-exports both halves under the same public names, so `from unified_ai_client import
+  get_provider, cleanup` is unaffected. Only code importing `unified_ai_client.client.get_provider`
+  directly (or the module itself) needs to update its import.
+- `get_provider()`'s dispatch is now table-driven from a single `_PROVIDER_SPECS` registry
+  instead of duplicating the provider list by hand across an `if`/`elif` chain, eight
+  eager `api_key_*` lookups, a hand-written `ValueError` message, and two docstrings in
+  `client.py` alone, plus three separate hand-typed tables in the test suite. Adding a
+  provider is now one entry in `registry.py` instead of edits spread across several files.
+- The test suite's own provider/class tables (`test_provider_contracts.py`'s
+  `_PROVIDER_CLASSES`, `test_warmup.py`'s `_ALL_PROVIDER_CLASSES`) are now derived from
+  the same registry instead of being independently hand-typed and unsynchronized with
+  each other. `TestDispatch` collapsed from 12 near-identical methods to one `subTest`
+  loop over that table. The three duplicated live "reply with PONG" smoke tests
+  (Google, Anthropic, OpenAI) consolidated into one `TestLivePongSmoke`, and the seven
+  duplicated `load_secrets(...).get(key) or self.skipTest(...)` guards became a shared
+  `RequiresCredential` mixin.
+
+### Fixed
+
+- `get_provider()` now looks up only the one credential the requested provider actually
+  needs. Every cache miss used to compute all eight cloud providers' secrets
+  unconditionally, including for `"ollama"` and `"script"`, which use none of them.
+
 ## [0.5.7] - 2026-09-12
 
 ### Fixed

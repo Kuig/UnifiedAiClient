@@ -28,7 +28,8 @@ provider speaks HTTP through `urllib` from the standard library.
 ```
 unified_ai_client/
 ├── __init__.py           # Public API exports
-├── client.py             # call_ai(), warm_up(), configure_provider() router + cache
+├── client.py             # call_ai(), warm_up(), preload_model(), get_embedding() facade
+├── registry.py           # get_provider(), configure_provider(), cleanup(), the four registries
 ├── models.py             # AiRequest, AiResponse, ProviderConfig dataclasses
 ├── file_utils.py         # classify_file, validate_files, encode_file_base64, ...
 ├── exceptions.py         # UnsupportedFileError, MissingFileError, FileDecodeError
@@ -56,28 +57,39 @@ unified_ai_client/
 
 ### The entry layer
 
-`client.py` is the only module a consumer needs. It holds `call_ai()`, `get_embedding()`,
-`warm_up()`, `preload_model()`, `unload_model()`, `configure_provider()`, `get_provider()`
-and `cleanup()`, plus the four registries behind them: one mapping a provider name to its
-registered configuration, one caching the built provider instance, one recording which models
-a local provider currently holds resident, and one naming every provider built in the process.
+Two modules, split along one rule: a function that reaches into a registry directly lives in
+`registry.py`; a function that only ever reaches one *through* `get_provider()` /
+`_register_cleanup()` / `_record_loaded()` / `configure_provider()` lives in `client.py`. A
+consumer never has to know the split exists — `unified_ai_client/__init__.py` re-exports both
+halves under the same public names it always has.
 
-All four live at module level rather than on the provider instances, and that is load-bearing
-rather than incidental. `configure_provider()` evicts the cached instance, so anything kept on
-the instance is silently lost the moment a consumer reconfigures. The resident-model set and
-Google's uploaded-file cache both have to outlive that eviction, or the resource they track is
-leaked with nothing left holding a reference to release it.
+**`registry.py`** holds `get_provider()`, `configure_provider()`, `cleanup()`, `unload_model()`,
+and the four registries behind them: one mapping a provider name to its registered
+configuration, one caching the built provider instance, one recording which models a local
+provider currently holds resident, and one naming every provider built in the process. It also
+holds `_PROVIDER_SPECS`, the table `get_provider()` dispatches from: for each registry name, the
+provider's module path, class name, and the secrets key it needs, if any. The class is imported
+lazily via `importlib`, so resolving `"ollama"` never pulls in Google's SDK, and only the one
+secret a provider actually needs is looked up, not all of them.
+
+All four registries live at module level rather than on the provider instances, and that is
+load-bearing rather than incidental. `configure_provider()` evicts the cached instance, so
+anything kept on the instance is silently lost the moment a consumer reconfigures. The
+resident-model set and Google's uploaded-file cache both have to outlive that eviction, or the
+resource they track is leaked with nothing left holding a reference to release it.
 
 The fourth registry exists because surviving the eviction is only half the problem. `cleanup()`
 walks providers by name and resolves each one through `get_provider()`, rebuilding whatever was
 evicted, because a set of live references is not enough: something has to still be asked to
 release them.
 
-`call_ai()` does four things and delegates the rest. It packs its arguments into an
-`AiRequest`, resolves a cached provider through `get_provider()`, sleeps for the
-rate-limiting interval if one is configured, and invokes the provider through the retry
-wrapper. It does not know what an image is, which provider supports reasoning, or how a
-tool call is spelled.
+**`client.py`** holds the four functions a consumer actually calls day to day: `call_ai()`,
+`get_embedding()`, `warm_up()`, `preload_model()`. `call_ai()` does four things and delegates the
+rest. It packs its arguments into an `AiRequest`, resolves a cached provider through
+`get_provider()`, sleeps for the rate-limiting interval if one is configured, and invokes the
+provider through the retry wrapper. It does not know what an image is, which provider supports
+reasoning, or how a tool call is spelled, and it does not know how the registries it asks
+`get_provider()` to consult are shaped either.
 
 `models.py` holds the dataclasses that cross those boundaries: `AiRequest` going in,
 `AiResponse` coming out, `ProviderConfig` describing a provider's registered settings, and
