@@ -1494,6 +1494,95 @@ class TestSamplingParameters(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Ollama use_generate: fail fast instead of silently dropping the conversation
+# ---------------------------------------------------------------------------
+
+class TestOllamaGenerateModeRejectsChat(unittest.TestCase):
+    """/api/generate has no place for tools, history or a system prompt.
+
+    Regression: use_generate=True used to post only the prompt (and any
+    images) to /api/generate, silently discarding request.tools,
+    request.tool_results, request.messages and request.system_prompt instead
+    of refusing. A4/A10-class silent data loss, applied to the whole
+    conversation rather than a single field.
+    """
+
+    def _call(self, **request_kwargs):
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(
+            ProviderConfig(extra_options={"use_generate": True})
+        )
+
+        def fail_if_called(_self, endpoint, payload, timeout):
+            raise AssertionError(
+                "must not reach the network once the field is unsupported"
+            )
+
+        with patch.object(OllamaProvider, "_post", fail_if_called):
+            provider.call(AiRequest(
+                provider="ollama", model="m", prompt="hi", timeout=30,
+                **request_kwargs,
+            ))
+
+    def test_rejects_tools(self) -> None:
+        from unified_ai_client.exceptions import NonRetryableError
+        from unified_ai_client.models import ToolDefinition
+
+        with self.assertRaises(NonRetryableError) as ctx:
+            self._call(tools=[ToolDefinition(
+                name="f", description="d", parameters={"type": "object"},
+            )])
+        self.assertIn("tools", str(ctx.exception))
+
+    def test_rejects_tool_results(self) -> None:
+        from unified_ai_client.exceptions import NonRetryableError
+        from unified_ai_client.models import ToolResult
+
+        with self.assertRaises(NonRetryableError) as ctx:
+            self._call(
+                messages=[{"role": "user", "content": "hi"}],
+                tool_results=[ToolResult(call_id="1", name="f", content="done")],
+            )
+        self.assertIn("tool_results", str(ctx.exception))
+
+    def test_rejects_message_history(self) -> None:
+        from unified_ai_client.exceptions import NonRetryableError
+
+        with self.assertRaises(NonRetryableError) as ctx:
+            self._call(messages=[{"role": "user", "content": "earlier"}])
+        self.assertIn("messages", str(ctx.exception))
+
+    def test_rejects_system_prompt(self) -> None:
+        from unified_ai_client.exceptions import NonRetryableError
+
+        with self.assertRaises(NonRetryableError) as ctx:
+            self._call(system_prompt="be terse")
+        self.assertIn("system_prompt", str(ctx.exception))
+
+    def test_a_bare_prompt_still_works(self) -> None:
+        """The one case use_generate actually supports must be unaffected."""
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(
+            ProviderConfig(extra_options={"use_generate": True})
+        )
+        seen = {}
+
+        def fake_post(self, endpoint, payload, timeout):
+            seen["endpoint"] = endpoint
+            seen["payload"] = payload
+            return _OK_RESPONSE
+
+        with patch.object(OllamaProvider, "_post", fake_post):
+            provider.call(AiRequest(
+                provider="ollama", model="m", prompt="hi", timeout=30,
+            ))
+        self.assertEqual(seen["endpoint"], "/api/generate")
+        self.assertEqual(seen["payload"]["prompt"], "hi")
+
+
+# ---------------------------------------------------------------------------
 # Google call deadline
 # ---------------------------------------------------------------------------
 

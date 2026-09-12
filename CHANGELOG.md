@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-09-12
+
+### Fixed
+
+- Ollama's `use_generate` no longer silently drops `tools`, `tool_results`, `messages` or
+  `system_prompt`. That option routes to `/api/generate`, which has no place for any of the
+  four, and `call()` posted only the prompt (and any images) without ever reading them,
+  so a caller who turned it on lost its system prompt, its history and its tool calling with
+  no error. It now raises `NonRetryableError` naming whichever of the four are set, before any
+  of the now-pointless file or history processing runs.
+
 ## [0.5.6] - 2026-09-08
 
 ### Fixed

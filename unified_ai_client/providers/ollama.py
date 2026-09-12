@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Any
 
+from unified_ai_client.exceptions import NonRetryableError
 from unified_ai_client.file_utils import encode_file_base64, normalize_file_paths
 from unified_ai_client.http import post_json
 from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
@@ -224,6 +225,29 @@ class OllamaProvider(BaseProvider):
         # know use_generate before it can decide whether its result is used.
         opts = self._merge_options(request)
         use_generate = opts.get("use_generate", False)
+
+        # /api/generate has no place for any of these: no message history, no
+        # system role, no tool schema, no way to append a tool result. Until
+        # this check existed, use_generate silently dropped all four instead
+        # of refusing, the same class of silent data loss the file-attachment
+        # and history-message invariants elsewhere in this adapter already
+        # guard against.
+        if use_generate:
+            unsupported = [
+                name for name, value in (
+                    ("tools", request.tools),
+                    ("tool_results", request.tool_results),
+                    ("messages", request.messages),
+                    ("system_prompt", request.system_prompt),
+                ) if value
+            ]
+            if unsupported:
+                raise NonRetryableError(
+                    "Ollama's use_generate routes to /api/generate, which has "
+                    f"no place for {', '.join(unsupported)}. Turn "
+                    "use_generate off, or drop the field(s), to use "
+                    "/api/chat instead."
+                )
 
         # 4. Current User Message — only add when NOT in a tool result continuation.
         # When tool_results are provided, the consumer has already placed the user
