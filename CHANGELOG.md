@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `BaseProvider.list_models()` (concrete, raises `NotImplementedError` by default), plus the
   class-level `SUPPORTS_EMBEDDINGS` and `PROBE_PATH`. An adapter written before them keeps
   working unchanged.
+- `ModelRefusalError` (a `NonRetryableError`), raised when a provider declines on policy
+  grounds instead of answering, with `provider`, `category`, `explanation` and
+  `partial_text`. Anthropic raises it for `stop_reason: "refusal"`, which used to come back
+  as an empty or truncated `AiResponse`.
 
 ### Changed
 
@@ -50,8 +54,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `format` override what `thinking` and `format_json` derive. A completion-only field on a
   chat request raises `NonRetryableError`, pointing at `use_generate`.
 
+- Anthropic: `thinking=True` asks for `"display": "summarized"` from Claude 4.7 on, where the
+  API otherwise returns thinking blocks with empty text, so `reasoning_text` was always
+  empty there. `reasoning_is_summary` is now `True` for a Claude 4 or later trace, which is a
+  summary, not the raw chain of thought.
+- Anthropic: with thinking on, an explicit `temperature`, `top_k` or `top_p` is dropped with
+  a warning (the API refuses them). `temperature` used to be forced to `1`; it is now left
+  out, the same default without sending a value.
+
 ### Fixed
 
+- Anthropic ignored `format_json` entirely, although it is documented as forcing JSON. The
+  Messages API has no schema-less JSON mode, so `format_json=True` now raises
+  `NonRetryableError` unless `extra_options` carries a schema in
+  `output_config.format`, which is sent as given.
+- Anthropic `thinking=False` was a 400 on Claude Opus 5.5, Fable and Sonnet 5.5, which
+  refuse `{"type": "disabled"}`. Sonnet 5.5 now gets `{"type": "between_tools"}`; Opus 5.5 and
+  Fable, which cannot turn thinking off, get `output_config.effort: "low"` instead (an effort
+  set in `extra_options` wins). Verified against Anthropic's documentation, not live.
 - Ollama's `use_generate` sends the system prompt in `/api/generate`'s own `system` field
   instead of refusing it, sends `think` for `thinking=True`/`False` instead of dropping it,
   and reads the trace back from the response's `thinking` field into `reasoning_text`,

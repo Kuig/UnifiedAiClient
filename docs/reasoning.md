@@ -20,7 +20,7 @@ leaves the decision to the provider. Here is what each provider actually does wi
 |---|---|---|---|
 | `google` | `thinking_level` on Gemini 3.x, `thinking_budget` on 2.5 | minimised explicitly | provider default, thoughts still captured |
 | `ollama` | sends `think: true`, on `/api/chat` and on `/api/generate` alike | sends `think: false` | field omitted |
-| `anthropic` | `{"type": "adaptive"}` on Claude 4.6 and later, `{"type": "enabled", "budget_tokens": N}` below | `{"type": "disabled"}` on 4.6 and later; below that the field is omitted, which is already the off state | field omitted |
+| `anthropic` | `{"type": "adaptive"}` on Claude 4.6 and later (with `"display": "summarized"` from 4.7, where the trace is otherwise returned empty), `{"type": "enabled", "budget_tokens": N}` below | `{"type": "disabled"}` on 4.6 and later; `{"type": "between_tools"}` on Sonnet 5.5; on Opus 5.5 and Fable, which cannot turn thinking off, the field is omitted and `output_config.effort` is set to `"low"`, the closest the API allows; below 4.6 the field is omitted, which is already the off state | field omitted |
 | `openai`, `mistral`, `groq`, `xai` | `reasoning_effort: "high"` | `reasoning_effort: "none"` | field omitted |
 | `cohere`, `meta`, `lmstudio`, `llamacpp` | no reasoning control in the API; the value is ignored | ignored | ignored |
 
@@ -61,9 +61,14 @@ OpenAI-compatible providers, `thinking` blocks for Anthropic and Google, the `th
 field for Ollama on both of its endpoints).
 
 Check `reasoning_is_summary` before comparing traces across providers: Google returns a
-summary of its reasoning, the others return the raw text. Measuring trace length or
-composition across the two without checking that flag compares a summary against a
-transcript.
+summary of its reasoning, and so does Anthropic from Claude 4 on; the others return the raw
+text. Measuring trace length or composition across the two without checking that flag
+compares a summary against a transcript.
+
+On Anthropic, sampling parameters do not survive thinking: with thinking on, the Messages
+API refuses `top_k` and `top_p` and accepts only the default `temperature`, so an explicit
+value is dropped with a warning in the log. From Claude 4.7 on the API refuses all three
+whether thinking is on or not, and the resulting error is the API's own.
 
 `reasoning_tokens` reports the tokens spent thinking, and is `0` where the provider does
 not report it separately. Ollama is the one case where the figure is **estimated** rather

@@ -44,7 +44,7 @@ def call_ai(
 | `file_path` | `str \| list[str] \| None` | `None` | Local file path(s) to attach to the current turn. See [Multimodal Input](multimodal.md). |
 | `temperature` | `float \| None` | `None` | Sampling temperature. `None` falls back to the configured value; when there is none, nothing is sent and the provider's own default applies. |
 | `thinking` | `bool \| str` | `"default"` | `True` / `False` to force reasoning on or off, `"default"` to leave it to the provider. See [Thinking and Reasoning](reasoning.md). |
-| `format_json` | `bool` | `False` | Forces the model to respond in valid JSON. |
+| `format_json` | `bool` | `False` | Forces the model to respond in valid JSON. `anthropic` has no schema-less JSON mode, so there it raises `NonRetryableError` unless `extra_options` carries a schema as `{"output_config": {"format": {"type": "json_schema", "schema": {...}}}}`. On `ollama`, a JSON schema in `extra_options={"format": {...}}` replaces the plain JSON mode. |
 | `timeout` | `int \| None` | `None` | Network timeout in seconds. `None` uses the timeout registered for the provider via `configure_provider()`, falling back to 300. Since a non-streaming request sends nothing until the answer is complete, this behaves as a deadline for the whole call. |
 | `max_retries` | `int` | `3` | Retry attempts on network and rate-limit failures, a timeout included. See the note below. |
 | `retry_base_delay` | `float` | `5.0` | Initial backoff delay in seconds, doubled on each attempt. |
@@ -74,7 +74,8 @@ reasoning trace, and any tool calls the model requested.
 attached file, [`MissingFileError`](#missingfileerror) if a path does not exist,
 [`FileDecodeError`](#filedecodeerror) if a text attachment is not valid UTF-8. All three
 are raised while the request is being assembled, before anything is sent, and none is
-retried.
+retried. [`ModelRefusalError`](#modelrefusalerror) if the model declined on policy
+grounds instead of answering, also not retried.
 
 ```python
 from unified_ai_client import call_ai
@@ -442,7 +443,7 @@ The standard response object returned by `call_ai()`.
 | `output_tokens` | `int` | `0` | Completion tokens generated. |
 | `reasoning_tokens` | `int` | `0` | Tokens spent on internal reasoning. `0` where the provider does not report it. On Ollama the figure is estimated, not reported. |
 | `reasoning_text` | `str` | `""` | The reasoning transcript, when the model returned one. Populated whatever `thinking` was set to. |
-| `reasoning_is_summary` | `bool` | `False` | `True` when `reasoning_text` is a provider-generated summary of the chain of thought rather than the raw trace. Google summarises; the others do not. |
+| `reasoning_is_summary` | `bool` | `False` | `True` when `reasoning_text` is a provider-generated summary of the chain of thought rather than the raw trace. Google summarises, and so does Anthropic from Claude 4 on; the others return the raw trace. |
 | `tool_calls` | `list[ToolCall]` | `[]` | Tool calls the model requested. Empty when it answered with text. |
 
 ### `ToolDefinition`
@@ -599,3 +600,18 @@ it on the first attempt instead of spending the backoff budget.
 
 Raised for every 4xx except 408, 409, 425 and 429, which are transient by definition and stay
 retryable along with the 5xx range.
+
+### `ModelRefusalError`
+
+Raised when the provider answers successfully but what it returns is a policy refusal
+rather than an answer: currently an Anthropic response with `stop_reason: "refusal"`,
+whose content is empty or cut off where a safety classifier stopped it. Returning that as
+an `AiResponse` would hand back a non-answer that looks like one. Subclasses
+`NonRetryableError`: the same request is declined the same way.
+
+| Attribute | Holds |
+|---|---|
+| `provider` | The provider that declined. |
+| `category` | The provider's classification of the refusal, such as `"cyber"`, or `None`. |
+| `explanation` | The provider's explanation, or an empty string. |
+| `partial_text` | Any text generated before the refusal. |

@@ -41,6 +41,51 @@ class FileDecodeError(NonRetryableError, ValueError):
     """
 
 
+class ModelRefusalError(NonRetryableError):
+    """The provider declined to answer, on policy grounds.
+
+    The request succeeded at the HTTP level and the response is well formed,
+    but what it carries is a refusal rather than an answer: empty, or cut off
+    where a safety classifier stopped it. Returning that text as an ordinary
+    ``AiResponse`` would hand the caller a non-answer that looks like one, so it
+    is raised instead. Not retried: the same request is declined the same way.
+
+    Attributes:
+        provider: Registry name of the provider that declined.
+        category: The provider's own classification of the refusal, such as
+            ``"cyber"``, or None when it gave none.
+        explanation: The provider's explanation, or an empty string.
+        partial_text: Any text generated before the refusal, for a caller that
+            wants it despite the refusal.
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        category: str | None = None,
+        explanation: str = "",
+        partial_text: str = "",
+    ) -> None:
+        """Build the error.
+
+        Args:
+            provider: Registry name of the provider that declined.
+            category: The provider's classification of the refusal, if any.
+            explanation: The provider's explanation, if any.
+            partial_text: Text generated before the refusal, if any.
+        """
+        message = f"Provider '{provider}' declined the request"
+        if category:
+            message += f" (category: {category})"
+        if explanation:
+            message += f": {explanation}"
+        super().__init__(message)
+        self.provider = provider
+        self.category = category
+        self.explanation = explanation
+        self.partial_text = partial_text
+
+
 class ProviderHttpError(urllib.error.HTTPError):
     """An HTTP error response from a provider endpoint, with its body read.
 

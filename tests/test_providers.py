@@ -1387,7 +1387,7 @@ class TestReasoningContract(unittest.TestCase):
     """The reasoning_is_summary flag must stay conservative across providers."""
 
     def test_reasoning_is_summary_offline(self) -> None:
-        """Only Google may report a summarised trace.
+        """Only Google and Anthropic may report a summarised trace.
 
         The flag tells consumers whether reasoning_text is the model's raw chain
         of thought or a summary the provider wrote about it. Consumers that
@@ -1410,8 +1410,13 @@ class TestReasoningContract(unittest.TestCase):
         google_src = (providers_dir / "google.py").read_text(encoding="utf-8")
         self.assertIn("reasoning_is_summary=bool(reasoning_text)", google_src)
 
+        # Anthropic summarises from Claude 4 on; its behaviour is asserted in
+        # TestAnthropicResponseContract rather than read off the source here.
+        anthropic_src = (providers_dir / "anthropic.py").read_text(encoding="utf-8")
+        self.assertIn("reasoning_is_summary=bool(raw_reasoning)", anthropic_src)
+
         # Raw-trace providers must not set the flag at all.
-        for name in ("ollama", "anthropic", "openai_compat", "script"):
+        for name in ("ollama", "openai_compat", "script"):
             src = (providers_dir / f"{name}.py").read_text(encoding="utf-8")
             self.assertNotIn(
                 "reasoning_is_summary",

@@ -24,7 +24,7 @@ for the same use case: calling LLM providers through a unified interface.
 | **Provider warm-up (zero-token)** | ✅ `warm_up()`, all providers | ❌ | ❌ | ❌ |
 | **Normalised response object** | ✅ `text`, `input_tokens`, `output_tokens`, `reasoning_tokens`, `reasoning_text`, `tool_calls` | ✅ `ModelResponse` | ❌ (provider-native) | ❌ (provider-native) |
 | **Built-in retry / backoff** | ✅ | ✅ | ❌ | ✅ |
-| **JSON output mode** | ✅ `format_json=True` | ✅ | ❌ | ✅ |
+| **JSON output mode** | ✅ `format_json=True` (Anthropic needs a schema, see the API reference) | ✅ | ❌ | ✅ |
 | **Streaming** | ❌ | ✅ | ✅ | ✅ |
 | **Async** | ❌ | ✅ | ❌ | ✅ |
 | **Cost tracking** | ❌ | ✅ advanced | ❌ | ❌ |

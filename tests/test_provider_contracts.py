@@ -352,12 +352,35 @@ class TestAnthropicThinking(unittest.TestCase):
 
     def test_newer_models_get_the_adaptive_form(self) -> None:
         provider = self._provider()
-        for model in ("claude-sonnet-4-6", "claude-opus-4-7", "claude-opus-5"):
+        self.assertEqual(
+            provider._build_thinking_payload(True, "claude-sonnet-4-6", 8192),
+            {"type": "adaptive"},
+        )
+        for model in ("claude-opus-4-7", "claude-opus-5", "claude-opus-5-5"):
             with self.subTest(model=model):
                 self.assertEqual(
-                    provider._build_thinking_payload(True, model, 8192),
-                    {"type": "adaptive"},
+                    provider._build_thinking_payload(True, model, 8192)["type"],
+                    "adaptive",
                 )
+
+    def test_display_is_requested_where_it_defaults_to_omitted(self) -> None:
+        """From 4.7 on the trace comes back empty unless asked for.
+
+        thinking=True there used to return thinking blocks with no text, so
+        reasoning_text was always empty on exactly the models that think most.
+        """
+        provider = self._provider()
+        for model in ("claude-opus-4-7", "claude-opus-5", "claude-sonnet-5-5"):
+            with self.subTest(model=model):
+                self.assertEqual(
+                    provider._build_thinking_payload(True, model, 8192)["display"],
+                    "summarized",
+                )
+        # 4.6 already defaults to "summarized": nothing to ask for.
+        self.assertNotIn(
+            "display",
+            provider._build_thinking_payload(True, "claude-opus-4-6", 8192),
+        )
 
     def test_budget_respects_the_documented_floor(self) -> None:
         """budget_tokens has a documented minimum of 1024."""
@@ -372,13 +395,35 @@ class TestAnthropicThinking(unittest.TestCase):
         is what "off" means there.
         """
         provider = self._provider()
-        self.assertEqual(
-            provider._build_thinking_payload(False, "claude-opus-5", 8192),
-            {"type": "disabled"},
-        )
+        for model in ("claude-opus-5", "claude-opus-4-7", "claude-haiku-5-5"):
+            with self.subTest(model=model):
+                self.assertEqual(
+                    provider._build_thinking_payload(False, model, 8192),
+                    {"type": "disabled"},
+                )
         self.assertIsNone(
             provider._build_thinking_payload(False, "claude-sonnet-4-5", 8192)
         )
+
+    def test_thinking_false_where_disabled_is_refused(self) -> None:
+        """{"type": "disabled"} is a 400 on Opus 5.5, Fable and Sonnet 5.5.
+
+        Sonnet 5.5 has its own off switch, between_tools. Opus 5.5 and Fable
+        have none, so the thinking field is left out and the effort lowered.
+        """
+        provider = self._provider()
+        self.assertEqual(
+            provider._build_thinking_payload(False, "claude-sonnet-5-5", 8192),
+            {"type": "between_tools"},
+        )
+        for model in ("claude-opus-5-5", "claude-fable-5-1", "claude-fable-5"):
+            with self.subTest(model=model):
+                self.assertIsNone(provider._build_thinking_payload(False, model, 8192))
+                self.assertEqual(provider._minimal_effort(False, model), "low")
+        for model in ("claude-opus-5", "claude-sonnet-5-5"):
+            with self.subTest(model=model):
+                self.assertIsNone(provider._minimal_effort(False, model))
+        self.assertIsNone(provider._minimal_effort("default", "claude-opus-5-5"))
 
     def test_thinking_default_sends_nothing(self) -> None:
         provider = self._provider()
@@ -393,10 +438,10 @@ class TestAnthropicThinking(unittest.TestCase):
         provider = self._provider()
         self.assertEqual(
             provider._build_thinking_payload(True, "some-unknown-model", 8192),
-            {"type": "adaptive"},
+            {"type": "adaptive", "display": "summarized"},
         )
 
-    def test_payload_reaches_the_request(self) -> None:
+    def _call(self, **request_kwargs) -> dict:
         provider = self._provider()
         captured: dict = {}
 
@@ -407,13 +452,106 @@ class TestAnthropicThinking(unittest.TestCase):
                 "usage": {"input_tokens": 1, "output_tokens": 1},
             }
 
-        request = AiRequest(
-            provider="anthropic", model="claude-opus-5", prompt="p", thinking=True
-        )
+        request_kwargs.setdefault("model", "claude-opus-5")
+        request = AiRequest(provider="anthropic", prompt="p", **request_kwargs)
         with patch.object(provider, "_post", side_effect=fake_post):
             provider.call(request)
+        return captured
 
-        self.assertEqual(captured["thinking"], {"type": "adaptive"})
+    def test_payload_reaches_the_request(self) -> None:
+        captured = self._call(thinking=True)
+        self.assertEqual(
+            captured["thinking"], {"type": "adaptive", "display": "summarized"}
+        )
+
+    def test_minimal_effort_reaches_the_request(self) -> None:
+        captured = self._call(model="claude-opus-5-5", thinking=False)
+        self.assertNotIn("thinking", captured)
+        self.assertEqual(captured["output_config"], {"effort": "low"})
+
+    def test_a_caller_effort_wins_and_their_dict_is_untouched(self) -> None:
+        caller_config = {"effort": "medium"}
+        captured = self._call(
+            model="claude-opus-5-5", thinking=False,
+            extra_options={"output_config": caller_config},
+        )
+        self.assertEqual(captured["output_config"]["effort"], "medium")
+        self.assertEqual(caller_config, {"effort": "medium"})
+
+
+class TestAnthropicResponseContract(unittest.TestCase):
+    """What the adapter does with format_json, refusals and summarised traces."""
+
+    def _call(self, response: dict | None = None, **request_kwargs):
+        from unified_ai_client.providers.anthropic import AnthropicProvider
+
+        provider = AnthropicProvider(ProviderConfig(), api_key="fake-key")
+        captured: dict = {}
+
+        def fake_post(payload: dict, timeout: int) -> dict:
+            captured.update(payload)
+            return response or {
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+
+        request_kwargs.setdefault("model", "claude-opus-5")
+        with patch.object(provider, "_post", side_effect=fake_post):
+            result = provider.call(AiRequest(provider="anthropic", prompt="p", **request_kwargs))
+        return captured, result
+
+    def test_format_json_without_a_schema_is_refused(self) -> None:
+        """Regression: format_json was never read, so JSON was never forced.
+
+        The Messages API has no schema-less JSON mode, so the flag cannot be
+        honoured on its own; it is refused before anything is sent.
+        """
+        from unified_ai_client.exceptions import NonRetryableError
+
+        with self.assertRaises(NonRetryableError) as ctx:
+            self._call(format_json=True)
+        self.assertIn("output_config", str(ctx.exception))
+
+    def test_format_json_with_a_schema_goes_through(self) -> None:
+        output_config = {"format": {"type": "json_schema", "schema": {"type": "object"}}}
+        captured, _ = self._call(
+            format_json=True, extra_options={"output_config": output_config}
+        )
+        self.assertEqual(captured["output_config"], output_config)
+
+    def test_a_refusal_raises_instead_of_returning_a_non_answer(self) -> None:
+        from unified_ai_client.exceptions import ModelRefusalError, NonRetryableError
+
+        with self.assertRaises(ModelRefusalError) as ctx:
+            self._call(response={
+                "content": [{"type": "text", "text": "I can"}],
+                "stop_reason": "refusal",
+                "stop_details": {"type": "refusal", "category": "cyber",
+                                 "explanation": "Declined."},
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            })
+        error = ctx.exception
+        self.assertIsInstance(error, NonRetryableError)
+        self.assertEqual(error.category, "cyber")
+        self.assertEqual(error.explanation, "Declined.")
+        self.assertEqual(error.partial_text, "I can")
+        self.assertIn("cyber", str(error))
+
+    def test_the_trace_is_flagged_as_a_summary_from_claude_4(self) -> None:
+        """Claude 4 and later return a summary; 3.7 returned the raw trace."""
+        response = {
+            "content": [
+                {"type": "thinking", "thinking": "reasoning"},
+                {"type": "text", "text": "answer"},
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 10},
+        }
+        _, result = self._call(response=response, model="claude-opus-4-6")
+        self.assertIs(result.reasoning_is_summary, True)
+        _, result = self._call(response=response, model="claude-3-7-sonnet-latest")
+        self.assertIs(result.reasoning_is_summary, False)
+        _, result = self._call(model="claude-opus-4-6")
+        self.assertIs(result.reasoning_is_summary, False, "no trace, no summary")
 
 
 # ---------------------------------------------------------------------------
@@ -1544,18 +1682,24 @@ class TestSamplingParameters(unittest.TestCase):
         """Regression: thinking=True was a 400 on every Claude model.
 
         The Messages API rejects top_k and top_p with thinking enabled, and
-        accepts temperature only at 1, but all three were sent unconditionally.
+        accepts temperature only at its default, but all three were sent
+        unconditionally. temperature used to be forced to 1; it is now left
+        out, which is the same default without sending a value.
         """
         payload = self._anthropic_payload(thinking=True)
         self.assertIn("thinking", payload)
-        self.assertNotIn("top_k", payload)
-        self.assertNotIn("top_p", payload)
-        self.assertEqual(payload["temperature"], 1)
+        for key in ("temperature", "top_k", "top_p"):
+            self.assertNotIn(key, payload)
 
     def test_an_explicit_top_k_is_dropped_too_when_thinking(self) -> None:
-        """The API refuses it whoever asked for it."""
-        payload = self._anthropic_payload(thinking=True, top_k=10)
+        """The API refuses it whoever asked for it, and the drop is announced."""
+        with self.assertLogs(
+            "unified_ai_client.providers.anthropic", level="WARNING"
+        ) as cm:
+            payload = self._anthropic_payload(thinking=True, top_k=10, temperature=0.2)
         self.assertNotIn("top_k", payload)
+        self.assertNotIn("temperature", payload)
+        self.assertTrue(any("top_k" in line and "temperature" in line for line in cm.output))
 
     def test_without_thinking_temperature_is_left_alone(self) -> None:
         payload = self._anthropic_payload(temperature=0.3)

@@ -21,6 +21,7 @@ from unified_ai_client.exceptions import (
     FileDecodeError,
     ProviderHttpError,
     NonRetryableHttpError,
+    ModelRefusalError,
 )
 from unified_ai_client.silence import silence_sdks
 from unified_ai_client.verbosity import set_verbosity
@@ -57,6 +58,7 @@ __all__ = [
     "FileDecodeError",
     "ProviderHttpError",
     "NonRetryableHttpError",
+    "ModelRefusalError",
     "AiResponse",
     "AiRequest",
     "ProviderConfig",

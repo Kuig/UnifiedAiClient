@@ -6,6 +6,7 @@ import os
 import re
 from typing import Any
 
+from unified_ai_client.exceptions import ModelRefusalError, NonRetryableError
 from unified_ai_client.file_utils import (
     encode_file_base64,
     get_mime_type,
@@ -39,7 +40,11 @@ class AnthropicProvider(BaseProvider):
 
     Thinking: the request shape depends on the model generation, see
     _build_thinking_payload(). Reasoning text is extracted from
-    'type: "thinking"' content blocks in the response.
+    'type: "thinking"' content blocks in the response, and from Claude 4 on it
+    is a summary, flagged through ``reasoning_is_summary``.
+
+    A policy refusal (``stop_reason: "refusal"``) raises ``ModelRefusalError``
+    rather than coming back as an empty or truncated answer.
     """
 
     DEFAULT_URL: str = "https://api.anthropic.com"
@@ -69,6 +74,24 @@ class AnthropicProvider(BaseProvider):
     _THINKING_SINCE: tuple[int, int] = (3, 7)
     # Anthropic's documented floor for budget_tokens.
     _MIN_THINKING_BUDGET: int = 1024
+    # From Claude 4 on the API never returns the raw chain of thought, only a
+    # summary of it; 3.7 returned the full trace.
+    _SUMMARISED_SINCE: tuple[int, int] = (4, 0)
+    # From 4.7 on thinking.display defaults to "omitted", which returns thinking
+    # blocks with empty text; "summarized" has to be asked for.
+    _DISPLAY_SINCE: tuple[int, int] = (4, 7)
+    # Models on which thinking cannot be turned off: {"type": "disabled"} is a
+    # 400, so thinking=False lowers the effort instead. Keyed by family, with
+    # the first version the rule applies to.
+    _NO_DISABLE_SINCE: dict[str, tuple[int, int]] = {
+        "opus": (5, 5), "fable": (0, 0), "mythos": (0, 0),
+    }
+    # Models whose off switch is {"type": "between_tools"}, "disabled" being a
+    # 400 there too.
+    _BETWEEN_TOOLS_SINCE: dict[str, tuple[int, int]] = {"sonnet": (5, 5)}
+    # What thinking=False becomes on a model in _NO_DISABLE_SINCE: the lowest
+    # effort the API offers, the closest it allows to "off".
+    _MINIMAL_EFFORT: str = "low"
 
     def __init__(self, config: ProviderConfig, api_key: str = "") -> None:
         """Initialize the Anthropic provider.
@@ -108,6 +131,38 @@ class AnthropicProvider(BaseProvider):
         major = int(match.group(1))
         minor = int(match.group(2)) if match.group(2) else 0
         return major, minor
+
+    @staticmethod
+    def _model_family(model: str) -> str | None:
+        """Extract the model line ('opus', 'sonnet', ...) from a model name.
+
+        Args:
+            model: Model identifier as passed to call_ai().
+
+        Returns:
+            The family name, or None if the name carries none of the known ones.
+        """
+        match = re.search(r"(opus|sonnet|haiku|fable|mythos)", model)
+        return match.group(1) if match else None
+
+    def _matches(self, model: str, table: dict[str, tuple[int, int]]) -> bool:
+        """Whether a model falls under a family-keyed version rule.
+
+        Args:
+            model: Model identifier as passed to call_ai().
+            table: Family name to the first version the rule applies to.
+
+        Returns:
+            True if the model's family is in the table and its version, when
+            readable, is at or past the threshold. An unreadable version counts
+            as past it, for the same reason ``_uses_adaptive_thinking()``
+            guesses towards the newer form.
+        """
+        since = table.get(self._model_family(model) or "")
+        if since is None:
+            return False
+        version = self._model_version(model)
+        return version is None or version >= since
 
     def _uses_adaptive_thinking(self, model: str) -> bool:
         """Whether this model takes the adaptive thinking form.
@@ -152,34 +207,75 @@ class AnthropicProvider(BaseProvider):
 
         if thinking:
             if adaptive:
-                return {"type": "adaptive"}
+                payload: dict[str, Any] = {"type": "adaptive"}
+                # From 4.7 the trace comes back empty unless asked for. The
+                # setting changes what is returned, not what is computed or
+                # billed, and this adapter harvests reasoning wherever a model
+                # produces it.
+                version = self._model_version(model)
+                if version is None or version >= self._DISPLAY_SINCE:
+                    payload["display"] = "summarized"
+                return payload
             # budget_tokens must stay under max_tokens, and above the floor.
             budget = max(self._MIN_THINKING_BUDGET, max_tokens // 2)
             return {"type": "enabled", "budget_tokens": budget}
 
         # thinking=False. Older models have no 'disabled' form: for them
         # thinking is off unless explicitly enabled, so omitting is correct.
-        return {"type": "disabled"} if adaptive else None
+        if not adaptive:
+            return None
+        # Models that cannot switch it off get no thinking field at all; the
+        # effort is lowered instead, see _minimal_effort().
+        if self._matches(model, self._NO_DISABLE_SINCE):
+            return None
+        if self._matches(model, self._BETWEEN_TOOLS_SINCE):
+            return {"type": "between_tools"}
+        return {"type": "disabled"}
+
+    def _minimal_effort(self, thinking: bool | str, model: str) -> str | None:
+        """The effort to send for thinking=False on a model that cannot disable it.
+
+        On those models ``{"type": "disabled"}`` is a 400, so "off" cannot be
+        expressed. The lowest effort is the closest the API allows, the same
+        compromise Google's Gemini 3 forces with ``thinking_level=MINIMAL``.
+
+        Args:
+            thinking: True, False, or "default" as passed to call_ai().
+            model: Model identifier.
+
+        Returns:
+            The effort level to send, or None when there is nothing to lower.
+        """
+        if thinking is False and self._matches(model, self._NO_DISABLE_SINCE):
+            return self._MINIMAL_EFFORT
+        return None
 
     @staticmethod
     def _apply_thinking_constraints(payload: dict[str, Any]) -> None:
         """Strip the sampling controls extended thinking refuses, in place.
 
         With thinking enabled the Messages API rejects ``top_k`` and ``top_p``
-        outright, and accepts ``temperature`` only at 1. The three were sent on
-        every request regardless, so ``thinking=True`` was a 400 on every model
-        rather than a feature. Dropping them is the only option that keeps the
-        call alive: thinking is what the caller explicitly asked for, while the
-        sampling values are defaults they most likely never chose.
+        outright, and accepts ``temperature`` only at its default of 1, so
+        sending any of them turns ``thinking=True`` into a 400. Dropping them is
+        the only option that keeps the call alive, and thinking is what the
+        caller asked for in this very call. Since the library no longer sends a
+        sampling value nobody chose, anything present here was set by the
+        caller or the config, so dropping it is announced with a warning.
 
         Args:
             payload: The request body, modified in place.
         """
-        if payload.get("thinking", {}).get("type") == "disabled":
+        if payload.get("thinking", {}).get("type") in ("disabled", "between_tools"):
             return
-        payload.pop("top_k", None)
-        payload.pop("top_p", None)
-        payload["temperature"] = 1
+        dropped = [k for k in ("temperature", "top_k", "top_p") if k in payload]
+        for key in dropped:
+            payload.pop(key)
+        if dropped:
+            _log.warning(
+                "Anthropic: dropping %s, which the Messages API refuses with "
+                "thinking enabled.",
+                ", ".join(dropped),
+            )
 
     def _auth_headers(self) -> dict[str, str]:
         """Headers that identify this caller to the Anthropic API.
@@ -438,6 +534,19 @@ class AnthropicProvider(BaseProvider):
         """
         opts = self._merge_options(request)
 
+        # The Messages API has no schema-less JSON mode: structured output
+        # takes a schema (output_config.format), and the prefill trick the
+        # older docs suggested is a 400 from Claude 4.6 on. With no way to
+        # honour a bare format_json, refusing beats the silence that used to
+        # follow, when the flag was simply never read.
+        if request.format_json and "format" not in (opts.get("output_config") or {}):
+            raise NonRetryableError(
+                "Anthropic has no schema-less JSON mode, so format_json=True "
+                "cannot be honoured on its own. Pass a schema instead: "
+                'extra_options={"output_config": {"format": {"type": '
+                '"json_schema", "schema": {...}}}}.'
+            )
+
         messages: list[dict[str, Any]] = []
 
         if request.messages:
@@ -516,6 +625,15 @@ class AnthropicProvider(BaseProvider):
             payload["thinking"] = thinking_payload
             self._apply_thinking_constraints(payload)
 
+        effort = self._minimal_effort(request.thinking, request.model)
+        if effort is not None:
+            # Copied rather than updated in place: an output_config from
+            # extra_options is the caller's own dict. An effort they set
+            # there is the more specific request and is left alone.
+            output_config = dict(payload.get("output_config") or {})
+            output_config.setdefault("effort", effort)
+            payload["output_config"] = output_config
+
         resp = self._post(payload, request.timeout)
 
         # Parse content blocks — always collect text, thinking, and tool_use.
@@ -537,6 +655,19 @@ class AnthropicProvider(BaseProvider):
         raw_reasoning = "".join(reasoning_parts)
         response_text = "".join(text_parts)
 
+        # A policy decline arrives as a 200 with stop_reason "refusal" and
+        # content that is empty or cut off where a classifier stopped it.
+        # Handing that back as an answer is exactly the silently wrong result
+        # this library refuses to produce.
+        if resp.get("stop_reason") == "refusal":
+            details = resp.get("stop_details") or {}
+            raise ModelRefusalError(
+                self.provider_name,
+                category=details.get("category"),
+                explanation=details.get("explanation") or "",
+                partial_text=response_text,
+            )
+
         usage = resp.get("usage", {})
         output_tokens = usage.get("output_tokens", 0)
 
@@ -546,12 +677,19 @@ class AnthropicProvider(BaseProvider):
             response_text, raw_reasoning, output_tokens
         )
 
+        # Claude 4 and later return a summary of their reasoning, never the
+        # chain of thought itself; only 3.7 returned the full trace. An
+        # unreadable name is taken to be a current model.
+        version = self._model_version(request.model)
+        summarised = version is None or version >= self._SUMMARISED_SINCE
+
         return AiResponse(
             text=response_text,
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=max(0, output_tokens - reasoning_tokens),
             reasoning_tokens=reasoning_tokens,
             reasoning_text=raw_reasoning,
+            reasoning_is_summary=bool(raw_reasoning) and summarised,
             tool_calls=tool_calls,
         )
 
