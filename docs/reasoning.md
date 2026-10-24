@@ -21,11 +21,17 @@ leaves the decision to the provider. Here is what each provider actually does wi
 | `google` | `thinking_level` on Gemini 3.x, `thinking_budget` on 2.5 | minimised explicitly | provider default, thoughts still captured |
 | `ollama` | sends `think: true`, on `/api/chat` and on `/api/generate` alike | sends `think: false` | field omitted |
 | `anthropic` | `{"type": "adaptive"}` on Claude 4.6 and later (with `"display": "summarized"` from 4.7, where the trace is otherwise returned empty), `{"type": "enabled", "budget_tokens": N}` below | `{"type": "disabled"}` on 4.6 and later; `{"type": "between_tools"}` on Sonnet 5.5; on Opus 5.5 and Fable, which cannot turn thinking off, the field is omitted and `output_config.effort` is set to `"low"`, the closest the API allows; below 4.6 the field is omitted, which is already the off state | field omitted |
-| `openai`, `mistral`, `groq`, `xai` | `reasoning_effort: "high"` | `reasoning_effort: "none"` | field omitted |
-| `cohere`, `meta`, `lmstudio`, `llamacpp` | no reasoning control in the API; the value is ignored | ignored | ignored |
+| `openai`, `mistral`, `groq`, `xai`, `cohere` | `reasoning_effort: "high"` | `reasoning_effort: "none"` | field omitted |
+| `llamacpp` | `reasoning_effort: "high"` plus `chat_template_kwargs: {"enable_thinking": true}` | `reasoning_effort: "none"` plus `chat_template_kwargs: {"enable_thinking": false}` | fields omitted |
+| `meta`, `lmstudio` | no documented reasoning control in the API; the value is ignored | ignored | ignored |
+
+On `llamacpp` the two fields reach two kinds of chat template: `reasoning_effort: "none"`
+is llama-server's own off switch, while Qwen-style templates (MiniCPM-V 4.5 among them)
+read `enable_thinking`. A `chat_template_kwargs` you pass in `extra_options` is merged with
+the one above, your keys winning.
 
 > [!IMPORTANT]
-> On `openai`, `mistral`, `groq` and `xai`, `reasoning_effort` is only sent when you pass
+> On `openai`, `mistral`, `groq`, `xai` and `cohere`, `reasoning_effort` is only sent when you pass
 > `True` or `False` explicitly. This matters because a **non-reasoning model rejects the
 > parameter outright**: asking `gpt-4o` to think returns an error rather than silently
 > doing nothing. Leaving `thinking` at `"default"` never sends the field, so ordinary
@@ -57,7 +63,8 @@ covers what every provider shares, `extra_options` covers the rest.
 
 Reasoning extraction is independent of all this. `reasoning_text` is populated whenever
 the model returns a trace, whatever `thinking` was set to (`reasoning_content` for the
-OpenAI-compatible providers, `thinking` blocks for Anthropic and Google, the `thinking`
+OpenAI-compatible providers, which llama-server fills by default and LM Studio when set
+to separate the trace, `thinking` blocks for Anthropic and Google, the `thinking`
 field for Ollama on both of its endpoints).
 
 Check `reasoning_is_summary` before comparing traces across providers: Google returns a

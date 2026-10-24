@@ -62,8 +62,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a warning (the API refuses them). `temperature` used to be forced to `1`; it is now left
   out, the same default without sending a value.
 
+- OpenAI-compatible family: `API_PREFIX` (default `/v1`) builds every request path, and
+  `_reasoning_payload(thinking)` maps `thinking` onto request fields. A subclass sets the
+  first when its API lives elsewhere and overrides the second when its reasoning control is
+  not a single string field; a dict it returns is merged with the caller's own under the
+  same key. Purely additive for existing subclasses.
+- `meta` now targets Meta's Model API at `https://api.meta.ai` (models such as
+  `muse-spark-1.3`). It used to point at `https://api.llama-api.com`, a third-party domain,
+  and Meta's Llama API preview it stood in for has closed. Verified against Meta's
+  documentation, not live.
+
 ### Fixed
 
+- llama.cpp ignored `thinking` altogether. It now sends `reasoning_effort` (`"none"` is
+  llama-server's own off switch) together with `chat_template_kwargs.enable_thinking`, which
+  Qwen-style templates such as MiniCPM-V 4.5's read instead; a `chat_template_kwargs` in
+  `extra_options` is merged, its keys winning.
+- Cohere ignored `thinking`; its compatibility API takes `reasoning_effort` `"none"` and
+  `"high"`, now sent for `False` and `True`.
+- `meta`, `groq` and `xai` declared embeddings support they do not have: none of them
+  documents an embeddings endpoint. `SUPPORTS_EMBEDDINGS` is now False for all three, and
+  `get_embedding()` raises `NotImplementedError` before sending anything.
 - Anthropic ignored `format_json` entirely, although it is documented as forcing JSON. The
   Messages API has no schema-less JSON mode, so `format_json=True` now raises
   `NonRetryableError` unless `extra_options` carries a schema in

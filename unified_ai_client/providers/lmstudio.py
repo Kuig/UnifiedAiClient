@@ -11,8 +11,10 @@ class LmStudioProvider(OpenAiCompatProvider):
     http://localhost:1234.
 
     All file handling and reasoning text extraction is inherited from
-    OpenAiCompatProvider. LM Studio does not expose native reasoning tokens;
-    reasoning_text will always be an empty string.
+    OpenAiCompatProvider. reasoning_text is filled when LM Studio is set to
+    separate the trace into 'reasoning_content', and empty otherwise. The
+    thinking flag is not mapped: LM Studio documents no request-level switch
+    for it.
     """
 
     DEFAULT_URL: str = "http://localhost:1234"

@@ -15,3 +15,7 @@ class CohereProvider(OpenAiCompatProvider):
 
     REQUIRES_API_KEY: bool = True
     SECRETS_KEY: str = "cohere_api_key"
+    # The compatibility API accepts exactly "none" and "high", the two values
+    # the inherited mapping sends, and maps them onto Cohere's own thinking
+    # switch.
+    REASONING_PARAM: str | None = "reasoning_effort"

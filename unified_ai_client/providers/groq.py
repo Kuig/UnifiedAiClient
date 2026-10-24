@@ -15,3 +15,6 @@ class GroqProvider(OpenAiCompatProvider):
     REQUIRES_API_KEY: bool = True
     SECRETS_KEY: str = "groq_api_key"
     REASONING_PARAM: str | None = "reasoning_effort"
+
+    # Groq's API reference lists no embeddings endpoint.
+    SUPPORTS_EMBEDDINGS: bool = False

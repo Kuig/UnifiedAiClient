@@ -82,9 +82,12 @@ packaging metadata only. Match the surrounding style by hand rather than adding 
 
 For an OpenAI-compatible endpoint, most of the work is already done. Subclass
 `OpenAiCompatProvider` and set `DEFAULT_URL`, plus `REQUIRES_API_KEY` and `SECRETS_KEY`
-for a cloud endpoint, and `REASONING_PARAM` if the API exposes a reasoning control.
-`REQUIRES_API_KEY` and `SECRETS_KEY` are declared on `BaseProvider` and read by the
-inherited `_require_api_key()`; setting them is all a cloud endpoint needs.
+for a cloud endpoint, and `REASONING_PARAM` if the API exposes a reasoning control. When
+that control is not a single string field, override `_reasoning_payload()` instead. Set
+`API_PREFIX` if the API does not live under `/v1`, and `SUPPORTS_EMBEDDINGS = False` if it
+serves no embeddings endpoint. `REQUIRES_API_KEY` and `SECRETS_KEY` are declared on
+`BaseProvider` and read by the inherited `_require_api_key()`; setting them is all a cloud
+endpoint needs.
 
 A provider with an entirely different API shape subclasses `BaseProvider` and speaks HTTP
 through `unified_ai_client/http.py`, overriding `_auth_headers()` for its credentials.

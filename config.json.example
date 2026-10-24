@@ -51,7 +51,7 @@
     },
 
     "meta": {
-        "url": "https://api.llama-api.com",
+        "url": "https://api.meta.ai",
         "timeout": 300,
         "sleep_time": 0
     },

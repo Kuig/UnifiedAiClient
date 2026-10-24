@@ -68,7 +68,7 @@ class TestProviderUrlResolution(ProviderRegistryIsolation):
         "openai": "https://api.openai.com",
         "mistral": "https://api.mistral.ai",
         "cohere": "https://api.cohere.ai/compatibility",
-        "meta": "https://api.llama-api.com",
+        "meta": "https://api.meta.ai",
         "groq": "https://api.groq.com/openai",
         "xai": "https://api.x.ai",
         "lmstudio": "http://localhost:1234",
@@ -590,6 +590,8 @@ class TestOpenAiCompatReasoning(unittest.TestCase):
             ("mistral", "MistralProvider"),
             ("groq", "GroqProvider"),
             ("xai", "XAiProvider"),
+            # The compatibility API accepts exactly these two values.
+            ("cohere", "CohereProvider"),
         ):
             with self.subTest(provider=module):
                 self.assertEqual(
@@ -612,10 +614,8 @@ class TestOpenAiCompatReasoning(unittest.TestCase):
 
     def test_providers_without_the_control_send_nothing(self) -> None:
         for module, class_name, api_key in (
-            ("cohere", "CohereProvider", "fake"),
             ("meta", "MetaProvider", "fake"),
             ("lmstudio", "LmStudioProvider", ""),
-            ("llamacpp", "LlamaCppProvider", ""),
         ):
             with self.subTest(provider=module):
                 captured = self._capture(module, class_name, True, api_key=api_key)
@@ -628,6 +628,70 @@ class TestOpenAiCompatReasoning(unittest.TestCase):
             extra_options={"reasoning_effort": "medium"},
         )
         self.assertEqual(captured["reasoning_effort"], "medium")
+
+    def test_llamacpp_reaches_both_kinds_of_template(self) -> None:
+        """Regression: thinking was ignored on llama.cpp altogether.
+
+        reasoning_effort "none" is llama-server's own off switch, while Qwen
+        style templates (MiniCPM-V 4.5's among them) read enable_thinking from
+        chat_template_kwargs, so both are sent.
+        """
+        for thinking, effort in ((True, "high"), (False, "none")):
+            with self.subTest(thinking=thinking):
+                captured = self._capture(
+                    "llamacpp", "LlamaCppProvider", thinking, api_key=""
+                )
+                self.assertEqual(captured["reasoning_effort"], effort)
+                self.assertEqual(
+                    captured["chat_template_kwargs"], {"enable_thinking": thinking}
+                )
+        captured = self._capture("llamacpp", "LlamaCppProvider", "default", api_key="")
+        self.assertNotIn("chat_template_kwargs", captured)
+
+    def test_a_caller_template_dict_is_merged_not_replaced(self) -> None:
+        """The caller's keys survive alongside the hook's, and win a clash."""
+        captured = self._capture(
+            "llamacpp", "LlamaCppProvider", True, api_key="",
+            extra_options={"chat_template_kwargs": {"enable_thinking": False, "x": 1}},
+        )
+        self.assertEqual(
+            captured["chat_template_kwargs"], {"enable_thinking": False, "x": 1}
+        )
+
+    def test_the_api_prefix_builds_every_path(self) -> None:
+        """A subclass moves every endpoint by setting one attribute."""
+        cls = _provider_class("openai", "OpenAiProvider")
+
+        class Prefixed(cls):
+            API_PREFIX = "/api/paas/v4"
+
+        provider = Prefixed(ProviderConfig(), api_key="fake")
+        endpoints: list[str] = []
+
+        def fake_post(endpoint: str, payload: dict, timeout: int) -> dict:
+            endpoints.append(endpoint)
+            return {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {},
+                "data": [{"embedding": [0.1]}],
+            }
+
+        def fake_get(endpoint: str, timeout: int) -> dict:
+            endpoints.append(endpoint)
+            return {"data": []}
+
+        with patch.object(provider, "_post", side_effect=fake_post), \
+             patch.object(provider, "_get", side_effect=fake_get):
+            provider.call(AiRequest(provider="x", model="m", prompt="p"))
+            provider.get_embedding("m", "t")
+            provider.list_models()
+            provider.warm_up("m")
+        self.assertEqual(endpoints, [
+            "/api/paas/v4/chat/completions",
+            "/api/paas/v4/embeddings",
+            "/api/paas/v4/models",
+            "/api/paas/v4/models",
+        ])
 
 
 # ---------------------------------------------------------------------------
@@ -821,14 +885,17 @@ class TestEmbeddingsSupportMatrix(unittest.TestCase):
         "openai": True,
         "mistral": True,
         "cohere": True,
-        "meta": True,
-        "groq": True,
-        "xai": True,
         "lmstudio": True,
         "llamacpp": True,
         "script": True,
         # No embeddings API of its own, see README "Text Embeddings".
         "anthropic": False,
+        # Their API references list no embeddings endpoint. All three used to
+        # inherit True from the OpenAI-compatible base, so a call reached the
+        # network only to fail there.
+        "meta": False,
+        "groq": False,
+        "xai": False,
     }
 
     def test_table_covers_every_registered_provider(self) -> None:
@@ -849,8 +916,13 @@ class TestEmbeddingsSupportMatrix(unittest.TestCase):
                 continue
             with self.subTest(provider=name):
                 provider = _provider_class_by_name(name)(ProviderConfig())
-                with self.assertRaises(NotImplementedError):
-                    provider.get_embedding("m", "text")
+                # Refused before the network: _post must never be reached.
+                with patch.object(
+                    type(provider), "_post", side_effect=AssertionError("sent"),
+                    create=True,
+                ):
+                    with self.assertRaises(NotImplementedError):
+                        provider.get_embedding("m", "text")
 
 
 class TestFileSupportMatrix(FileFixtureCase):

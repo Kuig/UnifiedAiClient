@@ -39,11 +39,23 @@ class OpenAiCompatProvider(BaseProvider):
     - Anything else: rejected by validate_files() before the request is built.
 
     Reasoning text: populated from the 'reasoning_content' field in the
-    response message choice, if present (available on OpenAI o3/o4 models).
-    Local providers (LM Studio, llama.cpp) always return an empty string.
+    response message choice, whenever the endpoint returns one. llama-server
+    does by default, LM Studio when it is set to separate the trace, and the
+    cloud endpoints for their reasoning models.
     """
 
     DEFAULT_URL: str = "http://localhost:8080"
+
+    API_PREFIX: str = "/v1"
+    """Path segment between the base URL and the endpoint names.
+
+    Every request path is built from it: ``/v1/chat/completions``,
+    ``/v1/models``, ``/v1/embeddings``. A provider whose OpenAI-compatible API
+    lives under another prefix (Z.ai serves it at ``/api/paas/v4``) sets this
+    instead of overriding the methods that post. ``PROBE_PATH`` is separate and
+    read off the class by ``list_providers()``, so a local subclass that
+    changes the prefix sets both.
+    """
 
     # REQUIRES_API_KEY and SECRETS_KEY are declared on BaseProvider; the eight
     # cloud subclasses set them, the two local ones leave the defaults.
@@ -167,7 +179,9 @@ class OpenAiCompatProvider(BaseProvider):
             "temperature": 0.0,
             "stream": False,
         }
-        self._post("/v1/chat/completions", payload, self._resolve_timeout(timeout))
+        self._post(
+            f"{self.API_PREFIX}/chat/completions", payload, self._resolve_timeout(timeout)
+        )
 
     def warm_up(
         self,
@@ -200,8 +214,30 @@ class OpenAiCompatProvider(BaseProvider):
         if self.LAZY_MODEL_LOAD:
             self._warm_up_completion(model, timeout)
         else:
-            self._get("/v1/models", self._resolve_timeout(timeout))
+            self._get(f"{self.API_PREFIX}/models", self._resolve_timeout(timeout))
         return True
+
+    def _reasoning_payload(self, thinking: bool | str) -> dict[str, Any]:
+        """Map the tri-state ``thinking`` onto this endpoint's request fields.
+
+        The hook a subclass overrides when its reasoning control is not a single
+        string field. Only called for an explicit True/False: "default" (the
+        call_ai default) sends nothing, which keeps plain non-reasoning models
+        working, since they reject the parameter outright.
+
+        A dict value returned here is merged with the caller's own dict under the
+        same key, the caller's keys winning, so a hook can contribute to a field
+        such as ``chat_template_kwargs`` without erasing what the caller put in it.
+
+        Args:
+            thinking: True or False.
+
+        Returns:
+            The fields to add to the request body, empty for no control.
+        """
+        if not self.REASONING_PARAM:
+            return {}
+        return {self.REASONING_PARAM: "high" if thinking else "none"}
 
     def _build_native_block(self, file_path: str, file_type: str) -> dict[str, Any]:
         """Build one provider-native content block for a non-text attachment.
@@ -394,22 +430,23 @@ class OpenAiCompatProvider(BaseProvider):
             payload["top_p"] = top_p
 
         # Reasoning control, only when the caller asked for it explicitly.
-        # "default" (the call_ai default) sends nothing, which keeps plain
-        # non-reasoning models working: they reject the parameter outright.
-        if (
-            self.REASONING_PARAM
-            and request.thinking != "default"
-            and request.thinking is not None
-        ):
-            payload[self.REASONING_PARAM] = "high" if request.thinking else "none"
+        reasoning: dict[str, Any] = {}
+        if request.thinking != "default" and request.thinking is not None:
+            reasoning = self._reasoning_payload(request.thinking)
 
-        # Provider-specific options, forwarded verbatim. This runs last so a
-        # caller can override the mapping above with an endpoint-specific value.
-        # Anything the library owns has been consumed above or belongs to
-        # another adapter, and either way must not travel as a raw key.
-        payload.update(self._passthrough_options(opts))
+        # Provider-specific options, forwarded verbatim. They go last so a
+        # caller can override the mapping above with an endpoint-specific value;
+        # where both carry a dict under the same key the two are merged instead,
+        # the caller's keys winning. Anything the library owns has been consumed
+        # above or belongs to another adapter, and must not travel as a raw key.
+        passthrough = self._passthrough_options(opts)
+        for key, value in reasoning.items():
+            if isinstance(value, dict) and isinstance(passthrough.get(key), dict):
+                passthrough[key] = {**value, **passthrough[key]}
+        payload.update(reasoning)
+        payload.update(passthrough)
 
-        resp = self._post("/v1/chat/completions", payload, request.timeout)
+        resp = self._post(f"{self.API_PREFIX}/chat/completions", payload, request.timeout)
         choice = resp["choices"][0]["message"]
         usage = resp.get("usage", {})
 
@@ -463,7 +500,7 @@ class OpenAiCompatProvider(BaseProvider):
             urllib.error.URLError: On connection errors.
             ValueError: If this provider requires an API key and none is set.
         """
-        resp = self._get("/v1/models", self._resolve_timeout(timeout))
+        resp = self._get(f"{self.API_PREFIX}/models", self._resolve_timeout(timeout))
         return [
             ModelInfo(id=item["id"], provider=self.provider_name)
             for item in resp.get("data", [])
@@ -479,7 +516,16 @@ class OpenAiCompatProvider(BaseProvider):
 
         Returns:
             List of floats representing the embedding vector.
+
+        Raises:
+            NotImplementedError: If this provider serves no embeddings endpoint
+                (``SUPPORTS_EMBEDDINGS`` is False), before anything is sent.
         """
+        if not self.SUPPORTS_EMBEDDINGS:
+            raise NotImplementedError(
+                f"Provider '{self.provider_name}' serves no embeddings endpoint. "
+                "Use another provider for embeddings."
+            )
         payload = {"model": model, "input": text}
-        resp = self._post("/v1/embeddings", payload, self.config.timeout)
+        resp = self._post(f"{self.API_PREFIX}/embeddings", payload, self.config.timeout)
         return [float(x) for x in resp["data"][0]["embedding"]]

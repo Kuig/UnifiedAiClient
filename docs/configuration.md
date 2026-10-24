@@ -132,7 +132,7 @@ Used whenever `url` is left unset.
 | `anthropic` | `https://api.anthropic.com` |
 | `mistral` | `https://api.mistral.ai` |
 | `cohere` | `https://api.cohere.ai/compatibility` |
-| `meta` | `https://api.llama-api.com` |
+| `meta` | `https://api.meta.ai` (Meta's Model API) |
 | `groq` | `https://api.groq.com/openai` |
 | `xai` | `https://api.x.ai` |
 | `google` | not applicable, the SDK resolves the endpoint |

@@ -15,3 +15,6 @@ class XAiProvider(OpenAiCompatProvider):
     REQUIRES_API_KEY: bool = True
     SECRETS_KEY: str = "xai_api_key"
     REASONING_PARAM: str | None = "reasoning_effort"
+
+    # xAI's current API reference lists no embedding models.
+    SUPPORTS_EMBEDDINGS: bool = False

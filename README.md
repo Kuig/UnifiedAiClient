@@ -226,15 +226,15 @@ and the `cleanup()` that frees what they hold are in [docs/warm-up.md](docs/warm
 ### Text Embeddings
 
 Generate text embedding vectors. Every provider implements this except `anthropic`,
-which offers no embeddings API of its own and points at a third-party service:
+`meta`, `groq` and `xai`, which serve no embeddings endpoint:
 
 | Provider | Endpoint used |
 |---|---|
 | `google` | `embed_content` via the SDK (`task_type` and `output_dimensionality` through `configure_provider()`) |
 | `ollama` | `/api/embed` |
-| `openai`, `mistral`, `cohere`, `meta`, `groq`, `xai`, `lmstudio`, `llamacpp` | `/v1/embeddings` |
+| `openai`, `mistral`, `cohere`, `lmstudio`, `llamacpp` | `/v1/embeddings` |
 | `script` | `mode: "embed"` in the [script protocol](docs/script-protocol.md) |
-| `anthropic` | not available, raises `NotImplementedError` |
+| `anthropic`, `meta`, `groq`, `xai` | not available, raises `NotImplementedError` before sending anything |
 
 Implementing the call is not the same as the endpoint being served: whether a given
 cloud provider exposes embeddings, and for which models, is up to that provider. Use a

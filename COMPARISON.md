@@ -18,7 +18,7 @@ for the same use case: calling LLM providers through a unified interface.
 | **Unsupported file handling** | ✅ Raises `UnsupportedFileError` | Provider error | Provider error | Provider error |
 | **Text embeddings** | ✅ `get_embedding()` | ✅ | ❌ | ✅ |
 | **Tool / function calling** | ✅ all providers | ✅ | ✅ | ✅ |
-| **Thinking / reasoning** | ✅ Google, Anthropic, Ollama, OpenAI, Mistral, Groq, xAI | ✅ (transparent) | ❌ explicit | ❌ explicit |
+| **Thinking / reasoning** | ✅ Google, Anthropic, Ollama, OpenAI, Mistral, Groq, xAI, Cohere, llama.cpp | ✅ (transparent) | ❌ explicit | ❌ explicit |
 | **Ollama VRAM-aware preloading** | ✅ `preload_model()` | ❌ | ❌ | n/a |
 | **Local model residency control** | ✅ `keep_alive` plus `unload_model()`, released at exit | ❌ | ❌ | n/a |
 | **Provider warm-up (zero-token)** | ✅ `warm_up()`, all providers | ❌ | ❌ | ❌ |
