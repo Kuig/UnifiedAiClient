@@ -32,24 +32,39 @@ _TRANSLATED_OPTIONS: dict[str, str] = {
 _MODEL_PARAM_OPTIONS: frozenset[str] = frozenset({"temperature", "top_k", "top_p"})
 """Library options Ollama accepts under the very same name."""
 
+# Request-level fields, as opposed to the model parameters that live inside
+# `options`, per endpoint (ollama api/types.go: ChatRequest, GenerateRequest,
+# EmbedRequest). A key in extra_options that names one of these goes into the
+# request body itself: inside `options` Ollama would discard it with no more
+# than a server-side warning. `system` is absent on purpose, because it is
+# filled from system_prompt.
+_CHAT_FIELDS: frozenset[str] = frozenset({
+    "format", "think", "truncate", "shift", "logprobs", "top_logprobs",
+})
+_GENERATE_FIELDS: frozenset[str] = _CHAT_FIELDS | {"raw", "suffix", "template", "context"}
+_EMBED_FIELDS: frozenset[str] = frozenset({"truncate", "dimensions"})
+_TOP_LEVEL_FIELDS: frozenset[str] = _GENERATE_FIELDS | _EMBED_FIELDS
+
 
 def _fold_options(opts: dict[str, Any], options: dict[str, Any]) -> None:
     """Fold merged options into an Ollama model ``options`` dict, in place.
 
-    Three outcomes, and which one a key gets is the whole of the rule:
+    Four outcomes, and which one a key gets is the whole of the rule:
 
     - a name Ollama spells differently is translated (``context_size`` becomes
       ``num_ctx``);
     - a name Ollama shares is kept as it is;
+    - a request-level field (``think``, ``raw``, ``suffix``, ...) is left out,
+      because it belongs in the body, where ``_request_fields()`` puts it;
     - anything else the library owns is dropped, because this adapter either
       consumes it elsewhere, as it does with ``keep_alive`` and
       ``use_generate``, or it belongs to another adapter entirely, as
       ``disable_safety`` belongs to Google. Neither has any business inside a
       model parameter block.
 
-    Everything outside the library's namespace passes through untouched, which
-    is how a model-specific knob such as ``visual_token_budget`` reaches Gemma 4
-    without this library knowing it exists.
+    Everything else passes through untouched, which is how a model-specific
+    knob such as ``visual_token_budget`` or ``repeat_penalty`` reaches the
+    model without this library knowing it exists.
 
     Args:
         opts: Source options, from the provider config or from the request.
@@ -60,10 +75,25 @@ def _fold_options(opts: dict[str, Any], options: dict[str, Any]) -> None:
             options[_TRANSLATED_OPTIONS[k]] = v
         elif k in _MODEL_PARAM_OPTIONS:
             options[k] = v
-        elif k in BaseProvider._LIBRARY_OPTION_KEYS:
+        elif k in _TOP_LEVEL_FIELDS or k in BaseProvider._LIBRARY_OPTION_KEYS:
             continue
         else:
             options[k] = v
+
+
+def _request_fields(opts: dict[str, Any], allowed: frozenset[str]) -> dict[str, Any]:
+    """Pick the request-level fields one endpoint accepts out of merged options.
+
+    Args:
+        opts: Merged options, config below call-time.
+        allowed: The fields the target endpoint defines.
+
+    Returns:
+        The fields to merge into the request body, last, so that they win over
+        anything the adapter derived itself, such as ``think`` from
+        ``thinking`` or ``format`` from ``format_json``.
+    """
+    return {k: v for k, v in opts.items() if k in allowed}
 
 
 class OllamaProvider(BaseProvider):
@@ -320,18 +350,18 @@ class OllamaProvider(BaseProvider):
         use_generate = opts.get("use_generate", False)
 
         # /api/generate has no place for any of these: no message history, no
-        # system role, no tool schema, no way to append a tool result. Until
-        # this check existed, use_generate silently dropped all four instead
-        # of refusing, the same class of silent data loss the file-attachment
-        # and history-message invariants elsewhere in this adapter already
-        # guard against.
+        # tool schema, no way to append a tool result. Until this check
+        # existed, use_generate silently dropped them instead of refusing, the
+        # same class of silent data loss the file-attachment and
+        # history-message invariants elsewhere in this adapter already guard
+        # against. A system prompt is not on the list: /api/generate carries
+        # it in its own `system` field.
         if use_generate:
             unsupported = [
                 name for name, value in (
                     ("tools", request.tools),
                     ("tool_results", request.tool_results),
                     ("messages", request.messages),
-                    ("system_prompt", request.system_prompt),
                 ) if value
             ]
             if unsupported:
@@ -340,6 +370,18 @@ class OllamaProvider(BaseProvider):
                     f"no place for {', '.join(unsupported)}. Turn "
                     "use_generate off, or drop the field(s), to use "
                     "/api/chat instead."
+                )
+        else:
+            # The reverse case: a completion-only field asked for on the chat
+            # endpoint would be dropped, and a `suffix` silently ignored is a
+            # wrong answer, not a degraded one.
+            generate_only = sorted(
+                k for k in opts if k in _GENERATE_FIELDS - _CHAT_FIELDS
+            )
+            if generate_only:
+                raise NonRetryableError(
+                    f"Ollama's /api/chat has no place for {', '.join(generate_only)}; "
+                    "only /api/generate accepts it. Set use_generate=True."
                 )
 
         # 4. Current User Message — only add when NOT in a tool result continuation.
@@ -404,29 +446,41 @@ class OllamaProvider(BaseProvider):
         keep_alive = opts.get("keep_alive")
 
         if use_generate:
-            # Map back to /api/generate format
-            # We assume effective_prompt is the main prompt and multimodal_data are the images
+            # /api/generate takes one prompt, its attachments, a system prompt
+            # and the same think flag /api/chat does; history and tools were
+            # refused above.
             payload: dict[str, Any] = {
                 "model": request.model,
                 "prompt": effective_prompt,
                 "stream": False,
                 "options": options,
             }
+            if request.system_prompt:
+                payload["system"] = request.system_prompt
             if keep_alive is not None:
                 payload["keep_alive"] = keep_alive
             if multimodal_data:
                 payload["images"] = multimodal_data
-            
+
             if request.format_json:
                 payload["format"] = "json"
-                
+
+            if request.thinking is True:
+                payload["think"] = True
+            elif request.thinking is False:
+                payload["think"] = False
+
+            payload.update(_request_fields(opts, _GENERATE_FIELDS))
+
             resp = self._post("/api/generate", payload, request.timeout)
-            
+
             content_text = resp.get("response", "") or ""
             eval_count = resp.get("eval_count", 0)
-            raw_thinking = ""
-            reasoning_text = ""  # /api/generate doesn't cleanly separate thinking tokens yet
-            tool_calls: list[ToolCall] = []  # tool calling not supported in /api/generate
+            # The trace comes back in its own top-level field, separate from
+            # the answer, exactly as message.thinking does on /api/chat.
+            raw_thinking = resp.get("thinking", "") or ""
+            reasoning_text = raw_thinking
+            tool_calls: list[ToolCall] = []  # refused above
         else:
             payload: dict[str, Any] = {
                 "model": request.model,
@@ -468,6 +522,11 @@ class OllamaProvider(BaseProvider):
                 payload["think"] = True
             elif request.thinking is False:
                 payload["think"] = False
+
+            # Request-level fields from extra_options go last, so a `think`
+            # level such as "high" or a JSON-schema `format` overrides what
+            # the tri-state flags above derived.
+            payload.update(_request_fields(opts, _CHAT_FIELDS))
 
             # 5. Make request
             resp = self._post("/api/chat", payload, request.timeout)
@@ -640,6 +699,7 @@ class OllamaProvider(BaseProvider):
         keep_alive = self._resolve_keep_alive(None)
         if keep_alive is not None:
             payload["keep_alive"] = keep_alive
+        payload.update(_request_fields(self.config.extra_options or {}, _EMBED_FIELDS))
         resp = self._post("/api/embed", payload, self.config.timeout)
         embeddings = resp.get("embeddings", [])
         if embeddings and len(embeddings) > 0:

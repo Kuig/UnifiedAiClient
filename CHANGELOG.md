@@ -42,8 +42,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handle null.
 - `preload_model()`'s `keep_alive` now defaults to `None`, like `warm_up()`'s.
 
+- Ollama: an `extra_options` key that names a request-level field of the endpoint in use
+  (`think`, `format`, `truncate`, `shift`, `logprobs`, `top_logprobs`; on `/api/generate`
+  also `raw`, `suffix`, `template`, `context`; on `/api/embed` `truncate` and `dimensions`)
+  now goes into the request body instead of the model `options`, where Ollama discarded it
+  with only a server-side warning. Being merged last, `{"think": "high"}` and a JSON-schema
+  `format` override what `thinking` and `format_json` derive. A completion-only field on a
+  chat request raises `NonRetryableError`, pointing at `use_generate`.
+
 ### Fixed
 
+- Ollama's `use_generate` sends the system prompt in `/api/generate`'s own `system` field
+  instead of refusing it, sends `think` for `thinking=True`/`False` instead of dropping it,
+  and reads the trace back from the response's `thinking` field into `reasoning_text`,
+  which was always empty. Only `tools`, `tool_results` and `messages` are still refused.
 - `preload_model()` honours the `keep_alive` registered via `configure_provider()`. It used
   to send a hard-coded `"15m"`, so the model was loaded with one residency and then served
   by every `call_ai()` with another. Applies to Ollama and `script` alike.

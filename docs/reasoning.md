@@ -19,7 +19,7 @@ leaves the decision to the provider. Here is what each provider actually does wi
 | Provider | `True` | `False` | `"default"` |
 |---|---|---|---|
 | `google` | `thinking_level` on Gemini 3.x, `thinking_budget` on 2.5 | minimised explicitly | provider default, thoughts still captured |
-| `ollama` | sends `think: true` | sends `think: false` | field omitted |
+| `ollama` | sends `think: true`, on `/api/chat` and on `/api/generate` alike | sends `think: false` | field omitted |
 | `anthropic` | `{"type": "adaptive"}` on Claude 4.6 and later, `{"type": "enabled", "budget_tokens": N}` below | `{"type": "disabled"}` on 4.6 and later; below that the field is omitted, which is already the off state | field omitted |
 | `openai`, `mistral`, `groq`, `xai` | `reasoning_effort: "high"` | `reasoning_effort: "none"` | field omitted |
 | `cohere`, `meta`, `lmstudio`, `llamacpp` | no reasoning control in the API; the value is ignored | ignored | ignored |
@@ -44,6 +44,9 @@ mapping above:
 ```python
 call_ai(provider="openai", model="o3", prompt="...", thinking=True,
         extra_options={"reasoning_effort": "medium"})   # wins over "high"
+
+call_ai(provider="ollama", model="gpt-oss:20b", prompt="...",
+        extra_options={"think": "low"})                 # Ollama's per-model levels
 ```
 
 It is the same split described in
@@ -54,7 +57,8 @@ covers what every provider shares, `extra_options` covers the rest.
 
 Reasoning extraction is independent of all this. `reasoning_text` is populated whenever
 the model returns a trace, whatever `thinking` was set to (`reasoning_content` for the
-OpenAI-compatible providers, `thinking` blocks for Ollama, Anthropic and Google).
+OpenAI-compatible providers, `thinking` blocks for Anthropic and Google, the `thinking`
+field for Ollama on both of its endpoints).
 
 Check `reasoning_is_summary` before comparing traces across providers: Google returns a
 summary of its reasoning, the others return the raw text. Measuring trace length or

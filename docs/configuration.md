@@ -150,7 +150,7 @@ behaviour:
 | `context_size` | `ollama` | unset | Context window in tokens, sent as `num_ctx`. Prefer setting it through `preload_model()`, so Ollama allocates VRAM once instead of reloading on the first call. |
 | `keep_alive` | `ollama`, `script` | unset | How long the model stays resident once idle. A number is seconds, `0` unloads it, `-1` keeps it resident indefinitely; a string is a Go duration such as `"15m"`. Set here on `ollama` it governs every call, warm-up, preload and embedding; on `script` it reaches the `warm_up` and `preload` modes, the only ones that carry the field. `warm_up()` and `preload_model()` also take it per call. Unset, nothing is sent and the server's own default applies (`OLLAMA_KEEP_ALIVE`, five minutes unless changed). |
 | `max_tokens` | all | unset | Response length cap, mapped per provider (`num_predict` on Ollama, `max_output_tokens` on Google). Also a per-call argument, which wins. Unset, nothing is sent, except on `anthropic`, whose API requires the field and so receives `8192`. |
-| `use_generate` | `ollama` | `False` | Routes to `/api/generate` instead of `/api/chat`. That endpoint has no place for tools, tool results, message history or a system prompt: passing any of them together with `use_generate=True` raises `NonRetryableError` rather than dropping them silently. It also does not separate the thinking trace, so leave it off unless a model requires it. |
+| `use_generate` | `ollama` | `False` | Routes to `/api/generate` instead of `/api/chat`. That endpoint carries one prompt with its attachments, a system prompt and the `thinking` flag, and returns the trace separately as `/api/chat` does. It has no place for tools, tool results or message history: passing any of them together with `use_generate=True` raises `NonRetryableError` rather than dropping them silently. It is also the only way to send the completion-only fields below. |
 | `disable_safety` | `google` | `False` | Turns off Gemini's safety filters. |
 | `upload_poll_timeout` | `google` | `15` | Seconds to wait for an uploaded file to reach the `ACTIVE` state before giving up. |
 | `task_type` | `google` | unset | Embedding task type, passed to `embed_content`. |
@@ -165,7 +165,24 @@ field still travels, as `null`, because its protocol keeps every field present.
 
 Anything else is passed through verbatim to the provider payload. On Ollama that means it
 lands inside the `options` object, which is how a model-specific knob such as
-`visual_token_budget` reaches Gemma 4 without the library needing to know it exists.
+`visual_token_budget` reaches Gemma 4, or `repeat_penalty` reaches any model, without the
+library needing to know it exists.
+
+Ollama is the one provider with two places a key can go, because its request has a
+top-level body and a nested `options` object for model parameters. A key that names a
+request-level field of the endpoint in use goes into the body instead of `options`:
+
+| Endpoint | Request-level fields |
+|---|---|
+| `/api/chat` (default) | `format`, `think`, `truncate`, `shift`, `logprobs`, `top_logprobs` |
+| `/api/generate` (`use_generate=True`) | the above, plus `raw`, `suffix`, `template`, `context` |
+| `/api/embed` (`get_embedding()`) | `truncate`, `dimensions` |
+
+These are merged last, so `{"think": "high"}` overrides the `True` that `thinking=True`
+produces, and a JSON schema in `format` replaces the plain `"json"` of `format_json=True`.
+A completion-only field (`raw`, `suffix`, `template`, `context`) on a chat request raises
+`NonRetryableError`, since dropping a `suffix` would change the answer rather than degrade
+it. Embedding fields on a chat request, and the reverse, are simply not sent.
 
 The options above are the reverse case: the library owns their meaning, and the
 `Providers` column says which adapter reads each one. An adapter that does not own an

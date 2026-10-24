@@ -1567,13 +1567,14 @@ class TestSamplingParameters(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestOllamaGenerateModeRejectsChat(unittest.TestCase):
-    """/api/generate has no place for tools, history or a system prompt.
+    """/api/generate has no place for tools or history.
 
     Regression: use_generate=True used to post only the prompt (and any
     images) to /api/generate, silently discarding request.tools,
-    request.tool_results, request.messages and request.system_prompt instead
-    of refusing. A4/A10-class silent data loss, applied to the whole
-    conversation rather than a single field.
+    request.tool_results and request.messages instead of refusing. A4/A10-class
+    silent data loss, applied to the whole conversation rather than a single
+    field. A system prompt used to be refused too, but the endpoint does carry
+    one, in its own `system` field: see TestOllamaGenerateMode.
     """
 
     def _call(self, **request_kwargs):
@@ -1622,13 +1623,6 @@ class TestOllamaGenerateModeRejectsChat(unittest.TestCase):
             self._call(messages=[{"role": "user", "content": "earlier"}])
         self.assertIn("messages", str(ctx.exception))
 
-    def test_rejects_system_prompt(self) -> None:
-        from unified_ai_client.exceptions import NonRetryableError
-
-        with self.assertRaises(NonRetryableError) as ctx:
-            self._call(system_prompt="be terse")
-        self.assertIn("system_prompt", str(ctx.exception))
-
     def test_a_bare_prompt_still_works(self) -> None:
         """The one case use_generate actually supports must be unaffected."""
         from unified_ai_client.providers.ollama import OllamaProvider
@@ -1649,6 +1643,137 @@ class TestOllamaGenerateModeRejectsChat(unittest.TestCase):
             ))
         self.assertEqual(seen["endpoint"], "/api/generate")
         self.assertEqual(seen["payload"]["prompt"], "hi")
+
+
+class TestOllamaGenerateMode(unittest.TestCase):
+    """What /api/generate does carry must reach it, and come back from it."""
+
+    def _generate(self, response: dict | None = None, **request_kwargs):
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(
+            ProviderConfig(extra_options={"use_generate": True})
+        )
+        seen = {}
+
+        def fake_post(self, endpoint, payload, timeout):
+            seen["endpoint"] = endpoint
+            seen["payload"] = payload
+            return response or _OK_RESPONSE
+
+        with patch.object(OllamaProvider, "_post", fake_post):
+            result = provider.call(AiRequest(
+                provider="ollama", model="m", prompt="hi", timeout=30,
+                **request_kwargs,
+            ))
+        return seen["payload"], result
+
+    def test_system_prompt_travels_in_its_own_field(self) -> None:
+        """Regression: a system prompt was refused, though `system` exists."""
+        payload, _ = self._generate(system_prompt="be terse")
+        self.assertEqual(payload["system"], "be terse")
+        self.assertEqual(payload["prompt"], "hi")
+
+    def test_thinking_is_sent(self) -> None:
+        """Regression: thinking=True/False was silently dropped here."""
+        for flag in (True, False):
+            with self.subTest(thinking=flag):
+                payload, _ = self._generate(thinking=flag)
+                self.assertIs(payload["think"], flag)
+        payload, _ = self._generate()
+        self.assertNotIn("think", payload)
+
+    def test_the_trace_is_harvested(self) -> None:
+        """Regression: the top-level `thinking` field was thrown away."""
+        _, result = self._generate(
+            response={"response": "4", "thinking": "2 plus 2", "eval_count": 10},
+            thinking=True,
+        )
+        self.assertEqual(result.text, "4")
+        self.assertEqual(result.reasoning_text, "2 plus 2")
+        self.assertGreater(result.reasoning_tokens, 0)
+
+
+class TestOllamaRequestFields(unittest.TestCase):
+    """Request-level fields go in the body, model parameters in `options`.
+
+    Regression: every extra_options key outside the library's namespace landed
+    inside `options`, where Ollama discards an unknown name with only a
+    server-side warning, so `think`, `raw`, `suffix` or a JSON-schema `format`
+    could not be sent at all.
+    """
+
+    def _payload(self, extra: dict, use_generate: bool = False) -> dict:
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(ProviderConfig())
+        seen = {}
+
+        def fake_post(self, endpoint, payload, timeout):
+            seen["payload"] = payload
+            return _OK_RESPONSE
+
+        with patch.object(OllamaProvider, "_post", fake_post):
+            provider.call(AiRequest(
+                provider="ollama", model="m", prompt="hi", timeout=30,
+                extra_options={**extra, "use_generate": use_generate},
+            ))
+        return seen["payload"]
+
+    def test_fields_are_split_between_body_and_options(self) -> None:
+        payload = self._payload(
+            {"raw": True, "suffix": "}", "repeat_penalty": 1.1}, use_generate=True
+        )
+        self.assertIs(payload["raw"], True)
+        self.assertEqual(payload["suffix"], "}")
+        self.assertEqual(payload["options"], {"repeat_penalty": 1.1})
+
+    def test_an_explicit_think_level_wins_over_the_tri_state(self) -> None:
+        """extra_options is merged last, so "high" beats thinking=True's True."""
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(ProviderConfig())
+        with patch.object(OllamaProvider, "_post", return_value=_OK_RESPONSE) as post:
+            provider.call(AiRequest(
+                provider="ollama", model="m", prompt="hi", timeout=30,
+                thinking=True, extra_options={"think": "high"},
+            ))
+        payload = post.call_args.args[1]
+        self.assertEqual(payload["think"], "high")
+        self.assertNotIn("think", payload["options"])
+
+    def test_a_json_schema_format_replaces_plain_json(self) -> None:
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        payload = self._payload({"format": schema})
+        self.assertEqual(payload["format"], schema)
+
+    def test_a_completion_only_field_on_chat_is_refused(self) -> None:
+        """A dropped `suffix` would be a wrong answer, not a degraded one."""
+        from unified_ai_client.exceptions import NonRetryableError
+
+        with self.assertRaises(NonRetryableError) as ctx:
+            self._payload({"suffix": "}"})
+        self.assertIn("use_generate", str(ctx.exception))
+
+    def test_embed_fields_reach_the_embed_request_only(self) -> None:
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(ProviderConfig(
+            extra_options={"dimensions": 256, "truncate": False}
+        ))
+        with patch.object(
+            OllamaProvider, "_post", return_value={"embeddings": [[0.1]]}
+        ) as post:
+            provider.get_embedding("m", "hi")
+        payload = post.call_args.args[1]
+        self.assertEqual(payload["dimensions"], 256)
+        self.assertIs(payload["truncate"], False)
+
+        with patch.object(OllamaProvider, "_post", return_value=_OK_RESPONSE) as post:
+            provider.call(AiRequest(provider="ollama", model="m", prompt="hi", timeout=30))
+        chat = post.call_args.args[1]
+        self.assertNotIn("dimensions", chat)
+        self.assertNotIn("dimensions", chat["options"])
 
 
 # ---------------------------------------------------------------------------

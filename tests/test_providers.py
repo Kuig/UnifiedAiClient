@@ -523,8 +523,10 @@ class TestOllamaLive(ProviderRegistryIsolation):
 
     # Enough for "PONG" or a one-word answer, which is all these tests read.
     _MAX_TOKENS = 32
-    # Thinking needs room for a trace, or reasoning_tokens is always 0.
-    _MAX_TOKENS_THINKING = 160
+    # Thinking needs room for a trace and then for the answer after it: with
+    # 160, gemma4:e2b spent the whole budget thinking about "2+2" and the
+    # answer came back empty.
+    _MAX_TOKENS_THINKING = 1024
 
     # Set by _live_call on the first transport failure. Class-level on purpose:
     # it has to outlive the test that discovered the server was unhealthy.
@@ -570,7 +572,10 @@ class TestOllamaLive(ProviderRegistryIsolation):
         Args:
             model: Model identifier to call.
             **kwargs: Passed to ``call_ai``. ``temperature``, ``max_tokens``,
-                ``timeout`` and ``max_retries`` get gentle defaults.
+                ``timeout`` and ``max_retries`` get gentle defaults, and
+                ``thinking`` defaults to off: a model that thinks unasked
+                (gemma4 does) would spend the 32-token cap on its trace and
+                answer with nothing.
 
         Returns:
             The ``AiResponse``.
@@ -578,6 +583,7 @@ class TestOllamaLive(ProviderRegistryIsolation):
         from unified_ai_client import call_ai
 
         kwargs.setdefault("temperature", 0.0)
+        kwargs.setdefault("thinking", False)
         kwargs.setdefault("max_tokens", self._MAX_TOKENS)
         kwargs.setdefault("timeout", 60)
         try:
