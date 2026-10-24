@@ -2,11 +2,20 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from unified_ai_client.exceptions import UnsupportedFileError
+from unified_ai_client.exceptions import (
+    EmptyResponseError,
+    UnsupportedFileError,
+    UnsupportedOperationError,
+)
 from unified_ai_client.file_utils import inline_text_attachments, validate_files
 
 if TYPE_CHECKING:
-    from unified_ai_client.models import AiRequest, AiResponse, ModelInfo
+    from unified_ai_client.models import (
+        AiRequest,
+        AiResponse,
+        EmbeddingRequest,
+        ModelInfo,
+    )
 
 
 class BaseProvider(ABC):
@@ -59,6 +68,16 @@ class BaseProvider(ABC):
     False is the safe default, matching the other capability flags. Read by
     ``list_providers()``, and asserted against a hand-written table so a
     provider cannot drift away from what it reports.
+    """
+
+    SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset()
+    """File classes this provider can embed, alongside or instead of text.
+
+    The embeddings counterpart of ``SUPPORTED_FILE_TYPES``, and kept apart from
+    it because the two endpoints differ: Ollama's ``/api/chat`` takes images
+    only, while its ``/api/embed`` also takes audio. ``'text'`` is accepted
+    everywhere and inlined into the input, as it is for generation. Empty means
+    text only.
     """
 
     PROBE_PATH: str | None = None
@@ -283,7 +302,10 @@ class BaseProvider(ABC):
         return max(1, round(len(reasoning) / chars_per_token))
 
     def _partition_attachments(
-        self, paths: list[str], prompt: str
+        self,
+        paths: list[str],
+        prompt: str,
+        supported: frozenset[str] | None = None,
     ) -> tuple[str, list[tuple[str, str]]]:
         """Validate attachments and split them into inlined text and native.
 
@@ -300,6 +322,9 @@ class BaseProvider(ABC):
         Args:
             paths: Local file paths attached to the current turn.
             prompt: The prompt text the inlined attachments are appended to.
+            supported: The classes to accept natively. Defaults to
+                ``SUPPORTED_FILE_TYPES``; embeddings pass
+                ``SUPPORTED_EMBEDDING_FILE_TYPES``.
 
         Returns:
             ``(effective_prompt, native)``, where ``native`` holds one
@@ -313,7 +338,7 @@ class BaseProvider(ABC):
         native: list[tuple[str, str]] = []
         text_files: list[str] = []
 
-        for file_path, file_type in self._validate_files(paths):
+        for file_path, file_type in self._validate_files(paths, supported):
             if file_type == "text":
                 text_files.append(file_path)
             else:
@@ -343,7 +368,9 @@ class BaseProvider(ABC):
             f"files but builds no block for them: '{file_path}'."
         )
 
-    def _validate_files(self, paths: list[str]) -> list[tuple[str, str]]:
+    def _validate_files(
+        self, paths: list[str], supported: frozenset[str] | None = None
+    ) -> list[tuple[str, str]]:
         """Check attachments against this provider's declared capabilities.
 
         The seam every adapter routes its attachments through, so the policy is
@@ -353,6 +380,8 @@ class BaseProvider(ABC):
 
         Args:
             paths: Local file paths attached to the current turn.
+            supported: The classes to accept. Defaults to
+                ``SUPPORTED_FILE_TYPES``.
 
         Returns:
             One ``(path, file_type)`` pair per path, for the caller to build its
@@ -363,7 +392,11 @@ class BaseProvider(ABC):
             UnsupportedFileError: If a file is neither text nor a class this
                 provider declares.
         """
-        return validate_files(paths, self.provider_name, self.SUPPORTED_FILE_TYPES)
+        return validate_files(
+            paths,
+            self.provider_name,
+            self.SUPPORTED_FILE_TYPES if supported is None else supported,
+        )
 
     @abstractmethod
     def call(self, request: AiRequest) -> AiResponse:
@@ -414,9 +447,44 @@ class BaseProvider(ABC):
         """
         return None
 
-    @abstractmethod
+    def embed(self, request: EmbeddingRequest) -> list[list[float]]:
+        """Embed one or more inputs, one vector per entry of ``request.inputs``.
+
+        The method every built-in adapter overrides. Concrete rather than
+        abstract, for the reason ``warm_up()`` and ``list_models()`` are: an
+        adapter written before it existed must keep instantiating. Such an
+        adapter overrode ``get_embedding(model, text)`` instead, and is still
+        served through it here, one text at a time; what that older signature
+        cannot carry (files, a vector size) is refused rather than dropped.
+
+        Args:
+            request: The embedding request, with its timeout already resolved.
+
+        Returns:
+            One vector per input, in input order.
+
+        Raises:
+            UnsupportedOperationError: If the provider serves no embeddings, or
+                a legacy adapter is asked for files or a vector size.
+        """
+        if type(self).get_embedding is BaseProvider.get_embedding:
+            raise UnsupportedOperationError(
+                f"Provider '{self.provider_name}' serves no embeddings endpoint. "
+                "Use another provider for embeddings."
+            )
+        if request.file_path or request.dimensions is not None:
+            raise UnsupportedOperationError(
+                f"Provider '{self.provider_name}' implements only text "
+                "embeddings at the model's own size."
+            )
+        return [self.get_embedding(request.model, text) for text in request.inputs]
+
     def get_embedding(self, model: str, text: str) -> list[float]:
         """Generate a text embedding vector.
+
+        Kept for adapters written before ``embed()`` existed, which overrode
+        this, and for direct callers. The built-in adapters implement
+        ``embed()``; this delegates to it with the configured timeout.
 
         Args:
             model: Embedding model identifier.
@@ -426,9 +494,43 @@ class BaseProvider(ABC):
             List of floats representing the embedding vector.
 
         Raises:
-            NotImplementedError: If the provider does not support embeddings.
+            UnsupportedOperationError: If the provider does not support
+                embeddings. A ``NotImplementedError`` subclass.
         """
-        ...
+        from unified_ai_client.models import EmbeddingRequest
+
+        request = EmbeddingRequest(
+            provider=self.provider_name,
+            model=model,
+            inputs=[text],
+            timeout=self.config.timeout,
+        )
+        return self.embed(request)[0]
+
+    @staticmethod
+    def _check_vector_count(
+        vectors: list[list[float]], request: EmbeddingRequest
+    ) -> list[list[float]]:
+        """Check that a provider answered with one vector per input.
+
+        Args:
+            vectors: The vectors the provider returned.
+            request: The request they answer.
+
+        Returns:
+            ``vectors``, unchanged, when the count matches.
+
+        Raises:
+            EmptyResponseError: If the count does not match, most often zero
+                because the model is not an embedding model.
+        """
+        if len(vectors) != len(request.inputs):
+            raise EmptyResponseError(
+                f"Provider '{request.provider}' returned {len(vectors)} "
+                f"embedding(s) for {len(request.inputs)} input(s) with model "
+                f"'{request.model}'; is it an embedding model?"
+            )
+        return vectors
 
     def list_models(self, *, timeout: int | None = None) -> list[ModelInfo]:
         """List the models this provider offers, with what is known about each.

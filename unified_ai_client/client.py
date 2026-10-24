@@ -7,6 +7,7 @@ from typing import Any
 from unified_ai_client.models import (
     AiRequest,
     AiResponse,
+    EmbeddingRequest,
     ModelInfo,
     ToolDefinition,
     ToolResult,
@@ -111,22 +112,8 @@ def call_ai(
     # out is resident all the same, and still has to be released at exit.
     _record_loaded(provider, prov, model)
 
-    # Resolve centralized sleep rate-limiting delay
-    effective_sleep = sleep_time
-    if effective_sleep is None:
-        effective_sleep = getattr(getattr(prov, "config", None), "sleep_time", 0)
-
-    if effective_sleep > 0:
-        time.sleep(effective_sleep)
-
-    # Resolve the deadline the same way, and here rather than in each adapter:
-    # every provider reads request.timeout directly, so a None arriving there
-    # would be twelve separate fallbacks to get right. Before this, call_ai()
-    # defaulted to a hard 300 that silently outranked configure_provider(),
-    # and a configured timeout only ever reached warm-up and embeddings.
-    effective_timeout = timeout
-    if effective_timeout is None:
-        effective_timeout = getattr(getattr(prov, "config", None), "timeout", 300)
+    _rate_limit(prov, sleep_time)
+    effective_timeout = _resolve_timeout(prov, timeout)
 
     request = AiRequest(
         provider=provider,
@@ -162,21 +149,87 @@ def call_ai(
             "a fresh turn."
         )
 
+    response, elapsed = _invoke(
+        prov.call, request, provider, model, max_retries, retry_base_delay
+    )
+    _log.info(
+        "call_ai success: provider=%s model=%s elapsed=%.2fs input_tokens=%d output_tokens=%d",
+        provider, model, elapsed, response.input_tokens, response.output_tokens,
+    )
+    return response
+
+
+def _rate_limit(prov: Any, sleep_time: int | None) -> None:
+    """Sleep once before a request, for rate limiting.
+
+    The one place rate limiting lives: called by every entry point that sends a
+    request, once and before the retry loop, so retries do not multiply it, and
+    never by a provider.
+
+    Args:
+        prov: The resolved provider, whose configured ``sleep_time`` applies
+            when the call gives none.
+        sleep_time: The call's own value, or None.
+    """
+    effective = sleep_time
+    if effective is None:
+        effective = getattr(getattr(prov, "config", None), "sleep_time", 0)
+    if effective > 0:
+        time.sleep(effective)
+
+
+def _resolve_timeout(prov: Any, timeout: int | None) -> int:
+    """Resolve a call's deadline against the provider's configuration.
+
+    Done here rather than in each adapter: every provider reads the request's
+    timeout directly, so a None arriving there would be one fallback per
+    adapter to get right. call_ai() once defaulted to a hard 300 that silently
+    outranked configure_provider().
+
+    Args:
+        prov: The resolved provider.
+        timeout: The call's own value, or None.
+
+    Returns:
+        Seconds to wait.
+    """
+    if timeout is not None:
+        return timeout
+    return getattr(getattr(prov, "config", None), "timeout", 300)
+
+
+def _invoke(
+    fn: Any,
+    request: Any,
+    provider: str,
+    model: str,
+    max_retries: int,
+    retry_base_delay: float,
+) -> tuple[Any, float]:
+    """Run a provider method through the retry wrapper and time it.
+
+    Args:
+        fn: The bound provider method, ``call`` or ``embed``.
+        request: Its single argument.
+        provider: Provider name, for the retry log label.
+        model: Model name, for the retry log label.
+        max_retries: Retry attempts after the first.
+        retry_base_delay: Initial backoff in seconds.
+
+    Returns:
+        ``(result, elapsed_seconds)``.
+    """
     from unified_ai_client.retry import with_retry
+
     start = time.perf_counter()
-    response = with_retry(
-        prov.call,
+    result = with_retry(
+        fn,
         request,
         max_retries=max_retries,
         base_delay=retry_base_delay,
         label=f"{provider}/{model}",
     )
-    _log.info(
-        "call_ai success: provider=%s model=%s elapsed=%.2fs input_tokens=%d output_tokens=%d",
-        provider, model, time.perf_counter() - start,
-        response.input_tokens, response.output_tokens,
-    )
-    return response
+    return result, time.perf_counter() - start
 
 
 def preload_model(
@@ -359,22 +412,150 @@ def list_models(provider: str, *, timeout: int | None = None) -> list[ModelInfo]
 def get_embedding(
     provider: str,
     model: str,
-    text: str,
+    text: str = "",
+    *,
+    file_path: str | list[str] | None = None,
+    dimensions: int | None = None,
+    timeout: int | None = None,
+    max_retries: int = 3,
+    retry_base_delay: float = 5.0,
+    sleep_time: int | None = None,
+    extra_options: dict | None = None,
 ) -> list[float]:
-    """Generate a text embedding vector.
+    """Generate one embedding vector for a text, files, or both.
+
+    Goes through the same machinery as ``call_ai()``: the rate-limit sleep,
+    the timeout resolved against ``configure_provider()``, and the retry
+    wrapper, which re-raises a deterministic failure at once.
 
     Args:
         provider: Provider name.
-        model: Embedding model name.
-        text: Input text to embed.
+        model: Embedding model name, or the script path for ``'script'``.
+        text: Input text to embed. May be empty when files are given. Models
+            trained with task prefixes (EmbeddingGemma's
+            ``"task: search result | query: "``) expect them here, written by
+            the caller.
+        file_path: Local file path(s) to embed together with ``text`` into one
+            vector, on providers that embed media (see ``docs/api.md``). Text
+            files are inlined into the input.
+        dimensions: Requested vector size, for models trained to be truncated
+            (Matryoshka). ``None`` keeps the model's own size. Refused on a
+            provider with no way to request it.
+        timeout: Seconds to wait. Defaults to the provider's configured timeout.
+        max_retries: Retry attempts on transient failure.
+        retry_base_delay: Initial exponential backoff delay in seconds.
+        sleep_time: Rate limit delay in seconds before the request. Overrides
+            the configured value for this call.
+        extra_options: Provider-specific options for this call.
 
     Returns:
-        List of floats representing the embedding vector.
+        The embedding vector.
+
+    Raises:
+        UnsupportedOperationError: If the provider serves no embeddings, or
+            cannot honour ``dimensions``.
+        UnsupportedFileError: If a file cannot be embedded by this provider.
+        EmptyResponseError: If the provider returned no vector.
+    """
+    from unified_ai_client.file_utils import normalize_file_paths
+
+    files = normalize_file_paths(file_path)
+    return _embed(
+        provider, model, [text], files or None, dimensions, timeout,
+        max_retries, retry_base_delay, sleep_time, extra_options,
+    )[0]
+
+
+def get_embeddings(
+    provider: str,
+    model: str,
+    texts: list[str],
+    *,
+    dimensions: int | None = None,
+    timeout: int | None = None,
+    max_retries: int = 3,
+    retry_base_delay: float = 5.0,
+    sleep_time: int | None = None,
+    extra_options: dict | None = None,
+) -> list[list[float]]:
+    """Generate one embedding vector per text, in a single request where possible.
+
+    The batch counterpart of ``get_embedding()``, for text only. A provider
+    whose endpoint takes a list sends one request; ``script`` runs the script
+    once per text, its protocol carrying a single input.
+
+    Args:
+        provider: Provider name.
+        model: Embedding model name, or the script path for ``'script'``.
+        texts: The texts to embed.
+        dimensions: Requested vector size, as in ``get_embedding()``.
+        timeout: Seconds to wait. Defaults to the provider's configured timeout.
+        max_retries: Retry attempts on transient failure.
+        retry_base_delay: Initial exponential backoff delay in seconds.
+        sleep_time: Rate limit delay in seconds before the request.
+        extra_options: Provider-specific options for this call.
+
+    Returns:
+        One vector per text, in the same order.
+
+    Raises:
+        UnsupportedOperationError: If the provider serves no embeddings, or
+            cannot honour ``dimensions``.
+        EmptyResponseError: If the provider returned fewer vectors than texts.
+    """
+    if not texts:
+        return []
+    return _embed(
+        provider, model, list(texts), None, dimensions, timeout,
+        max_retries, retry_base_delay, sleep_time, extra_options,
+    )
+
+
+def _embed(
+    provider: str,
+    model: str,
+    inputs: list[str],
+    files: list[str] | None,
+    dimensions: int | None,
+    timeout: int | None,
+    max_retries: int,
+    retry_base_delay: float,
+    sleep_time: int | None,
+    extra_options: dict | None,
+) -> list[list[float]]:
+    """The body shared by get_embedding() and get_embeddings().
+
+    Returns:
+        One vector per input.
     """
     # An embedding model occupies VRAM exactly like a chat model does, so it is
     # registered for release the same way, and cleanup() has to be armed for it.
     _register_cleanup()
 
+    _log.info(
+        "get_embedding start: provider=%s model=%s inputs=%d files=%d",
+        provider, model, len(inputs), len(files or []),
+    )
+
     prov = get_provider(provider)
     _record_loaded(provider, prov, model)
-    return prov.get_embedding(model, text)
+
+    _rate_limit(prov, sleep_time)
+    request = EmbeddingRequest(
+        provider=provider,
+        model=model,
+        inputs=inputs,
+        file_path=files,
+        dimensions=dimensions,
+        timeout=_resolve_timeout(prov, timeout),
+        extra_options=extra_options,
+    )
+
+    vectors, elapsed = _invoke(
+        prov.embed, request, provider, model, max_retries, retry_base_delay
+    )
+    _log.info(
+        "get_embedding success: provider=%s model=%s elapsed=%.2fs vectors=%d dims=%d",
+        provider, model, elapsed, len(vectors), len(vectors[0]) if vectors else 0,
+    )
+    return vectors

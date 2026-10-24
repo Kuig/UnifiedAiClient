@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Any
 
-from unified_ai_client.exceptions import UnsupportedFileError
+from unified_ai_client.exceptions import UnsupportedFileError, UnsupportedOperationError
 from unified_ai_client.file_utils import (
     audio_format_name,
     encode_file_base64,
@@ -16,6 +16,7 @@ from unified_ai_client.http import get_json, post_json
 from unified_ai_client.models import (
     AiRequest,
     AiResponse,
+    EmbeddingRequest,
     ModelInfo,
     ProviderConfig,
     ToolCall,
@@ -78,6 +79,15 @@ class OpenAiCompatProvider(BaseProvider):
     )
 
     SUPPORTS_EMBEDDINGS: bool = True
+
+    EMBEDDING_DIMENSIONS_PARAM: str | None = None
+    """Request field that shortens an embedding vector, or None if there is none.
+
+    Only OpenAI's ``dimensions`` is documented across this family. Where it is
+    None, a ``dimensions`` argument is refused rather than silently ignored: a
+    full-size vector where a short one was asked for would break whatever
+    index it is written to.
+    """
 
     # Meaningful only for the two local subclasses: the cloud ones are judged by
     # their credential and never probed.
@@ -517,25 +527,69 @@ class OpenAiCompatProvider(BaseProvider):
             if item.get("id")
         ]
 
-    def get_embedding(self, model: str, text: str) -> list[float]:
-        """Generate a text embedding vector.
+    def embed(self, request: EmbeddingRequest) -> list[list[float]]:
+        """Embed text, a batch of texts, or one input with media, via /embeddings.
+
+        Text, single or batched, goes in the standard OpenAI shape. Media do
+        not exist in that shape: a provider that declares
+        ``SUPPORTED_EMBEDDING_FILE_TYPES`` (llama-server) receives an input
+        object ``{"content": [text, *blocks]}``, the blocks built by
+        ``_build_native_block()`` exactly as for a chat message, and returns one
+        vector for it.
+
+        Only the call-time ``extra_options`` are forwarded here, not the
+        configured ones: a provider configuration is written for chat requests,
+        and a key such as ``reasoning_effort`` registered there would be a
+        malformed embeddings request.
 
         Args:
-            model: Embedding model name.
-            text: Input text to embed.
+            request: The embedding request.
 
         Returns:
-            List of floats representing the embedding vector.
+            One vector per input.
 
         Raises:
-            NotImplementedError: If this provider serves no embeddings endpoint
-                (``SUPPORTS_EMBEDDINGS`` is False), before anything is sent.
+            UnsupportedOperationError: If this provider serves no embeddings
+                endpoint, or cannot shorten vectors and ``dimensions`` was set.
+                Both are raised before anything is sent.
+            UnsupportedFileError: If a file is neither text nor a class this
+                provider can embed.
+            EmptyResponseError: If the response holds no vector for an input.
         """
         if not self.SUPPORTS_EMBEDDINGS:
-            raise NotImplementedError(
+            raise UnsupportedOperationError(
                 f"Provider '{self.provider_name}' serves no embeddings endpoint. "
                 "Use another provider for embeddings."
             )
-        payload = {"model": model, "input": text}
-        resp = self._post(f"{self.API_PREFIX}/embeddings", payload, self.config.timeout)
-        return [float(x) for x in resp["data"][0]["embedding"]]
+        if request.dimensions is not None and not self.EMBEDDING_DIMENSIONS_PARAM:
+            raise UnsupportedOperationError(
+                f"Provider '{self.provider_name}' has no way to request a vector "
+                "size. Leave dimensions unset, then truncate the vector and "
+                "renormalise it yourself."
+            )
+
+        inputs: Any
+        if request.file_path:
+            text, native = self._partition_attachments(
+                request.file_path, request.inputs[0], self.SUPPORTED_EMBEDDING_FILE_TYPES
+            )
+            if native:
+                content = [{"type": "text", "text": text}] if text else []
+                content.extend(self._build_native_block(fp, ft) for fp, ft in native)
+                inputs = [{"content": content}]
+            else:
+                inputs = text
+        elif len(request.inputs) == 1:
+            inputs = request.inputs[0]
+        else:
+            inputs = list(request.inputs)
+
+        payload: dict[str, Any] = {"model": request.model, "input": inputs}
+        if request.dimensions is not None:
+            payload[self.EMBEDDING_DIMENSIONS_PARAM] = request.dimensions
+        payload.update(self._passthrough_options(request.extra_options or {}))
+
+        resp = self._post(f"{self.API_PREFIX}/embeddings", payload, request.timeout)
+        data = sorted(resp.get("data") or [], key=lambda item: item.get("index", 0))
+        vectors = [[float(x) for x in item["embedding"]] for item in data]
+        return self._check_vector_count(vectors, request)

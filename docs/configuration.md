@@ -153,8 +153,8 @@ behaviour:
 | `use_generate` | `ollama` | `False` | Routes to `/api/generate` instead of `/api/chat`. That endpoint carries one prompt with its attachments, a system prompt and the `thinking` flag, and returns the trace separately as `/api/chat` does. It has no place for tools, tool results or message history: passing any of them together with `use_generate=True` raises `NonRetryableError` rather than dropping them silently. It is also the only way to send the completion-only fields below. |
 | `disable_safety` | `google` | `False` | Turns off Gemini's safety filters. |
 | `upload_poll_timeout` | `google` | `15` | Seconds to wait for an uploaded file to reach the `ACTIVE` state before giving up. |
-| `task_type` | `google` | unset | Embedding task type, passed to `embed_content`. |
-| `output_dimensionality` | `google` | unset | Embedding vector size, passed to `embed_content`. |
+| `task_type` | `google` | unset | Embedding task type, passed to `embed_content`. Refused by `gemini-embedding-2`, which takes the task as a text prefix instead. |
+| `output_dimensionality` | `google` | unset | Embedding vector size, passed to `embed_content`. The `dimensions` argument of `get_embedding()` wins over it. |
 | `top_k`, `top_p` | all | unset | Sampling parameters. Also per-call arguments, which win. Unset, nothing is sent and the provider's own default applies. |
 | `temperature` | all | unset | Sampling temperature. Also a per-call argument, which wins. Unset, nothing is sent and the provider's own default applies. |
 

@@ -225,29 +225,18 @@ and the `cleanup()` that frees what they hold are in [docs/warm-up.md](docs/warm
 
 ### Text Embeddings
 
-Generate text embedding vectors. Every provider implements this except `anthropic`,
-`meta`, `groq` and `xai`, which serve no embeddings endpoint:
-
-| Provider | Endpoint used |
-|---|---|
-| `google` | `embed_content` via the SDK (`task_type` and `output_dimensionality` through `configure_provider()`) |
-| `ollama` | `/api/embed` |
-| `openai`, `mistral`, `cohere`, `lmstudio`, `llamacpp` | `/v1/embeddings` |
-| `script` | `mode: "embed"` in the [script protocol](docs/script-protocol.md) |
-| `anthropic`, `meta`, `groq`, `xai` | not available, raises `NotImplementedError` before sending anything |
-
-Implementing the call is not the same as the endpoint being served: whether a given
-cloud provider exposes embeddings, and for which models, is up to that provider. Use a
-model documented as an embedding model for the provider you picked.
+Every provider except `anthropic`, `meta`, `groq` and `xai` serves embeddings, with the
+same retry, rate limiting and timeout handling as `call_ai()`. `ollama`, `llamacpp` and
+`google` also embed images and audio (`llamacpp` and `google` video too) into the same
+vector space as text; the per-provider details are in the
+[API reference](docs/api.md#get_embedding).
 
 ```python
-from unified_ai_client import get_embedding
+from unified_ai_client import get_embedding, get_embeddings
 
-vector = get_embedding(provider="ollama", model="bge-m3", text="I like rusty spoons.")
-print(f"Embedding vector length: {len(vector)}")
-print(f"First 5 coordinates: {vector[:5]}")
-
-vector = get_embedding(provider="mistral", model="mistral-embed", text="I like rusty spoons.")
+vector = get_embedding("ollama", "embeddinggemma-2", "task: search result | query: rusty spoons")
+vectors = get_embeddings("ollama", "embeddinggemma-2", ["first", "second"], dimensions=256)
+image_vector = get_embedding("google", "gemini-embedding-2", "a diagram", file_path="fig.png")
 ```
 
 ### Script Provider

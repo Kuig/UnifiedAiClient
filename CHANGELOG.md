@@ -20,6 +20,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `BaseProvider.list_models()` (concrete, raises `NotImplementedError` by default), plus the
   class-level `SUPPORTS_EMBEDDINGS` and `PROBE_PATH`. An adapter written before them keeps
   working unchanged.
+- `get_embedding()` takes keyword-only `file_path`, `dimensions`, `timeout`, `max_retries`,
+  `retry_base_delay`, `sleep_time` and `extra_options`, and `text` may be empty when files
+  are given. Media are embedded with the text into one vector on `ollama` (image, audio),
+  `llamacpp` (image, audio, video) and `google` (image, audio, video, PDF with
+  `gemini-embedding-2`); `dimensions` requests a shorter Matryoshka vector on `ollama`,
+  `google` and `openai`, and is refused elsewhere rather than ignored. Verified live on
+  Ollama with `embeddinggemma-2` and on Google with `gemini-embedding-2`.
+- `get_embeddings(provider, model, texts)`, the batch counterpart for text, one request where
+  the endpoint takes a list.
+- `UnsupportedOperationError` (a `NonRetryableError` and a `NotImplementedError`) and
+  `EmptyResponseError` (a `NonRetryableError` and a `RuntimeError`), replacing the plain
+  `NotImplementedError` and `RuntimeError` the embedding paths raised, so neither is retried.
+- `BaseProvider.embed(EmbeddingRequest)`, the method adapters now implement, and
+  `SUPPORTED_EMBEDDING_FILE_TYPES`. `get_embedding(model, text)` is no longer abstract; an
+  adapter that overrides it keeps working, served one text at a time.
+- `script` protocol: the `embed` payload gains the optional `file_path` and `dimensions`
+  fields, sent only when set, so existing scripts see no change for text.
 - Video attachments: `classify_file()` has a `video` class (`.mp4`, `.webm`, `.mov`, `.avi`,
   `.mpeg`, `.mpg`). `llamacpp` sends them as llama-server's `input_video` block and `google`
   uploads them through the Files API like any other file; every other provider raises
@@ -79,6 +96,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `get_embedding()` now goes through the same retry, `sleep_time` and timeout handling as
+  `call_ai()`. It used to call the adapter directly: a transient 429 failed at once, a
+  configured `sleep_time` was ignored, and `script` waited a hard-coded 300 seconds
+  regardless of the configured timeout.
+- An HTTP 501 Not Implemented is no longer retried: it says the server does not do what was
+  asked (Ollama answers it for media sent to an embedding model without the encoder).
 - llama.cpp ignored `thinking` altogether. It now sends `reasoning_effort` (`"none"` is
   llama-server's own off switch) together with `chat_template_kwargs.enable_thinking`, which
   Qwen-style templates such as MiniCPM-V 4.5's read instead; a `chat_template_kwargs` in

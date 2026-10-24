@@ -219,6 +219,37 @@ class AiRequest:
 
 
 @dataclass
+class EmbeddingRequest:
+    """Internal request object passed to a provider's ``embed()``.
+
+    Constructed by client.py from ``get_embedding()`` / ``get_embeddings()``
+    arguments, the counterpart of ``AiRequest`` for embeddings. Not part of the
+    public API.
+
+    Attributes:
+        provider: Provider name.
+        model: Embedding model identifier, or script path for 'script'.
+        inputs: The texts to embed, one vector per entry. A single entry for
+            ``get_embedding()``, which may be empty when only files are given.
+        file_path: Local files embedded together with ``inputs[0]`` into one
+            vector, or None. Only ever set on a single-input request.
+        dimensions: Requested vector size (Matryoshka truncation), or None for
+            the model's own. Wins over the same setting in ``extra_options``.
+        timeout: Seconds to wait, already resolved against the configuration by
+            client.py, so a provider always receives a concrete number.
+        extra_options: Call-time provider-specific options, merged over the
+            configured ones by the adapter.
+    """
+    provider: str
+    model: str
+    inputs: list[str]
+    file_path: list[str] | None = None
+    dimensions: int | None = None
+    timeout: int | None = None
+    extra_options: dict | None = None
+
+
+@dataclass
 class ProviderConfig:
     """Provider-specific configuration loaded from config.json.
 

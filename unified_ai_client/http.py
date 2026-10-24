@@ -20,6 +20,15 @@ request again, 409 is a state conflict that another request may clear, and 429
 is a rate limit that the backoff exists precisely to wait out.
 """
 
+_SETTLED_SERVER_STATUSES: frozenset[int] = frozenset({501})
+"""5xx codes that are settled rather than transient.
+
+The 5xx range stays retryable, an overloaded or restarting server being the
+normal reason for one, except 501 Not Implemented, which says the server does
+not do what was asked. Ollama answers it for media sent to an embedding model
+without the encoder, and the next attempt gets the same answer.
+"""
+
 _MAX_DETAIL_CHARS: int = 500
 """Cap on the message carried in the exception.
 
@@ -109,7 +118,8 @@ def _raise_for_http_error(exc: urllib.error.HTTPError, url: str) -> NoReturn:
             pass
 
     detail = _extract_detail(body) or (exc.reason or "")
-    if 400 <= exc.code < 500 and exc.code not in _TRANSIENT_CLIENT_STATUSES:
+    settled_client = 400 <= exc.code < 500 and exc.code not in _TRANSIENT_CLIENT_STATUSES
+    if settled_client or exc.code in _SETTLED_SERVER_STATUSES:
         raise NonRetryableHttpError(url, exc.code, detail, exc.hdrs, body) from exc
     raise ProviderHttpError(url, exc.code, detail, exc.hdrs, body) from exc
 

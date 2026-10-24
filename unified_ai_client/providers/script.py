@@ -5,9 +5,16 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from unified_ai_client.file_utils import normalize_file_paths
-from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
+from unified_ai_client.models import (
+    AiRequest,
+    AiResponse,
+    EmbeddingRequest,
+    ProviderConfig,
+    ToolCall,
+)
 from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.script")
@@ -341,23 +348,39 @@ class ScriptProvider(BaseProvider):
                 model, exc,
             )
 
-    def get_embedding(self, model: str, text: str) -> list[float]:
-        """Generate a text embedding by spawning the target script in embed mode.
+    def embed(self, request: EmbeddingRequest) -> list[list[float]]:
+        """Generate embeddings by spawning the target script in embed mode.
+
+        One subprocess per input: the protocol's ``embed`` payload carries a
+        single ``text``, and a batch field a script did not know about would be
+        ignored, returning one vector where several were expected. Files and a
+        vector size travel as the optional ``file_path`` and ``dimensions``
+        fields, sent only when set, so the payload of a plain text request is
+        exactly what it always was.
 
         Args:
-            model: Path to the script file.
-            text: The text to embed.
+            request: The embedding request. ``request.model`` is the script path.
 
         Returns:
-            List of floats representing the embedding vector.
+            One vector per input.
 
         Raises:
-            subprocess.TimeoutExpired: If the script exceeds the default timeout.
+            subprocess.TimeoutExpired: If the script exceeds the timeout.
             RuntimeError: If the script exits with a non-zero return code.
             json.JSONDecodeError: If stdout is not valid JSON.
             KeyError: If the response JSON is missing the 'embedding' field.
         """
-        cmd = _resolve_interpreter(model)
-        payload = {"mode": "embed", "text": text}
-        data = _run_script(cmd, payload, timeout=300)
-        return data["embedding"]
+        cmd = _resolve_interpreter(request.model)
+        files = normalize_file_paths(request.file_path)
+        vectors: list[list[float]] = []
+        for text in request.inputs:
+            payload: dict[str, Any] = {"mode": "embed", "text": text}
+            if files:
+                payload["file_path"] = files
+            if request.dimensions is not None:
+                payload["dimensions"] = request.dimensions
+            # The resolved timeout, which used to be a hard-coded 300 that
+            # ignored configure_provider("script", timeout=...).
+            data = _run_script(cmd, payload, request.timeout)
+            vectors.append([float(x) for x in data["embedding"]])
+        return self._check_vector_count(vectors, request)

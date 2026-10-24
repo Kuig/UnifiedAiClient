@@ -5,12 +5,13 @@ import logging
 from dataclasses import replace
 from typing import Any
 
-from unified_ai_client.exceptions import NonRetryableError
+from unified_ai_client.exceptions import NonRetryableError, UnsupportedFileError
 from unified_ai_client.file_utils import encode_file_base64, normalize_file_paths
 from unified_ai_client.http import get_json, post_json
 from unified_ai_client.models import (
     AiRequest,
     AiResponse,
+    EmbeddingRequest,
     ModelInfo,
     ProviderConfig,
     ToolCall,
@@ -120,6 +121,11 @@ class OllamaProvider(BaseProvider):
     SUPPORTS_UNLOAD: bool = True
 
     SUPPORTS_EMBEDDINGS: bool = True
+
+    # /api/embed takes an input object with an image and an audio track since
+    # Ollama's multimodal embeddings (2026-09). Unlike /api/chat, audio is
+    # carried there; which tags can read it is up to the model.
+    SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset({"image", "audio"})
 
     # Lists the installed models, so it answers "is the server up" for free.
     PROBE_PATH: str | None = "/api/tags"
@@ -678,30 +684,58 @@ class OllamaProvider(BaseProvider):
             timeout if timeout is not None else _UNLOAD_TIMEOUT,
         )
 
-    def get_embedding(self, model: str, text: str) -> list[float]:
-        """Generate a text embedding vector using Ollama.
+    def embed(self, request: EmbeddingRequest) -> list[list[float]]:
+        """Embed text, a batch of texts, or one input with media, via /api/embed.
 
         The embedding model is subject to the same residency policy as a chat
         model, so that a ``keep_alive`` registered via ``configure_provider()``
         governs both and ``cleanup()`` can release either.
 
+        Media travel as an input object, ``{"text", "image", "audio"}`` with the
+        files in base64, which Ollama embeds into one vector. Each key holds one
+        file, so a second image or a second recording is refused rather than
+        silently dropped. Whether the model can read the medium is up to the
+        tag: a model without the encoder answers with an error of its own.
+
         Args:
-            model: Embedding model name.
-            text: Text to embed.
+            request: The embedding request.
 
         Returns:
-            List of floats representing the embedding vector.
+            One vector per input.
 
         Raises:
-            RuntimeError: If the server returns no embeddings.
+            UnsupportedFileError: If a file is neither text nor image or audio,
+                or a second file of the same class is attached.
+            EmptyResponseError: If the server returns no vector for an input.
         """
-        payload: dict[str, Any] = {"model": model, "input": text}
-        keep_alive = self._resolve_keep_alive(None)
+        opts = self._merge_options(request)
+
+        if request.file_path:
+            text, native = self._partition_attachments(
+                request.file_path, request.inputs[0], self.SUPPORTED_EMBEDDING_FILE_TYPES
+            )
+            item: dict[str, str] = {"text": text} if text else {}
+            for fp, ft in native:
+                if ft in item:
+                    raise UnsupportedFileError(
+                        f"Ollama's /api/embed takes one {ft} per input: '{fp}' "
+                        "would be a second one. Embed it separately."
+                    )
+                item[ft] = encode_file_base64(fp)
+            inputs: Any = [item]
+        elif len(request.inputs) == 1:
+            inputs = request.inputs[0]
+        else:
+            inputs = list(request.inputs)
+
+        payload: dict[str, Any] = {"model": request.model, "input": inputs}
+        keep_alive = opts.get("keep_alive")
         if keep_alive is not None:
             payload["keep_alive"] = keep_alive
-        payload.update(_request_fields(self.config.extra_options or {}, _EMBED_FIELDS))
-        resp = self._post("/api/embed", payload, self.config.timeout)
-        embeddings = resp.get("embeddings", [])
-        if embeddings and len(embeddings) > 0:
-            return [float(x) for x in embeddings[0]]
-        raise RuntimeError("No embeddings returned by Ollama server.")
+        payload.update(_request_fields(opts, _EMBED_FIELDS))
+        if request.dimensions is not None:
+            payload["dimensions"] = request.dimensions
+
+        resp = self._post("/api/embed", payload, request.timeout)
+        vectors = [[float(x) for x in v] for v in resp.get("embeddings") or []]
+        return self._check_vector_count(vectors, request)

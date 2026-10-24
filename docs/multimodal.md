@@ -133,6 +133,16 @@ in an image block, and the markup is more useful to the model than a refusal.
 > `.env` files and similar config are inlined verbatim, secrets included.
 > Nothing is scanned or redacted, so check what a file holds before attaching it.
 
+## Embedding files
+
+`get_embedding()` takes a `file_path` too, embedding the files together with the text into
+one vector. The rules are the same two, with a set of classes of its own per provider:
+`ollama` embeds images and audio, `llamacpp` images, audio and video, `google` images,
+audio, video and PDFs, and the rest text only. Text files are inlined into the input.
+Whether a given model can read the medium is up to the model: a text-only tag answers with
+an error of its own, which is not retried. See
+[`get_embedding`](api.md#get_embedding) for the table.
+
 ## Ollama and audio
 
 Ollama serves audio-capable models such as Gemma 4 `e2b`, but its native `/api/chat`
@@ -140,4 +150,5 @@ endpoint, which this adapter uses, has no field to carry audio; putting it in
 `images[]` is silently ignored. Reaching those models needs Ollama's
 OpenAI-compatible endpoint, which costs the `/api/chat` options this adapter depends
 on (`context_size`, `keep_alive`, native thinking). Until that is wired up, audio to
-`ollama` raises. This is a limitation of the adapter, not of Ollama.
+`ollama` in `call_ai()` raises. This is a limitation of the adapter, not of Ollama.
+Embeddings are different: `/api/embed` does carry audio, so `get_embedding()` accepts it.

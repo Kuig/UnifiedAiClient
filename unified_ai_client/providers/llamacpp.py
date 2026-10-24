@@ -25,6 +25,10 @@ class LlamaCppProvider(OpenAiCompatProvider):
     # that handle the modality; the server refuses the request otherwise.
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "audio", "video"})
 
+    # /v1/embeddings takes the same blocks inside an input object, one vector
+    # per object, which is how EmbeddingGemma 2 is reached multimodally.
+    SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset({"image", "audio", "video"})
+
     # Started in multi-model mode, llama-server loads on first inference, so
     # warming up has to send a completion rather than the inherited metadata GET.
     LAZY_MODEL_LOAD: bool = True

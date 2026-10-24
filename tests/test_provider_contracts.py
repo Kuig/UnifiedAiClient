@@ -925,6 +925,306 @@ class TestEmbeddingsSupportMatrix(unittest.TestCase):
                         provider.get_embedding("m", "text")
 
 
+class TestEmbeddingFileSupportMatrix(unittest.TestCase):
+    """Which file classes each provider can embed, against an explicit table.
+
+    Kept apart from TestFileSupportMatrix because the endpoints differ: Ollama's
+    /api/embed carries audio, its /api/chat does not.
+    """
+
+    _SUPPORT = {
+        "ollama": {"image", "audio"},
+        "llamacpp": {"image", "audio", "video"},
+        "google": {"image", "audio", "video", "document"},
+        "openai": set(), "mistral": set(), "cohere": set(), "lmstudio": set(),
+        "meta": set(), "groq": set(), "xai": set(), "anthropic": set(),
+        # Empty by contract, as for generation: the script receives the raw
+        # paths and decides for itself.
+        "script": set(),
+    }
+
+    def test_table_covers_every_registered_provider(self) -> None:
+        self.assertEqual(set(self._SUPPORT), set(_PROVIDER_CLASSES))
+
+    def test_declared_support_matches_the_table(self) -> None:
+        for name, expected in self._SUPPORT.items():
+            with self.subTest(provider=name):
+                cls = _provider_class_by_name(name)
+                self.assertEqual(set(cls.SUPPORTED_EMBEDDING_FILE_TYPES), expected)
+
+
+class TestEmbeddingMachinery(FileFixtureCase):
+    """get_embedding() goes through the same machinery as call_ai().
+
+    Regression: it used to call the adapter directly, with no retry, no
+    sleep_time, no per-call timeout and no log, and the script adapter waited a
+    hard-coded 300 seconds whatever was configured.
+    """
+
+    def _ollama(self):
+        from unified_ai_client.providers.ollama import OllamaProvider
+        return OllamaProvider
+
+    def test_a_transient_failure_is_retried(self) -> None:
+        import urllib.error
+        from unified_ai_client import get_embedding
+
+        with patch.object(self._ollama(), "_post", side_effect=[
+            urllib.error.URLError("down"), {"embeddings": [[0.5]]},
+        ]) as post:
+            vector = get_embedding("ollama", "m", "hi", retry_base_delay=0)
+        self.assertEqual(vector, [0.5])
+        self.assertEqual(post.call_count, 2)
+
+    def test_an_unsupported_provider_fails_at_once(self) -> None:
+        from unified_ai_client import get_embedding
+        from unified_ai_client.exceptions import UnsupportedOperationError
+
+        with patch("unified_ai_client.retry.time.sleep") as backoff:
+            with self.assertRaises(UnsupportedOperationError) as ctx:
+                get_embedding("anthropic", "m", "hi")
+        self.assertIsInstance(ctx.exception, NotImplementedError)
+        backoff.assert_not_called()
+
+    def test_an_empty_answer_is_not_retried(self) -> None:
+        from unified_ai_client import get_embedding
+        from unified_ai_client.exceptions import EmptyResponseError
+
+        with patch.object(self._ollama(), "_post", return_value={"embeddings": []}) as post:
+            with self.assertRaises(EmptyResponseError) as ctx:
+                get_embedding("ollama", "chat-model", "hi")
+        self.assertIsInstance(ctx.exception, RuntimeError)
+        self.assertEqual(post.call_count, 1)
+
+    def test_sleep_time_applies_once(self) -> None:
+        from unified_ai_client import get_embedding
+
+        with patch("unified_ai_client.client.time.sleep") as sleep, \
+             patch.object(self._ollama(), "_post", return_value={"embeddings": [[0.1]]}):
+            get_embedding("ollama", "m", "hi", sleep_time=2)
+        sleep.assert_called_once_with(2)
+
+    def test_the_configured_timeout_reaches_the_request(self) -> None:
+        from unified_ai_client import configure_provider, get_embedding
+
+        configure_provider("ollama", timeout=77)
+        with patch.object(self._ollama(), "_post", return_value={"embeddings": [[0.1]]}) as post:
+            get_embedding("ollama", "m", "hi")
+            self.assertEqual(post.call_args.args[2], 77)
+            get_embedding("ollama", "m", "hi", timeout=5)
+            self.assertEqual(post.call_args.args[2], 5)
+
+    def test_the_script_honours_the_timeout(self) -> None:
+        """Regression: embed mode waited a hard-coded 300 seconds."""
+        from unified_ai_client import configure_provider, get_embedding
+
+        configure_provider("script", timeout=42)
+        with patch(
+            "unified_ai_client.providers.script._run_script",
+            return_value={"embedding": [1, 2]},
+        ) as run:
+            vector = get_embedding("script", "s.py", "hi")
+        self.assertEqual(vector, [1.0, 2.0])
+        self.assertEqual(run.call_args.args[2], 42)
+
+    def test_the_model_is_tracked_for_release(self) -> None:
+        from unified_ai_client import get_embedding
+        from unified_ai_client import registry
+
+        with patch.object(self._ollama(), "_post", return_value={"embeddings": [[0.1]]}):
+            get_embedding("ollama", "embed-model", "hi")
+        self.assertIn(("ollama", "embed-model"), registry._LOADED_MODELS)
+
+    def test_an_empty_batch_sends_nothing(self) -> None:
+        from unified_ai_client import get_embeddings
+
+        with patch.object(self._ollama(), "_post", side_effect=AssertionError("sent")):
+            self.assertEqual(get_embeddings("ollama", "m", []), [])
+
+    def test_a_legacy_adapter_is_still_served(self) -> None:
+        """An adapter written against get_embedding(model, text) keeps working."""
+        from unified_ai_client.exceptions import UnsupportedOperationError
+        from unified_ai_client.models import EmbeddingRequest
+        from unified_ai_client.providers.base import BaseProvider
+
+        class Legacy(BaseProvider):
+            def __init__(self):
+                self.config = ProviderConfig()
+
+            def call(self, request):  # noqa: ANN001, ANN201
+                raise NotImplementedError
+
+            def get_embedding(self, model, text):  # noqa: ANN001, ANN201
+                return [float(len(text))]
+
+        provider = Legacy()
+        request = EmbeddingRequest(provider="x", model="m", inputs=["a", "bcd"], timeout=1)
+        self.assertEqual(provider.embed(request), [[1.0], [3.0]])
+        request.dimensions = 8
+        with self.assertRaises(UnsupportedOperationError):
+            provider.embed(request)
+
+
+class TestEmbeddingPayloads(FileFixtureCase):
+    """What each adapter puts on the wire for text, batches, media and sizes."""
+
+    def _ollama_payload(self, request_kwargs: dict, config: ProviderConfig | None = None,
+                        response: dict | None = None) -> dict:
+        from unified_ai_client.models import EmbeddingRequest
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(config or ProviderConfig())
+        request_kwargs.setdefault("inputs", ["hi"])
+        request = EmbeddingRequest(provider="ollama", model="m", timeout=9, **request_kwargs)
+        n = len(request.inputs)
+        with patch.object(
+            OllamaProvider, "_post",
+            return_value=response or {"embeddings": [[0.1]] * n},
+        ) as post:
+            provider.embed(request)
+        return post.call_args.args[1]
+
+    def test_ollama_text_and_batch(self) -> None:
+        self.assertEqual(self._ollama_payload({})["input"], "hi")
+        self.assertEqual(
+            self._ollama_payload({"inputs": ["a", "b"]})["input"], ["a", "b"]
+        )
+
+    def test_ollama_media_go_in_one_input_object(self) -> None:
+        payload = self._ollama_payload(
+            {"inputs": ["a red square"], "file_path": [self.sample(".png")]}
+        )
+        (item,) = payload["input"]
+        self.assertEqual(item["text"], "a red square")
+        self.assertIn("image", item)
+
+    def test_ollama_refuses_a_second_image(self) -> None:
+        from unified_ai_client.exceptions import UnsupportedFileError
+
+        with self.assertRaises(UnsupportedFileError):
+            self._ollama_payload({"file_path": [self.sample(".png"), self.make(".jpg")]})
+
+    def test_ollama_refuses_video(self) -> None:
+        from unified_ai_client.exceptions import UnsupportedFileError
+
+        with self.assertRaises(UnsupportedFileError):
+            self._ollama_payload({"file_path": [self.sample(".mp4")]})
+
+    def test_ollama_dimensions_and_call_time_options(self) -> None:
+        payload = self._ollama_payload(
+            {"dimensions": 256, "extra_options": {"truncate": False, "keep_alive": -1}},
+            config=ProviderConfig(extra_options={"dimensions": 768}),
+        )
+        self.assertEqual(payload["dimensions"], 256)
+        self.assertIs(payload["truncate"], False)
+        self.assertEqual(payload["keep_alive"], -1)
+
+    def _compat(self, name: str, request_kwargs: dict, response: dict | None = None):
+        from unified_ai_client.models import EmbeddingRequest
+
+        cls = _provider_class_by_name(name)
+        provider = cls(ProviderConfig()) if name in ("llamacpp", "lmstudio") \
+            else cls(ProviderConfig(), api_key="k")
+        request_kwargs.setdefault("inputs", ["hi"])
+        request = EmbeddingRequest(provider=name, model="m", timeout=9, **request_kwargs)
+        n = len(request.inputs)
+        default = {"data": [{"index": i, "embedding": [float(i)]} for i in range(n)]}
+        with patch.object(cls, "_post", return_value=response or default) as post:
+            vectors = provider.embed(request)
+        return post.call_args.args[1], vectors
+
+    def test_openai_sends_dimensions(self) -> None:
+        payload, _ = self._compat("openai", {"dimensions": 256})
+        self.assertEqual(payload["dimensions"], 256)
+
+    def test_a_size_nobody_can_honour_is_refused(self) -> None:
+        """A full-size vector where a short one was asked for breaks an index."""
+        from unified_ai_client.exceptions import UnsupportedOperationError
+
+        for name in ("llamacpp", "mistral"):
+            with self.subTest(provider=name):
+                with self.assertRaises(UnsupportedOperationError):
+                    self._compat(name, {"dimensions": 256})
+
+    def test_batch_vectors_come_back_in_input_order(self) -> None:
+        _, vectors = self._compat("openai", {"inputs": ["a", "b"]}, response={
+            "data": [{"index": 1, "embedding": [1.0]}, {"index": 0, "embedding": [0.0]}],
+        })
+        self.assertEqual(vectors, [[0.0], [1.0]])
+
+    def test_llamacpp_media_go_in_a_content_object(self) -> None:
+        payload, _ = self._compat(
+            "llamacpp", {"inputs": ["caption"], "file_path": [self.sample(".png")]}
+        )
+        (item,) = payload["input"]
+        self.assertEqual(item["content"][0], {"type": "text", "text": "caption"})
+        self.assertEqual(item["content"][1]["type"], "image_url")
+
+    def test_a_provider_without_media_embeddings_refuses_files(self) -> None:
+        from unified_ai_client.exceptions import UnsupportedFileError
+
+        with self.assertRaises(UnsupportedFileError):
+            self._compat("mistral", {"file_path": [self.sample(".png")]})
+
+    def test_a_text_attachment_is_inlined_on_a_text_only_provider(self) -> None:
+        path = self.make(".md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("attached words")
+        payload, _ = self._compat("mistral", {"inputs": ["q"], "file_path": [path]})
+        self.assertIsInstance(payload["input"], str)
+        self.assertIn("attached words", payload["input"])
+
+    def test_google_dimensions_win_and_batches_stay_lists(self) -> None:
+        from unified_ai_client.models import EmbeddingRequest
+        from unified_ai_client.providers.google import GoogleProvider
+
+        provider = GoogleProvider(
+            ProviderConfig(extra_options={"output_dimensionality": 768}), api_key="k"
+        )
+        client = MagicMock()
+        client.models.embed_content.return_value = MagicMock(
+            embeddings=[MagicMock(values=[0.1]), MagicMock(values=[0.2])]
+        )
+        request = EmbeddingRequest(
+            provider="google", model="m", inputs=["a", "b"], dimensions=256, timeout=9
+        )
+        with patch.object(provider, "_get_client", return_value=client):
+            vectors = provider.embed(request)
+        kwargs = client.models.embed_content.call_args.kwargs
+        # One Content per text: gemini-embedding-2 aggregates a plain list of
+        # strings into a single vector (verified live).
+        self.assertEqual(len(kwargs["contents"]), 2)
+        self.assertEqual(kwargs["contents"][1].parts[0].text, "b")
+        self.assertEqual(kwargs["config"].output_dimensionality, 256)
+        self.assertEqual(vectors, [[0.1], [0.2]])
+
+    def test_the_script_receives_files_and_dimensions_only_when_set(self) -> None:
+        from unified_ai_client.models import EmbeddingRequest
+        from unified_ai_client.providers.script import ScriptProvider
+
+        provider = ScriptProvider(ProviderConfig())
+        payloads: list[dict] = []
+
+        def fake_run(cmd, payload, timeout):  # noqa: ANN001, ANN202
+            payloads.append(payload)
+            return {"embedding": [0.0]}
+
+        with patch(
+            "unified_ai_client.providers.script._run_script", side_effect=fake_run
+        ):
+            provider.embed(EmbeddingRequest(
+                provider="script", model="s.py", inputs=["a", "b"], timeout=9
+            ))
+            provider.embed(EmbeddingRequest(
+                provider="script", model="s.py", inputs=["c"], timeout=9,
+                file_path=["/x.png"], dimensions=64,
+            ))
+        self.assertEqual(payloads[0], {"mode": "embed", "text": "a"})
+        self.assertEqual(payloads[1], {"mode": "embed", "text": "b"})
+        self.assertEqual(payloads[2]["file_path"], ["/x.png"])
+        self.assertEqual(payloads[2]["dimensions"], 64)
+
+
 class TestFileSupportMatrix(FileFixtureCase):
     """Every provider declares what it can carry, and refuses the rest.
 
@@ -2216,13 +2516,18 @@ class TestHttpErrorClassification(ProviderRegistryIsolation):
         self.assertEqual(ctx.exception.code, 404)
 
     def test_the_line_between_retryable_and_not(self) -> None:
-        """408, 409, 425 and 429 are the 4xx a later attempt can still win."""
+        """408, 409, 425 and 429 are the 4xx a later attempt can still win.
+
+        501 is the one settled 5xx: Ollama answers it for media sent to an
+        embedding model without the encoder, and retrying it cost the whole
+        backoff budget to get the same answer.
+        """
         from unified_ai_client.exceptions import NonRetryableError, ProviderHttpError
 
         cases = {
             400: False, 401: False, 403: False, 404: False, 422: False,
             408: True, 409: True, 425: True, 429: True,
-            500: True, 502: True, 503: True,
+            500: True, 502: True, 503: True, 501: False,
         }
         for code, retryable in cases.items():
             with self.subTest(status=code):

@@ -2,6 +2,7 @@ from __future__ import annotations
 from unified_ai_client.client import (
     call_ai,
     get_embedding,
+    get_embeddings,
     list_models,
     preload_model,
     warm_up,
@@ -22,6 +23,8 @@ from unified_ai_client.exceptions import (
     ProviderHttpError,
     NonRetryableHttpError,
     ModelRefusalError,
+    UnsupportedOperationError,
+    EmptyResponseError,
 )
 from unified_ai_client.silence import silence_sdks
 from unified_ai_client.verbosity import set_verbosity
@@ -40,6 +43,7 @@ from unified_ai_client.providers.base import BaseProvider
 __all__ = [
     "call_ai",
     "get_embedding",
+    "get_embeddings",
     "preload_model",
     "unload_model",
     "warm_up",
@@ -59,6 +63,8 @@ __all__ = [
     "ProviderHttpError",
     "NonRetryableHttpError",
     "ModelRefusalError",
+    "UnsupportedOperationError",
+    "EmptyResponseError",
     "AiResponse",
     "AiRequest",
     "ProviderConfig",

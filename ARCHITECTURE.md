@@ -28,9 +28,9 @@ provider speaks HTTP through `urllib` from the standard library.
 ```
 unified_ai_client/
 ├── __init__.py           # Public API exports
-├── client.py             # call_ai(), warm_up(), preload_model(), get_embedding() facade
+├── client.py             # call_ai(), get_embedding(s)(), warm_up(), preload_model() facade
 ├── registry.py           # get_provider(), configure_provider(), list_providers(), cleanup(), the four registries
-├── models.py             # AiRequest, AiResponse, ProviderConfig dataclasses
+├── models.py             # AiRequest, EmbeddingRequest, AiResponse, ProviderConfig dataclasses
 ├── file_utils.py         # classify_file, validate_files, encode_file_base64, ...
 ├── exceptions.py         # UnsupportedFileError, MissingFileError, FileDecodeError
 ├── config.py             # load_secrets(), load_config() (utility)
@@ -98,17 +98,23 @@ walks providers by name and resolves each one through `get_provider()`, rebuildi
 evicted, because a set of live references is not enough: something has to still be asked to
 release them.
 
-**`client.py`** holds the four functions a consumer actually calls day to day: `call_ai()`,
-`get_embedding()`, `warm_up()`, `preload_model()`. `call_ai()` does four things and delegates the
-rest. It packs its arguments into an `AiRequest`, resolves a cached provider through
+**`client.py`** holds the functions a consumer actually calls day to day: `call_ai()`,
+`get_embedding()` and `get_embeddings()`, `warm_up()`, `preload_model()`. `call_ai()` and the
+two embedding functions do the same four things and delegate the rest. Each packs its arguments
+into a request object (`AiRequest`, `EmbeddingRequest`), resolves a cached provider through
 `get_provider()`, sleeps for the rate-limiting interval if one is configured, and invokes the
-provider through the retry wrapper. It does not know what an image is, which provider supports
-reasoning, or how a tool call is spelled, and it does not know how the registries it asks
-`get_provider()` to consult are shaped either.
+provider through the retry wrapper; the sleep, the timeout resolution and the retry call are
+one set of private helpers they share, so neither can drift from the other. They do not know
+what an image is, which provider supports reasoning, or how a tool call is spelled, and they do
+not know how the registries they ask `get_provider()` to consult are shaped either.
 
-`models.py` holds the dataclasses that cross those boundaries: `AiRequest` going in,
-`AiResponse` coming out, `ProviderConfig` describing a provider's registered settings, and
-the tool-calling triple `ToolDefinition`, `ToolCall`, `ToolResult`.
+The two request kinds stay two functions on purpose, rather than a `mode` argument on
+`call_ai()`: they return different types (`AiResponse`, a vector), and almost none of the
+generation parameters mean anything to an embedding.
+
+`models.py` holds the dataclasses that cross those boundaries: `AiRequest` and
+`EmbeddingRequest` going in, `AiResponse` coming out, `ProviderConfig` describing a provider's
+registered settings, and the tool-calling triple `ToolDefinition`, `ToolCall`, `ToolResult`.
 
 ### The provider layer
 
@@ -213,8 +219,9 @@ a provider name has reintroduced the problem the library exists to remove.
 These hold across every adapter. They are invisible in any single file, and they are the
 first thing an edit breaks.
 
-**Rate limiting lives in `call_ai()` and nowhere else.** The sleep happens once, before
-the retry wrapper, and therefore not once per attempt. No provider sleeps on its own. Move
+**Rate limiting lives in `client.py` and nowhere else**, in the one helper `call_ai()` and
+the embedding functions share. The sleep happens once, before the retry wrapper, and
+therefore not once per attempt. No provider sleeps on its own. Move
 it inside the retry loop and a rate-limited provider silently triples its own latency.
 
 **A provider reads its configuration once.** Each HTTP adapter resolves its base URL in

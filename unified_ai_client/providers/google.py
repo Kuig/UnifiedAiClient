@@ -15,6 +15,7 @@ from unified_ai_client.file_utils import normalize_file_paths
 from unified_ai_client.models import (
     AiRequest,
     AiResponse,
+    EmbeddingRequest,
     ModelInfo,
     ProviderConfig,
     ToolCall,
@@ -71,6 +72,13 @@ class GoogleProvider(BaseProvider):
     })
 
     SUPPORTS_EMBEDDINGS: bool = True
+
+    # gemini-embedding-2 embeds text, images, audio, video and PDFs; the parts
+    # are uploaded like any other attachment. A text-only model such as
+    # gemini-embedding-001 refuses them with an error of its own.
+    SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset({
+        "image", "audio", "video", "document",
+    })
 
     def __init__(self, config: ProviderConfig, api_key: str | None = None) -> None:
         """Initialize the Google provider.
@@ -243,12 +251,52 @@ class GoogleProvider(BaseProvider):
         kwargs["include_thoughts"] = True
         return types.ThinkingConfig(**kwargs)
 
-    def _build_parts_for_files(self, file_paths: list[str], upload_poll_timeout: int = 15) -> list[Any]:
+    @staticmethod
+    def _with_deadline(fn: Any, timeout: int | None) -> Any:
+        """Run an SDK call under a real deadline.
+
+        The SDK takes no per-call timeout, so the call runs in a worker thread
+        that is abandoned when the deadline passes.
+
+        Deliberately not a `with` block. ThreadPoolExecutor.__exit__ calls
+        shutdown(wait=True), so raising inside the block does not end it: the
+        context manager keeps waiting for the call it just gave up on, and the
+        timeout ends up measuring nothing. shutdown(wait=False) hands the
+        thread back to the interpreter instead, so the deadline is real.
+
+        Args:
+            fn: Zero-argument callable making the SDK call.
+            timeout: Seconds to wait.
+
+        Returns:
+            Whatever ``fn`` returns.
+
+        Raises:
+            TimeoutError: If the deadline passes first.
+        """
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(fn)
+            try:
+                return future.result(timeout=timeout)
+            except FutureTimeout:
+                raise TimeoutError(f"Google AI call timed out after {timeout}s")
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    def _build_parts_for_files(
+        self,
+        file_paths: list[str],
+        upload_poll_timeout: int = 15,
+        supported: frozenset[str] | None = None,
+    ) -> list[Any]:
         """Upload files and return a list of Part objects.
 
         Args:
             file_paths: List of local file paths to attach.
             upload_poll_timeout: Timeout in seconds for ACTIVE polling.
+            supported: The classes to accept. Defaults to
+                ``SUPPORTED_FILE_TYPES``; embeddings pass their own set.
 
         Returns:
             List of types.Part objects referencing the uploaded files.
@@ -262,7 +310,7 @@ class GoogleProvider(BaseProvider):
                 is not.
         """
         parts = []
-        for fp, _ in self._validate_files(file_paths):
+        for fp, _ in self._validate_files(file_paths, supported):
             ref = self._upload_file(fp, upload_poll_timeout)
             parts.append(
                 types.Part.from_uri(file_uri=ref.uri, mime_type=ref.mime_type)
@@ -397,31 +445,14 @@ class GoogleProvider(BaseProvider):
 
         gen_config = types.GenerateContentConfig(**config_kwargs)
 
-        def _do_call() -> Any:
-            return client.models.generate_content(
+        response = self._with_deadline(
+            lambda: client.models.generate_content(
                 model=request.model,
                 contents=contents,
                 config=gen_config,
-            )
-
-        # Execute with timeout via thread pool.
-        #
-        # Deliberately not a `with` block. ThreadPoolExecutor.__exit__ calls
-        # shutdown(wait=True), so raising inside the block does not end it: the
-        # context manager keeps waiting for the call it just gave up on, and the
-        # timeout ends up measuring nothing. shutdown(wait=False) hands the
-        # thread back to the interpreter instead, so the deadline is real.
-        pool = ThreadPoolExecutor(max_workers=1)
-        try:
-            future = pool.submit(_do_call)
-            try:
-                response = future.result(timeout=request.timeout)
-            except FutureTimeout:
-                raise TimeoutError(
-                    f"Google AI call timed out after {request.timeout}s"
-                )
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+            ),
+            request.timeout,
+        )
 
         # --- Parse token usage ---
         input_tokens = 0
@@ -573,41 +604,73 @@ class GoogleProvider(BaseProvider):
             )
         return models
 
-    def get_embedding(self, model: str, text: str) -> list[float]:
-        """Generate a text embedding vector using the Google AI API.
+    def embed(self, request: EmbeddingRequest) -> list[list[float]]:
+        """Embed text, a batch of texts, or one input with media, via embed_content.
 
-        ``task_type`` and ``output_dimensionality`` can be set through
-        ``configure_provider()``; both are optional and Google applies its own
-        defaults when they are absent.
+        ``task_type`` and ``output_dimensionality`` come from
+        ``configure_provider()`` or call-time ``extra_options``; a
+        ``dimensions`` argument wins over ``output_dimensionality``. Absent,
+        Google applies its own defaults. Note that ``gemini-embedding-2``
+        rejects ``task_type``: the task goes into the text as a prefix instead.
+
+        Media are uploaded like any other attachment and sent as parts of one
+        ``Content`` together with the text, which Google embeds into a single
+        aggregated vector.
 
         Args:
-            model: Embedding model name (e.g. ``'gemini-embedding-001'``).
-            text: The text to embed.
+            request: The embedding request.
 
         Returns:
-            List of floats representing the embedding vector.
+            One vector per input.
 
         Raises:
-            RuntimeError: If the API returns no embedding.
+            UnsupportedFileError: If a file classifies as 'unknown'.
+            EmptyResponseError: If the API returns no vector for an input.
+            TimeoutError: If the deadline passes first.
         """
-        opts = self.config.extra_options or {}
+        opts = self._merge_options(request)
         config_kwargs: dict[str, Any] = {}
         if "task_type" in opts:
             config_kwargs["task_type"] = opts["task_type"]
-        if "output_dimensionality" in opts:
-            config_kwargs["output_dimensionality"] = opts["output_dimensionality"]
+        dimensions = self._prefer_request(request.dimensions, opts, "output_dimensionality")
+        if dimensions is not None:
+            config_kwargs["output_dimensionality"] = dimensions
+
+        contents: Any
+        if request.file_path:
+            parts: list[Any] = []
+            if request.inputs[0]:
+                parts.append(types.Part.from_text(text=request.inputs[0]))
+            parts.extend(self._build_parts_for_files(
+                request.file_path,
+                opts.get("upload_poll_timeout", 15),
+                self.SUPPORTED_EMBEDDING_FILE_TYPES,
+            ))
+            contents = [types.Content(role="user", parts=parts)]
+        elif len(request.inputs) == 1:
+            contents = request.inputs[0]
+        else:
+            # One Content per text. A plain list of strings is not a batch on
+            # every model: gemini-embedding-2 treats it as the parts of one
+            # input and returns a single aggregated vector.
+            contents = [
+                types.Content(role="user", parts=[types.Part.from_text(text=t)])
+                for t in request.inputs
+            ]
 
         client = self._get_client()
-        response = client.models.embed_content(
-            model=model,
-            contents=text,
-            config=types.EmbedContentConfig(**config_kwargs) if config_kwargs else None,
+        response = self._with_deadline(
+            lambda: client.models.embed_content(
+                model=request.model,
+                contents=contents,
+                config=types.EmbedContentConfig(**config_kwargs) if config_kwargs else None,
+            ),
+            request.timeout,
         )
 
-        embeddings = getattr(response, "embeddings", None)
-        if not embeddings:
-            raise RuntimeError("No embeddings returned by the Google AI API.")
-        return [float(x) for x in embeddings[0].values]
+        embeddings = getattr(response, "embeddings", None) or []
+        vectors = [[float(x) for x in e.values] for e in embeddings]
+        return self._check_vector_count(vectors, request)
 
     def cleanup(self) -> None:
         """Delete every uploaded file from Google's remote store.

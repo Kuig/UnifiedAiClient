@@ -355,12 +355,21 @@ be an empty string.
 
 ### 2.4 Input: `embed` payload (stdin), optional
 
-Sent by `get_embedding()`. The payload is intentionally minimal:
+Sent by `get_embedding()`, and once per text by `get_embeddings()`. The payload is
+intentionally minimal:
 
 | Field | Type | Always present | Description |
 |---|---|---|---|
 | `mode` | `string` | ✅ Yes | Always `"embed"` for this payload. |
-| `text` | `string` | ✅ Yes | The text to embed. Never null or empty. |
+| `text` | `string` | ✅ Yes | The text to embed. Empty only when `file_path` is present. |
+| `file_path` | `array[string]` | ❌ No | Files to embed together with `text` into one vector. Present only when the caller passed some. Paths are raw and unfiltered, as in `generate`. |
+| `dimensions` | `int` | ❌ No | The vector size the caller asked for. Present only when set. |
+
+The two optional fields are absent, not null, when unused, so the payload of a plain text
+request is exactly the two fields above. A script that cannot honour `file_path` or
+`dimensions` must exit non-zero rather than return a vector that ignores them: a text-only
+vector where a multimodal one was asked for, or a full-size one where a short one was, is
+a wrong answer with nothing to show for it.
 
 **Example input:**
 ```json

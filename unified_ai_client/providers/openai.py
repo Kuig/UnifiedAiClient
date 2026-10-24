@@ -29,6 +29,9 @@ class OpenAiProvider(OpenAiCompatProvider):
 
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "audio", "document"})
 
+    # Shortens the vector on the text-embedding-3 models.
+    EMBEDDING_DIMENSIONS_PARAM: str | None = "dimensions"
+
     def _build_native_block(self, file_path: str, file_type: str) -> dict[str, Any]:
         """Add PDF blocks to the shared OpenAI-compatible set.
 

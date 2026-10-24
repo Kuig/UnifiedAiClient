@@ -100,7 +100,8 @@ it, in which case override `unload_model()` and `preload_model()` too: a contrac
 asserts that the flag and the two overrides agree. Set `LAZY_MODEL_LOAD` only for a local
 server that defers the model load until first inference, since warming those up costs a
 one-token completion rather than a free metadata GET. Set `SUPPORTS_EMBEDDINGS` if
-`get_embedding()` is implemented. For a local server, set `PROBE_PATH` to a cheap GET path,
+`embed()` is implemented, and `SUPPORTED_EMBEDDING_FILE_TYPES` to the media its embeddings
+endpoint has been verified to take. For a local server, set `PROBE_PATH` to a cheap GET path,
 which is how `list_providers()` tells that it is running. Override `list_models()` if the
 endpoint can enumerate its models, setting a `ModelInfo` capability only when the endpoint
 reports it and leaving it `None` otherwise. The

@@ -64,8 +64,8 @@ Pass `max_retries=0` where a deadline has to be a real deadline.
 An HTTP error is treated differently, because most of them are already settled. A 4xx other
 than 408, 409, 425 and 429 raises [`NonRetryableHttpError`](#nonretryablehttperror) and fails
 on the first attempt: a rejected credential, an unknown model or a malformed payload returns
-the same status however many times it is sent. Those four codes, every 5xx, and any
-connection failure stay retryable.
+the same status however many times it is sent. Those four codes, every 5xx except 501 Not
+Implemented, and any connection failure stay retryable.
 
 **Returns:** an [`AiResponse`](#airesponse) with the response text, token counts, any
 reasoning trace, and any tool calls the model requested.
@@ -86,26 +86,90 @@ print(response.text)
 
 ### `get_embedding`
 
-Generates a numerical embedding vector for the provided text.
+Generates one embedding vector for a text, for files, or for both together. It goes
+through the same machinery as `call_ai()`: the `sleep_time` rate limit, the timeout
+resolved against `configure_provider()`, and the retry wrapper, which re-raises a
+deterministic failure on the first attempt.
 
 ```python
 def get_embedding(
     provider: str,
     model: str,
-    text: str,
+    text: str = "",
+    *,
+    file_path: str | list[str] | None = None,
+    dimensions: int | None = None,
+    timeout: int | None = None,
+    max_retries: int = 3,
+    retry_base_delay: float = 5.0,
+    sleep_time: int | None = None,
+    extra_options: dict | None = None,
 ) -> list[float]:
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `provider` | `str` | required | Any provider except `anthropic`. |
-| `model` | `str` | required | An embedding model of that provider, for example `bge-m3`. |
-| `text` | `str` | required | The text to embed. |
+| `provider` | `str` | required | Any provider in the table below. |
+| `model` | `str` | required | An embedding model of that provider, for example `embeddinggemma-2`. |
+| `text` | `str` | `""` | The text to embed. May be empty when `file_path` is given. A model trained with task prefixes expects them here, written by you: EmbeddingGemma wants `"task: search result \| query: ..."` for a query and `"title: none \| text: ..."` for a document. |
+| `file_path` | `str \| list[str] \| None` | `None` | Files embedded together with `text` into one vector, on the providers that embed media. Text files are inlined into the input. Anything else the provider cannot embed raises `UnsupportedFileError`. |
+| `dimensions` | `int \| None` | `None` | Vector size for a model trained to be truncated (Matryoshka), such as `256` on EmbeddingGemma. `None` keeps the model's own size. Wins over `output_dimensionality` in `extra_options`. Raises `UnsupportedOperationError` on a provider with no way to request it. |
+| `timeout` | `int \| None` | `None` | Seconds to wait. `None` uses the provider's configured timeout. |
+| `max_retries` | `int` | `3` | Retry attempts on transient failures, as in `call_ai()`. |
+| `retry_base_delay` | `float` | `5.0` | Initial backoff delay in seconds. |
+| `sleep_time` | `int \| None` | `None` | Seconds to sleep before the request, once. Falls back to the configured value. |
+| `extra_options` | `dict \| None` | `None` | Provider-specific options for this call, such as `{"task_type": "RETRIEVAL_QUERY"}` on `gemini-embedding-001` or `{"truncate": False}` on Ollama. On the OpenAI-compatible providers only these call-time options are forwarded, not the configured ones, which are written for chat. |
+
+| Provider | Endpoint | Media | `dimensions` |
+|---|---|---|---|
+| `ollama` | `/api/embed` | image, audio (one of each per input; the model must have the encoder) | ✅ |
+| `llamacpp` | `/v1/embeddings` | image, audio, video (needs `--mmproj`) | ❌ |
+| `google` | `embed_content` via the SDK | image, audio, video, PDF (`gemini-embedding-2`) | ✅ `output_dimensionality` |
+| `openai` | `/v1/embeddings` | none | ✅ |
+| `mistral`, `cohere`, `lmstudio` | `/v1/embeddings` | none | ❌ |
+| `script` | `mode: "embed"` in the [script protocol](script-protocol.md) | passed as paths | passed on |
+| `anthropic`, `meta`, `groq`, `xai` | none: raises `UnsupportedOperationError` before sending anything | | |
+
+Implementing the call is not the same as the endpoint being served for every model: use
+a model documented as an embedding model, and a media-capable one for files. Note that
+`gemini-embedding-2` rejects `task_type`: the task goes into the text as a prefix instead.
 
 **Returns:** the vector as a `list[float]`.
 
-**Raises:** `NotImplementedError` on `anthropic`, which serves no embeddings API of its
-own. `RuntimeError` if the provider returns no vector.
+**Raises:** [`UnsupportedOperationError`](#unsupportedoperationerror) on a provider that
+serves no embeddings, or for `dimensions` where it cannot be honoured.
+[`UnsupportedFileError`](#unsupportedfileerror) for a file the provider cannot embed.
+[`EmptyResponseError`](#emptyresponseerror) if the provider returns no vector, typically
+because the model is not an embedding model. None of them is retried.
+
+### `get_embeddings`
+
+The batch counterpart of `get_embedding()`, for text only: one vector per text, in a
+single request where the endpoint takes a list. `script` runs the script once per text,
+its protocol carrying a single input.
+
+```python
+def get_embeddings(
+    provider: str,
+    model: str,
+    texts: list[str],
+    *,
+    dimensions: int | None = None,
+    timeout: int | None = None,
+    max_retries: int = 3,
+    retry_base_delay: float = 5.0,
+    sleep_time: int | None = None,
+    extra_options: dict | None = None,
+) -> list[list[float]]:
+```
+
+The parameters are those of `get_embedding()`, with `texts` in place of `text` and
+`file_path`. An empty list returns `[]` without sending anything.
+
+**Returns:** one vector per text, in the same order.
+
+**Raises:** as `get_embedding()`. `EmptyResponseError` also covers a response with fewer
+vectors than texts.
 
 ### `warm_up`
 
@@ -599,7 +663,24 @@ A 4xx that will fail identically on every attempt. Subclasses both `NonRetryable
 it on the first attempt instead of spending the backoff budget.
 
 Raised for every 4xx except 408, 409, 425 and 429, which are transient by definition and stay
-retryable along with the 5xx range.
+retryable along with the 5xx range. The one 5xx raised as this class is 501 Not Implemented,
+which says the server does not do what was asked: Ollama answers it for media sent to an
+embedding model without the encoder.
+
+### `UnsupportedOperationError`
+
+Raised when a provider is asked for something it does not offer at all: embeddings on
+`anthropic`, `meta`, `groq` or `xai`, or a `dimensions` value a provider has no way to
+request. Raised before anything is sent. Subclasses `NonRetryableError` and
+`NotImplementedError`, which is what those cases raised before, so existing handlers keep
+working.
+
+### `EmptyResponseError`
+
+Raised when a provider answers successfully but returns none of what was asked for: an
+embeddings response with no vector, or fewer vectors than inputs, most often because the
+model is not an embedding model. Subclasses `NonRetryableError` and `RuntimeError`, which
+is what was raised before.
 
 ### `ModelRefusalError`
 

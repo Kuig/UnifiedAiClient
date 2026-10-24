@@ -41,6 +41,27 @@ class FileDecodeError(NonRetryableError, ValueError):
     """
 
 
+class UnsupportedOperationError(NonRetryableError, NotImplementedError):
+    """A provider was asked for something it does not offer at all.
+
+    Embeddings on a provider with no embeddings endpoint, or a reduced vector
+    size on one that cannot produce it. Raised before anything is sent.
+    Subclasses ``NotImplementedError`` so handlers written against the earlier
+    behaviour keep catching it; the ``NonRetryableError`` half is what stops
+    ``with_retry()`` from spending its backoff budget on an answer that cannot
+    change.
+    """
+
+
+class EmptyResponseError(NonRetryableError, RuntimeError):
+    """A provider answered successfully but returned none of what was asked for.
+
+    An embeddings response with no vector, typically because the model is not
+    an embedding model. Subclasses ``RuntimeError``, which is what was raised
+    before, so existing handlers keep catching it.
+    """
+
+
 class ModelRefusalError(NonRetryableError):
     """The provider declined to answer, on policy grounds.
 
@@ -147,5 +168,7 @@ class NonRetryableHttpError(NonRetryableError, ProviderHttpError):
     arrive at the same status. ``with_retry()`` re-raises these immediately.
 
     The transient 4xx codes -- 408, 409, 425 and 429 -- are deliberately not
-    raised as this class: a later attempt genuinely can succeed.
+    raised as this class: a later attempt genuinely can succeed. The one 5xx
+    that is, 501 Not Implemented, says the server does not do what was asked,
+    which no retry changes.
     """

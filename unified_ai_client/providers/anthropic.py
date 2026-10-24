@@ -692,14 +692,3 @@ class AnthropicProvider(BaseProvider):
             reasoning_is_summary=bool(raw_reasoning) and summarised,
             tool_calls=tool_calls,
         )
-
-    def get_embedding(self, model: str, text: str) -> list[float]:
-        """Anthropic does not support text embeddings.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError(
-            "Anthropic offers no embeddings API of its own and recommends a "
-            "third-party provider. Use another provider for embeddings."
-        )
