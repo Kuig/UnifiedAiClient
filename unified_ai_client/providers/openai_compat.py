@@ -277,6 +277,16 @@ class OpenAiCompatProvider(BaseProvider):
                 "input_audio": {"data": b64, "format": fmt},
             }
 
+        if file_type == "video":
+            # Not an OpenAI block: llama-server's own extension, taking raw
+            # base64 and decoding the container with ffmpeg. Only a provider
+            # that declares 'video' ever reaches this.
+            _log.debug("File '%s' → input_video block", name)
+            return {
+                "type": "input_video",
+                "input_video": {"data": encode_file_base64(file_path)},
+            }
+
         raise self._unsupported_native_error(file_path, file_type)
 
     def _build_user_content(

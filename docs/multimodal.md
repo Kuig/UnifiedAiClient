@@ -54,20 +54,28 @@ for the matching guarantee on `tool_call_id`.
 
 ## Supported file types per provider
 
-| Provider | Images | Audio | Text files | PDFs |
-|---|---|---|---|---|
-| `google` | ✅ Upload | ✅ Upload | ✅ Upload | ✅ Upload |
-| `openai` | ✅ base64 | ✅ base64 | ✅ Inlined | ✅ base64 |
-| `anthropic` | ✅ base64 | ❌ Raises | ✅ Inlined | ✅ base64 |
-| `llamacpp` | ✅ base64 | ✅ base64 | ✅ Inlined | ❌ Raises |
-| `ollama` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `mistral` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `cohere` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `meta` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `groq` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `xai` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `lmstudio` | ✅ base64 | ❌ Raises | ✅ Inlined | ❌ Raises |
-| `script` | Path passed | Path passed | Path passed | Path passed |
+| Provider | Images | Audio | Video | Text files | PDFs |
+|---|---|---|---|---|---|
+| `google` | ✅ Upload | ✅ Upload | ✅ Upload | ✅ Upload | ✅ Upload |
+| `openai` | ✅ base64 | ✅ base64 | ❌ Raises | ✅ Inlined | ✅ base64 |
+| `anthropic` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ✅ base64 |
+| `llamacpp` | ✅ base64 | ✅ base64 | ✅ base64 | ✅ Inlined | ❌ Raises |
+| `ollama` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `mistral` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `cohere` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `meta` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `groq` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `xai` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `lmstudio` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `script` | Path passed | Path passed | Path passed | Path passed | Path passed |
+
+Video files are `.mp4`, `.webm`, `.mov`, `.avi`, `.mpeg` and `.mpg`, the containers both
+Gemini and llama-server's ffmpeg decoder take. On `llamacpp` a video travels as an
+`input_video` block, llama-server's own extension to the OpenAI format; the model and its
+`mmproj` must handle video, or the server refuses the request. On `google` a long video
+takes a while to reach the `ACTIVE` state after upload: raise `upload_poll_timeout` (15
+seconds by default) if the upload gives up before the file is ready. `ollama` has no
+field for video on `/api/chat`; extract frames and attach them as images instead.
 
 ## The two rules
 

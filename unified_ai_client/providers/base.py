@@ -21,7 +21,7 @@ class BaseProvider(ABC):
     """File classes this provider can transmit natively.
 
     Values come from ``classify_file()``: ``'image'``, ``'audio'``,
-    ``'document'``. ``'text'`` is deliberately absent, and never declared: text
+    ``'video'``, ``'document'``. ``'text'`` is deliberately absent, and never declared: text
     files are inlined into the prompt by every provider rather than carried in a
     native block, so ``validate_files()`` accepts them unconditionally.
 

@@ -934,10 +934,12 @@ class TestFileSupportMatrix(FileFixtureCase):
     """
 
     _SUPPORT = {
-        "google": {"image", "audio", "document"},
+        # The Files API takes every class the library classifies natively.
+        "google": {"image", "audio", "video", "document"},
         "openai": {"image", "audio", "document"},
         "anthropic": {"image", "document"},
-        "llamacpp": {"image", "audio"},
+        # input_video is llama-server's own extension, decoded with ffmpeg.
+        "llamacpp": {"image", "audio", "video"},
         "ollama": {"image"},
         "mistral": {"image"},
         "cohere": {"image"},
@@ -951,7 +953,29 @@ class TestFileSupportMatrix(FileFixtureCase):
         "script": frozenset(),
     }
 
-    _SAMPLE = {"image": ".png", "audio": ".mp3", "document": ".pdf"}
+    _SAMPLE = {"image": ".png", "audio": ".mp3", "video": ".mp4", "document": ".pdf"}
+
+    def test_llamacpp_sends_video_as_input_video(self) -> None:
+        """The block shape llama-server documents: raw base64 under data."""
+        from unified_ai_client.providers.llamacpp import LlamaCppProvider
+
+        provider = LlamaCppProvider(ProviderConfig())
+        block = provider._build_native_block(self.sample(".mp4"), "video")
+        self.assertEqual(block["type"], "input_video")
+        self.assertIn("data", block["input_video"])
+
+    def test_a_video_never_reaches_a_provider_that_cannot_carry_it(self) -> None:
+        """openai shares the block builder, but declares no video, so it refuses."""
+        from unified_ai_client.exceptions import UnsupportedFileError
+        from unified_ai_client.providers.openai import OpenAiProvider
+
+        provider = OpenAiProvider(ProviderConfig(), api_key="fake")
+        with patch.object(OpenAiProvider, "_post", side_effect=AssertionError("sent")):
+            with self.assertRaises(UnsupportedFileError):
+                provider.call(AiRequest(
+                    provider="openai", model="m", prompt="p",
+                    file_path=self.sample(".mp4"),
+                ))
 
     def test_table_covers_every_registered_provider(self) -> None:
         self.assertEqual(

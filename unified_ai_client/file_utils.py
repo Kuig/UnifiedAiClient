@@ -23,6 +23,11 @@ _IMAGE_EXTS: frozenset[str] = frozenset({
 _AUDIO_EXTS: frozenset[str] = frozenset({
     ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus",
 })
+# The containers both Gemini's Files API and llama-server's ffmpeg decoder take.
+# .mkv is left out: ffmpeg reads it, Gemini does not list it.
+_VIDEO_EXTS: frozenset[str] = frozenset({
+    ".mp4", ".webm", ".mov", ".avi", ".mpeg", ".mpg",
+})
 _TEXT_EXTS: frozenset[str] = frozenset({
     ".txt", ".md", ".markdown", ".mdx", ".csv", ".tsv", ".json",
     ".jsonl", ".ndjson", ".html", ".htm", ".xml", ".svg",
@@ -54,9 +59,10 @@ _TEXT_FILENAMES: frozenset[str] = frozenset({
 def classify_file(path: str) -> str:
     """Classify a file by its name and extension.
 
-    The classification decides how a file reaches the model: images, audio and
-    PDFs become native content blocks where the provider supports them, text is
-    inlined into the prompt, and 'unknown' is refused rather than guessed at.
+    The classification decides how a file reaches the model: images, audio,
+    video and PDFs become native content blocks where the provider supports
+    them, text is inlined into the prompt, and 'unknown' is refused rather than
+    guessed at.
 
     Well-known extensionless names ('Dockerfile', 'Makefile', '.gitignore') are
     recognised by basename, case-insensitively. A suffixed variant such as
@@ -66,7 +72,7 @@ def classify_file(path: str) -> str:
         path: Path to the file.
 
     Returns:
-        One of: 'image', 'audio', 'text', 'document', 'unknown'.
+        One of: 'image', 'audio', 'video', 'text', 'document', 'unknown'.
     """
     if os.path.basename(path).lower() in _TEXT_FILENAMES:
         return "text"
@@ -76,6 +82,8 @@ def classify_file(path: str) -> str:
         return "image"
     if ext in _AUDIO_EXTS:
         return "audio"
+    if ext in _VIDEO_EXTS:
+        return "video"
     if ext in _TEXT_EXTS:
         return "text"
     if ext in _DOCUMENT_EXTS:

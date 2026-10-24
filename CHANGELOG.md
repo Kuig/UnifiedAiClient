@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `BaseProvider.list_models()` (concrete, raises `NotImplementedError` by default), plus the
   class-level `SUPPORTS_EMBEDDINGS` and `PROBE_PATH`. An adapter written before them keeps
   working unchanged.
+- Video attachments: `classify_file()` has a `video` class (`.mp4`, `.webm`, `.mov`, `.avi`,
+  `.mpeg`, `.mpg`). `llamacpp` sends them as llama-server's `input_video` block and `google`
+  uploads them through the Files API like any other file; every other provider raises
+  `UnsupportedFileError`. These extensions used to classify as `unknown` and be refused
+  everywhere.
 - `ModelRefusalError` (a `NonRetryableError`), raised when a provider declines on policy
   grounds instead of answering, with `provider`, `category`, `explanation` and
   `partial_text`. Anthropic raises it for `stop_reason: "refusal"`, which used to come back

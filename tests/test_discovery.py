@@ -282,7 +282,9 @@ class TestListModelsGoogle(unittest.TestCase):
         flash = models["gemini-2.5-flash"]
         self.assertIs(flash.reasoning, True)
         self.assertIs(flash.embeddings, False)
-        self.assertEqual(flash.file_types, frozenset({"image", "audio", "document"}))
+        self.assertEqual(
+            flash.file_types, frozenset({"image", "audio", "video", "document"})
+        )
         self.assertEqual(flash.context_length, 1048576)
         embed = models["gemini-embedding-001"]
         self.assertIs(embed.embeddings, True)

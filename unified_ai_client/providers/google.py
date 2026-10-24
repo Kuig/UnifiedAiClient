@@ -66,7 +66,9 @@ class GoogleProvider(BaseProvider):
         "task_type", "output_dimensionality",
     })
 
-    SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "audio", "document"})
+    SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({
+        "image", "audio", "video", "document",
+    })
 
     SUPPORTS_EMBEDDINGS: bool = True
 

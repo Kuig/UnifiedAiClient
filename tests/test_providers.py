@@ -309,6 +309,8 @@ class TestFileUtils(unittest.TestCase):
         self.assertEqual(classify_file("PHOTO.PNG"), "image")
         self.assertEqual(classify_file("audio.mp3"), "audio")
         self.assertEqual(classify_file("audio.wav"), "audio")
+        self.assertEqual(classify_file("clip.mp4"), "video")
+        self.assertEqual(classify_file("CLIP.WEBM"), "video")
         self.assertEqual(classify_file("doc.pdf"), "document")
         self.assertEqual(classify_file("notes.md"), "text")
         self.assertEqual(classify_file("data.csv"), "text")
@@ -348,6 +350,8 @@ class TestFileUtils(unittest.TestCase):
         for name in (
             "archive.zip", "sheet.xlsx", "report.docx", "lib.so", "app.exe",
             "Dockerfile.dev", "notes",
+            # ffmpeg reads it, Gemini does not: left out of the video class.
+            "movie.mkv",
         ):
             with self.subTest(name=name):
                 self.assertEqual(classify_file(name), "unknown")
