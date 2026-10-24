@@ -96,6 +96,60 @@ class AiResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ProviderInfo:
+    """A provider that can be used right now, as returned by ``list_providers()``.
+
+    Attributes:
+        name: Registry name, the value to pass as ``provider=``.
+        local: True for a provider that runs on this machine (a local server or
+            a subprocess), False for a cloud endpoint.
+        requires_api_key: Whether this provider needs a credential. A cloud
+            provider listed here has one, or an explicit ``url``.
+        file_types: Attachment classes it carries natively (``'image'``,
+            ``'audio'``, ``'document'``). Text files are always accepted and
+            never listed. Empty for ``script``, which declares nothing: only the
+            script knows what it can open.
+        supports_unload: Whether it keeps a model resident and can release it.
+        supports_embeddings: Whether ``get_embedding()`` is implemented.
+    """
+    name: str
+    local: bool
+    requires_api_key: bool
+    file_types: frozenset[str]
+    supports_unload: bool
+    supports_embeddings: bool
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    """One model a provider offers, as returned by ``list_models()``.
+
+    Every capability field is ``None`` when the provider's model listing does not
+    say, which is not the same as ``False``. Most endpoints report little more
+    than an id, so ``None`` is the common answer, and a consumer must treat it as
+    "unknown" rather than "unsupported".
+
+    Attributes:
+        id: Model identifier, the value to pass as ``model=``.
+        provider: Registry name of the provider that serves it.
+        display_name: Human-readable name, when the provider supplies one.
+        reasoning: Whether the model can produce a reasoning trace.
+        tool_use: Whether the model supports tool calling.
+        file_types: Native attachment classes the model accepts, or ``None``.
+        embeddings: Whether this is an embedding-capable model.
+        context_length: Context window in tokens.
+    """
+    id: str
+    provider: str
+    display_name: str | None = None
+    reasoning: bool | None = None
+    tool_use: bool | None = None
+    file_types: frozenset[str] | None = None
+    embeddings: bool | None = None
+    context_length: int | None = None
+
+
 @dataclass
 class AiRequest:
     """Internal request object passed to provider adapters.

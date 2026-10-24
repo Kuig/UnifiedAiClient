@@ -29,7 +29,7 @@ provider speaks HTTP through `urllib` from the standard library.
 unified_ai_client/
 ├── __init__.py           # Public API exports
 ├── client.py             # call_ai(), warm_up(), preload_model(), get_embedding() facade
-├── registry.py           # get_provider(), configure_provider(), cleanup(), the four registries
+├── registry.py           # get_provider(), configure_provider(), list_providers(), cleanup(), the four registries
 ├── models.py             # AiRequest, AiResponse, ProviderConfig dataclasses
 ├── file_utils.py         # classify_file, validate_files, encode_file_base64, ...
 ├── exceptions.py         # UnsupportedFileError, MissingFileError, FileDecodeError
@@ -71,6 +71,21 @@ holds `_PROVIDER_SPECS`, the table `get_provider()` dispatches from: for each re
 provider's module path, class name, and the secrets key it needs, if any. The class is imported
 lazily via `importlib`, so resolving `"ollama"` never pulls in Google's SDK, and only the one
 secret a provider actually needs is looked up, not all of them.
+
+`list_providers()` also lives here, because it walks `_PROVIDER_SPECS` itself instead of going
+through `get_provider()`. It decides availability without building anything: a cloud provider by
+its credential (or an explicit `url`), a local server by a one second probe of the path named in
+the adapter's `PROBE_PATH`, and `script` not at all, having nothing to check. A provider that
+fails the test is never imported, so a machine with no Google key never loads Google's SDK.
+`list_models()` is the opposite case and lives in `client.py`: it reaches the provider only
+through `get_provider()`.
+
+One invariant runs through the model listing: **`None` means unknown, never `False`.** An
+endpoint such as `/v1/models` reports an id and nothing else, and filling the gaps from model
+names would age as fast as the catalogue. A capability is set only when the provider said it
+(Ollama's `/api/show`, Google's SDK object) or when the library holds the knowledge itself
+(Anthropic, where it is uniform across the line). Errors from a listing propagate for the same
+reason: an empty list would read as an account with no models.
 
 All four registries live at module level rather than on the provider instances, and that is
 load-bearing rather than incidental. `configure_provider()` evicts the cached instance, so

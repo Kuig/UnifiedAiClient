@@ -6,7 +6,7 @@ from unified_ai_client.exceptions import UnsupportedFileError
 from unified_ai_client.file_utils import inline_text_attachments, validate_files
 
 if TYPE_CHECKING:
-    from unified_ai_client.models import AiRequest, AiResponse
+    from unified_ai_client.models import AiRequest, AiResponse, ModelInfo
 
 
 class BaseProvider(ABC):
@@ -52,6 +52,23 @@ class BaseProvider(ABC):
 
     SECRETS_KEY: str = ""
     """Key name in secrets.json, used to build a useful error message."""
+
+    SUPPORTS_EMBEDDINGS: bool = False
+    """Whether ``get_embedding()`` is implemented for this provider.
+
+    False is the safe default, matching the other capability flags. Read by
+    ``list_providers()``, and asserted against a hand-written table so a
+    provider cannot drift away from what it reports.
+    """
+
+    PROBE_PATH: str | None = None
+    """Path that tells ``list_providers()`` a local server is running.
+
+    Only meaningful for a provider that talks to a server on this machine, where
+    "installed" and "running" are the same question and the only way to answer it
+    is to ask. ``None`` means there is nothing to probe: a cloud endpoint is
+    judged by its credential, and ``script`` has no server at all.
+    """
 
     _LIBRARY_OPTION_KEYS: frozenset[str] = frozenset({
         # Infrastructure. Resolved by client.py; an adapter only ever sees these
@@ -395,6 +412,32 @@ class BaseProvider(ABC):
             NotImplementedError: If the provider does not support embeddings.
         """
         ...
+
+    def list_models(self, *, timeout: int | None = None) -> list[ModelInfo]:
+        """List the models this provider offers, with what is known about each.
+
+        Queries the provider live, so the answer reflects the account or the
+        machine rather than a table that ages. A capability the listing does not
+        report is left ``None`` on the ``ModelInfo``; it is never guessed.
+
+        Not abstract, for the reason ``warm_up()`` is not: an adapter written
+        before this hook existed must keep instantiating. The default raises
+        rather than returning ``[]``, because an empty list would read as "this
+        provider has no models" instead of "this provider cannot say".
+
+        Args:
+            timeout: Seconds to wait for each request. ``None`` falls back to
+                the provider's configured timeout.
+
+        Returns:
+            One ``ModelInfo`` per model.
+
+        Raises:
+            NotImplementedError: If the provider cannot enumerate its models.
+        """
+        raise NotImplementedError(
+            f"Provider '{self.provider_name}' does not support listing models."
+        )
 
     def warm_up(
         self,

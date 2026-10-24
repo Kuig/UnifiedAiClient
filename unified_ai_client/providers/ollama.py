@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from typing import Any
 
 from unified_ai_client.exceptions import NonRetryableError
 from unified_ai_client.file_utils import encode_file_base64, normalize_file_paths
-from unified_ai_client.http import post_json
-from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
+from unified_ai_client.http import get_json, post_json
+from unified_ai_client.models import (
+    AiRequest,
+    AiResponse,
+    ModelInfo,
+    ProviderConfig,
+    ToolCall,
+)
 from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.ollama")
@@ -93,6 +100,11 @@ class OllamaProvider(BaseProvider):
     # Ollama keeps a model in VRAM between requests and can be told to drop it.
     SUPPORTS_UNLOAD: bool = True
 
+    SUPPORTS_EMBEDDINGS: bool = True
+
+    # Lists the installed models, so it answers "is the server up" for free.
+    PROBE_PATH: str | None = "/api/tags"
+
     # The levers this adapter reads for itself: three folded into `options`
     # under their own name, two translated to Ollama's spelling, and two that
     # steer the adapter without ever reaching the wire as raw keys.
@@ -138,6 +150,98 @@ class OllamaProvider(BaseProvider):
         )
         # No auth headers: a local server authenticates nobody.
         return post_json(f"{self.base_url}{endpoint}", payload, timeout)
+
+    def _get(self, endpoint: str, timeout: int) -> dict[str, Any]:
+        """Perform a HTTP GET request to the Ollama server.
+
+        Args:
+            endpoint: API endpoint path (e.g. '/api/tags').
+            timeout: Request timeout in seconds.
+
+        Returns:
+            The parsed JSON response.
+
+        Raises:
+            NonRetryableHttpError: On a 4xx other than 408/409/425/429.
+            ProviderHttpError: On any other HTTP error response.
+            urllib.error.URLError: On network connection issues.
+        """
+        # No auth headers: a local server authenticates nobody.
+        return get_json(f"{self.base_url}{endpoint}", timeout)
+
+    def list_models(self, *, timeout: int | None = None) -> list[ModelInfo]:
+        """List the installed models, with the capabilities Ollama reports.
+
+        ``GET /api/tags`` names the models and ``POST /api/show`` describes each
+        one: a ``capabilities`` array (``vision``, ``tools``, ``thinking``,
+        ``embedding``) and a context length. That is one extra request per
+        model, so a failure on a single model leaves its capability fields
+        ``None`` and keeps it in the list: a model that is installed is still
+        installed when the detail lookup fails.
+
+        Args:
+            timeout: Seconds to wait for each request. Defaults to the
+                configured timeout.
+
+        Returns:
+            One ``ModelInfo`` per installed model.
+
+        Raises:
+            NonRetryableHttpError: On a 4xx other than 408/409/425/429.
+            ProviderHttpError: On any other HTTP error response.
+            urllib.error.URLError: On network connection issues, listing only.
+        """
+        effective_timeout = self._resolve_timeout(timeout)
+        tags = self._get("/api/tags", effective_timeout)
+
+        models: list[ModelInfo] = []
+        for entry in tags.get("models", []):
+            name = entry.get("model") or entry.get("name")
+            if not name:
+                continue
+            try:
+                details = self._post("/api/show", {"model": name}, effective_timeout)
+            except (OSError, ValueError) as exc:
+                # URLError, HTTP errors and a JSON decode failure all land here.
+                _log.debug("Ollama /api/show failed for '%s': %s", name, exc)
+                models.append(ModelInfo(id=name, provider=self.provider_name))
+                continue
+            models.append(self._model_info(name, details))
+        return models
+
+    def _model_info(self, name: str, details: dict[str, Any]) -> ModelInfo:
+        """Build a ``ModelInfo`` from one ``/api/show`` response.
+
+        Args:
+            name: The model identifier.
+            details: Parsed ``/api/show`` response.
+
+        Returns:
+            The model with each field set only if the response said enough to
+            decide it. A response without a ``capabilities`` array (an older
+            server) leaves those fields unknown rather than all ``False``.
+        """
+        info = ModelInfo(id=name, provider=self.provider_name)
+        capabilities = details.get("capabilities")
+        if isinstance(capabilities, list):
+            info = replace(
+                info,
+                reasoning="thinking" in capabilities,
+                tool_use="tools" in capabilities,
+                embeddings="embedding" in capabilities,
+                file_types=(
+                    frozenset({"image"}) if "vision" in capabilities else frozenset()
+                ),
+            )
+
+        # The context length is keyed by architecture: "llama.context_length",
+        # "gemma3.context_length", and so on.
+        model_info = details.get("model_info") or {}
+        for key, value in model_info.items():
+            if key.endswith(".context_length") and isinstance(value, int):
+                info = replace(info, context_length=value)
+                break
+        return info
 
     def _process_files_for_message(
         self, file_paths: list[str], prompt: str

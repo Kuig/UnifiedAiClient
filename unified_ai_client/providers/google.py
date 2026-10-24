@@ -12,7 +12,13 @@ from google import genai
 from google.genai import types
 
 from unified_ai_client.file_utils import normalize_file_paths
-from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
+from unified_ai_client.models import (
+    AiRequest,
+    AiResponse,
+    ModelInfo,
+    ProviderConfig,
+    ToolCall,
+)
 from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.google")
@@ -61,6 +67,8 @@ class GoogleProvider(BaseProvider):
     })
 
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "audio", "document"})
+
+    SUPPORTS_EMBEDDINGS: bool = True
 
     def __init__(self, config: ProviderConfig, api_key: str | None = None) -> None:
         """Initialize the Google provider.
@@ -524,6 +532,44 @@ class GoogleProvider(BaseProvider):
             self._upload_file(path, upload_poll_timeout)
 
         return True
+
+    def list_models(self, *, timeout: int | None = None) -> list[ModelInfo]:
+        """List models through the SDK's ``models.list()``.
+
+        Each entry reports the actions it supports and, on recent SDK versions,
+        whether it thinks and how large its input window is. Fields the SDK
+        object lacks stay ``None``. The ``models/`` prefix is stripped from the
+        id, since that is the form ``call_ai()`` is given.
+
+        Args:
+            timeout: Ignored. The call goes through the genai SDK, which manages
+                its own deadlines.
+
+        Returns:
+            One ``ModelInfo`` per model the key can see.
+
+        Raises:
+            ValueError: If no API key is set.
+        """
+        models: list[ModelInfo] = []
+        for item in self._get_client().models.list():
+            name = (getattr(item, "name", None) or "").removeprefix("models/")
+            if not name:
+                continue
+            actions = getattr(item, "supported_actions", None)
+            generates = None if actions is None else "generateContent" in actions
+            models.append(
+                ModelInfo(
+                    id=name,
+                    provider=self.provider_name,
+                    display_name=getattr(item, "display_name", None),
+                    reasoning=getattr(item, "thinking", None),
+                    file_types=self.SUPPORTED_FILE_TYPES if generates else None,
+                    embeddings=None if actions is None else "embedContent" in actions,
+                    context_length=getattr(item, "input_token_limit", None),
+                )
+            )
+        return models
 
     def get_embedding(self, model: str, text: str) -> list[float]:
         """Generate a text embedding vector using the Google AI API.

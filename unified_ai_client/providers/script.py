@@ -97,6 +97,11 @@ class ScriptProvider(BaseProvider):
     # and a script that does not implement them declines by exiting non-zero.
     SUPPORTS_UNLOAD: bool = True
 
+    # The embed mode is offered the same way: a script without it exits non-zero.
+    # There is deliberately no list_models: the "model" is the script's own path,
+    # so there is nothing to enumerate.
+    SUPPORTS_EMBEDDINGS: bool = True
+
     # Deliberately empty: this adapter reads none of the library's options and
     # hands the whole extra_options dict to the script untouched. Only the
     # script knows which settings it understands, and that passthrough is part

@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `list_providers()` returns the providers usable right now as `ProviderInfo` objects: cloud
+  providers with a credential (or an explicit `url`), local servers that answer a one second
+  probe, and `script`. `probe_local=False` skips the network entirely.
+- `list_models(provider)` returns a provider's models, queried live, as `ModelInfo` objects with
+  `reasoning`, `tool_use`, `file_types`, `embeddings` and `context_length`. A field the provider's
+  listing does not report is `None` (unknown), never `False`. Ollama reports all of them through
+  `/api/show`, Google through its SDK, Anthropic from the model name; the OpenAI-compatible
+  providers expose only the id. `script` raises `NotImplementedError`.
+- `BaseProvider.list_models()` (concrete, raises `NotImplementedError` by default), plus the
+  class-level `SUPPORTS_EMBEDDINGS` and `PROBE_PATH`. An adapter written before them keeps
+  working unchanged.
+
 ## [0.5.8] - 2026-09-12
 
 ### Changed

@@ -4,7 +4,13 @@ import logging
 import time
 from typing import Any
 
-from unified_ai_client.models import AiRequest, AiResponse, ToolDefinition, ToolResult
+from unified_ai_client.models import (
+    AiRequest,
+    AiResponse,
+    ModelInfo,
+    ToolDefinition,
+    ToolResult,
+)
 from unified_ai_client.registry import (
     _record_loaded,
     _register_cleanup,
@@ -319,6 +325,30 @@ def warm_up(
         _record_loaded(provider, prov, model)
         _log.info("Warm-up completed for provider '%s' model '%s'", provider, model)
     return result
+
+
+def list_models(provider: str, *, timeout: int | None = None) -> list[ModelInfo]:
+    """List the models a provider offers, with the capabilities it reports.
+
+    Queries the provider live. A capability the provider does not report is
+    ``None`` on the returned ``ModelInfo``, meaning "unknown", never ``False``.
+    Errors are not swallowed: an empty list would be indistinguishable from an
+    account with no models.
+
+    Args:
+        provider: Provider name.
+        timeout: Seconds to wait per request. ``None`` uses the provider's
+            configured timeout.
+
+    Returns:
+        One ``ModelInfo`` per model.
+
+    Raises:
+        ValueError: If the provider is unknown, or needs a key that is missing.
+        NotImplementedError: If the provider cannot enumerate models
+            (``script``).
+    """
+    return get_provider(provider).list_models(timeout=timeout)
 
 
 def get_embedding(

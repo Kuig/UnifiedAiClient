@@ -246,6 +246,77 @@ Reach for this when you want a provider's behaviour without the wrapper `call_ai
 around it, for instance `get_provider("google").warm_up(...)` to get the exception that
 `warm_up()` deliberately swallows.
 
+### `list_providers`
+
+Lists the providers that can be used right now. A provider is listed when its prerequisite
+is met, not merely because the library supports it:
+
+- a cloud provider needs its credential (`secrets.json` or the environment), or an explicit
+  `url` registered through `configure_provider()`;
+- `ollama`, `lmstudio` and `llamacpp` need their server to answer a request with a one
+  second deadline, so a server that is installed but not running is left out;
+- `script` is always listed, since it has no server or credential to check.
+
+```python
+def list_providers(*, probe_local: bool = True) -> list[ProviderInfo]:
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `probe_local` | `bool` | `True` | Ask the local servers whether they are running. With `False` no network request is made and the local servers are left out, since there is no other way to know they are there. |
+
+**Returns:** one [`ProviderInfo`](#providerinfo) per usable provider, in registry order.
+
+Cloud providers are never contacted: a key that is present but wrong still lists the
+provider, and the error appears on the first real call. A provider whose SDK is not
+installed (`google`) is left out.
+
+```python
+from unified_ai_client import list_providers
+
+for p in list_providers():
+    print(p.name, sorted(p.file_types))
+```
+
+### `list_models`
+
+Lists the models a provider offers, queried live from the provider, with what is known
+about each one.
+
+```python
+def list_models(provider: str, *, timeout: int | None = None) -> list[ModelInfo]:
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `provider` | `str` | required | Provider name, for example `"ollama"`. |
+| `timeout` | `int \| None` | `None` | Seconds to wait per request. `None` uses the provider's configured timeout. |
+
+**Returns:** one [`ModelInfo`](#modelinfo) per model.
+
+**Raises:** `ValueError` for an unknown provider or a missing key, `NotImplementedError`
+for `script` (its "model" is the script path, so there is nothing to enumerate), and the
+usual HTTP and connection errors. Failures are never turned into an empty list, which would
+be indistinguishable from an account with no models.
+
+What a listing can say depends on the endpoint, and a field the endpoint does not report
+stays `None`, which means "unknown" and never "no":
+
+| Provider | Source of the capability fields |
+|---|---|
+| `ollama` | `/api/show` per model: reasoning, tool use, vision, embeddings and context length. One extra request per model; a model whose lookup fails is still listed, with every field unknown. |
+| `google` | The SDK listing: supported actions, thinking and input token limit. |
+| `anthropic` | This library's knowledge of the Claude line: tool use and images and PDFs for every model, reasoning from 3.7 on, read from the model name. |
+| `openai`, `mistral`, `cohere`, `meta`, `groq`, `xai`, `lmstudio`, `llamacpp` | The id only. `/v1/models` reports nothing else, so every capability field is `None`. |
+
+```python
+from unified_ai_client import list_models
+
+for m in list_models("ollama"):
+    if m.tool_use and m.reasoning:
+        print(m.id, m.context_length)
+```
+
 ### `silence_sdks`
 
 Suppresses verbose debug and info messages from downstream provider SDKs such as
@@ -417,6 +488,36 @@ rarely construct this directly; the field reference lives in the
 | `sleep_time` | `int` | `0` | Seconds to sleep before a call, for rate limiting. |
 | `extra_options` | `dict` | `{}` | Provider-specific settings, including every unrecognised key. |
 
+### `ProviderInfo`
+
+One usable provider, as returned by [`list_providers`](#list_providers). Frozen.
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `str` | Registry name, the value to pass as `provider=`. |
+| `local` | `bool` | `True` for a local server or a subprocess, `False` for a cloud endpoint. |
+| `requires_api_key` | `bool` | Whether the provider needs a credential. |
+| `file_types` | `frozenset[str]` | Attachment classes it carries natively (`image`, `audio`, `document`). Text is always accepted and never listed. Empty for `script`, which declares nothing. |
+| `supports_unload` | `bool` | Whether it keeps a model resident and can release it. |
+| `supports_embeddings` | `bool` | Whether `get_embedding()` is implemented. |
+
+### `ModelInfo`
+
+One model, as returned by [`list_models`](#list_models). Frozen. Every field after
+`provider` is `None` when the provider's listing does not say; treat that as unknown, not
+as unsupported.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `id` | `str` | required | Model identifier, the value to pass as `model=`. |
+| `provider` | `str` | required | Registry name of the provider serving it. |
+| `display_name` | `str \| None` | `None` | Human-readable name, when supplied. |
+| `reasoning` | `bool \| None` | `None` | Whether the model can produce a reasoning trace. |
+| `tool_use` | `bool \| None` | `None` | Whether the model supports tool calling. |
+| `file_types` | `frozenset[str] \| None` | `None` | Native attachment classes the model accepts. |
+| `embeddings` | `bool \| None` | `None` | Whether it is an embedding model. |
+| `context_length` | `int \| None` | `None` | Context window in tokens. |
+
 ### `AiRequest`
 
 The normalised request handed to a provider adapter. Built by `call_ai()` from its own
@@ -429,11 +530,12 @@ to the request.
 
 The abstract base every adapter subclasses. Exported for consumers that call a provider
 directly through `get_provider()`, and for anyone implementing an adapter out of tree. Its
-class-level `SUPPORTED_FILE_TYPES` declares which file classes the adapter accepts, and
-`SUPPORTS_UNLOAD` whether it holds a model resident at all. Both `warm_up()` and
-`unload_model()` are concrete rather than abstract, because "nothing to warm up" and
-"nothing to release" are valid answers, and an adapter written before either hook existed
-keeps working unchanged.
+class-level `SUPPORTED_FILE_TYPES` declares which file classes the adapter accepts,
+`SUPPORTS_UNLOAD` whether it holds a model resident at all, and `SUPPORTS_EMBEDDINGS`
+whether `get_embedding()` is implemented. `warm_up()`, `unload_model()` and `list_models()`
+are concrete rather than abstract, because "nothing to warm up", "nothing to release" and
+"cannot enumerate" are valid answers, and an adapter written before any of these hooks
+existed keeps working unchanged. The default `list_models()` raises `NotImplementedError`.
 
 ## Exceptions
 

@@ -96,7 +96,11 @@ Set `SUPPORTED_FILE_TYPES` to what you have **verified** the endpoint accepts, a
 it, in which case override `unload_model()` and `preload_model()` too: a contract test
 asserts that the flag and the two overrides agree. Set `LAZY_MODEL_LOAD` only for a local
 server that defers the model load until first inference, since warming those up costs a
-one-token completion rather than a free metadata GET. The
+one-token completion rather than a free metadata GET. Set `SUPPORTS_EMBEDDINGS` if
+`get_embedding()` is implemented. For a local server, set `PROBE_PATH` to a cheap GET path,
+which is how `list_providers()` tells that it is running. Override `list_models()` if the
+endpoint can enumerate its models, setting a `ModelInfo` capability only when the endpoint
+reports it and leaving it `None` otherwise. The
 inherited default is `{"image"}`, and declaring a class whose content block the builder
 cannot produce raises at request-build time rather than at import.
 
@@ -111,8 +115,9 @@ Then wire it in and document it:
   `docs/reasoning.md`, `docs/tool-calling.md` and `docs/warm-up.md`;
 - an entry under `## [Unreleased]` in `CHANGELOG.md`;
 - a row in every hand-written table in `tests/test_provider_contracts.py`. Those tables are
-  keyed by provider name, and both `TestFileSupportMatrix._SUPPORT` and
-  `TestUnloadSupportMatrix._SUPPORTS_UNLOAD` assert the declared capabilities against an
+  keyed by provider name, and `TestFileSupportMatrix._SUPPORT`,
+  `TestUnloadSupportMatrix._SUPPORTS_UNLOAD` and
+  `TestEmbeddingsSupportMatrix._SUPPORTS_EMBEDDINGS` assert the declared capabilities against an
   explicit list, so a provider added without a row there fails the suite. `TestDispatch` and
   the import tests need no new entry: they loop over `_PROVIDER_CLASSES`, itself derived from
   `_PROVIDER_SPECS`, so the registry entry above already covers them.

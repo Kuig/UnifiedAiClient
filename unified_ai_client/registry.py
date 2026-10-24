@@ -5,11 +5,13 @@ import importlib
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from unified_ai_client.models import ProviderConfig
+from unified_ai_client.http import is_reachable
+from unified_ai_client.models import ProviderConfig, ProviderInfo
 from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.registry")
@@ -194,6 +196,24 @@ def configure_provider(name: str, **kwargs: Any) -> None:
         _PROVIDERS.pop(name, None)
 
 
+def _resolve_config(provider_name: str) -> ProviderConfig:
+    """Resolve one provider's configuration: programmatic > file > default.
+
+    Args:
+        provider_name: A name present in ``_PROVIDER_SPECS``.
+
+    Returns:
+        The registered config if ``configure_provider()`` set one, otherwise the
+        provider's section of ``config.json``, otherwise the dataclass defaults.
+    """
+    with _PROVIDER_CONFIGS_LOCK:
+        programmatic_config = _PROVIDER_CONFIGS.get(provider_name)
+    if programmatic_config is not None:
+        return programmatic_config
+    from unified_ai_client.config import load_config
+    return load_config(_effective_config_path, ProviderConfig, section=provider_name)
+
+
 def get_provider(provider_name: str) -> BaseProvider:
     """Thread-safe factory to resolve, configure, and cache provider instances.
 
@@ -232,16 +252,7 @@ def get_provider(provider_name: str) -> BaseProvider:
             )
 
         # 1. Resolve configuration: programmatic > file > default
-        with _PROVIDER_CONFIGS_LOCK:
-            programmatic_config = _PROVIDER_CONFIGS.get(provider_name)
-
-        if programmatic_config is not None:
-            config = programmatic_config
-        else:
-            from unified_ai_client.config import load_config
-            config = load_config(
-                _effective_config_path, ProviderConfig, section=provider_name
-            )
+        config = _resolve_config(provider_name)
 
         # 2. Look up the one credential this provider actually needs, if any.
         # Only this key is read, not all eight: until 0.5.8 get_provider()
@@ -261,8 +272,7 @@ def get_provider(provider_name: str) -> BaseProvider:
             "Building provider '%s' (cache miss): url=%s timeout=%s",
             provider_name, config.url, config.timeout,
         )
-        module = importlib.import_module(spec.module)
-        provider_class = getattr(module, spec.class_name)
+        provider_class = _provider_class(spec)
         provider_instance: BaseProvider = (
             provider_class(config, api_key=api_key)
             if spec.api_key_name is not None
@@ -272,6 +282,98 @@ def get_provider(provider_name: str) -> BaseProvider:
         _PROVIDERS[provider_name] = provider_instance
         _BUILT_PROVIDERS.add(provider_name)
         return provider_instance
+
+
+_PROBE_TIMEOUT: float = 1.0
+"""Seconds ``list_providers()`` waits on a local server before calling it down.
+
+A server on this machine answers in milliseconds or not at all, so a short
+deadline costs nothing; a long one would make the call as slow as the slowest
+absent server.
+"""
+
+
+def list_providers(*, probe_local: bool = True) -> list[ProviderInfo]:
+    """List the providers that can be used right now.
+
+    A provider is listed when its prerequisite is met, never when it is merely
+    supported:
+
+    - a cloud provider needs its credential (from ``secrets.json`` or the
+      environment) or an explicit ``url``, the same escape hatch a missing-key
+      error honours;
+    - ``ollama``, ``lmstudio`` and ``llamacpp`` need their server to answer;
+    - ``script`` is always listed, since it has no server or credential to check.
+
+    Only the local probes touch the network. An unlisted provider is not
+    imported, so a machine without a Google key never loads Google's SDK.
+
+    Args:
+        probe_local: Whether to ask the local servers if they are running. With
+            ``False`` no request is made and the local servers are left out,
+            since without asking there is no way to know they are there.
+
+    Returns:
+        One ``ProviderInfo`` per usable provider, in registry order.
+    """
+    from unified_ai_client.config import load_secrets
+    secrets = load_secrets(os.getcwd())
+
+    available: dict[str, type[BaseProvider]] = {}
+    to_probe: dict[str, str] = {}
+    for name, spec in _PROVIDER_SPECS.items():
+        config = _resolve_config(name)
+        if spec.api_key_name is not None and not (
+            secrets.get(spec.api_key_name) or config.url is not None
+        ):
+            continue
+        try:
+            provider_class = _provider_class(spec)
+        except ImportError as exc:
+            # A credential for a provider whose SDK is not installed (Google's)
+            # is not a provider that can be used.
+            _log.debug("Provider '%s' skipped, import failed: %s", name, exc)
+            continue
+        if spec.api_key_name is not None or provider_class.PROBE_PATH is None:
+            available[name] = provider_class
+        elif probe_local:
+            base_url = (config.url or provider_class.DEFAULT_URL).rstrip("/")
+            to_probe[name] = f"{base_url}{provider_class.PROBE_PATH}"
+            available[name] = provider_class
+
+    if to_probe:
+        with ThreadPoolExecutor(max_workers=len(to_probe)) as pool:
+            reachable = dict(zip(
+                to_probe,
+                pool.map(lambda url: is_reachable(url, _PROBE_TIMEOUT), to_probe.values()),
+            ))
+        for name, up in reachable.items():
+            if not up:
+                del available[name]
+
+    return [
+        ProviderInfo(
+            name=name,
+            local=_PROVIDER_SPECS[name].api_key_name is None,
+            requires_api_key=_PROVIDER_SPECS[name].api_key_name is not None,
+            file_types=provider_class.SUPPORTED_FILE_TYPES,
+            supports_unload=provider_class.SUPPORTS_UNLOAD,
+            supports_embeddings=provider_class.SUPPORTS_EMBEDDINGS,
+        )
+        for name, provider_class in available.items()
+    ]
+
+
+def _provider_class(spec: ProviderSpec) -> type[BaseProvider]:
+    """Import a provider's module lazily and return its class.
+
+    Args:
+        spec: The registry entry to resolve.
+
+    Returns:
+        The adapter class, not an instance.
+    """
+    return getattr(importlib.import_module(spec.module), spec.class_name)
 
 
 def _register_cleanup() -> None:

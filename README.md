@@ -188,6 +188,22 @@ the model and returns any `ToolCall` the model requests. The execution loop stay
 All providers support it. The two-turn exchange is worked through in
 [docs/tool-calling.md](docs/tool-calling.md).
 
+### Discovering Providers and Models
+
+Ask what is usable on this machine, and what each model can do:
+
+```python
+from unified_ai_client import list_providers, list_models
+
+print([p.name for p in list_providers()])   # keys present, local servers running
+
+for m in list_models("ollama"):
+    print(m.id, m.reasoning, m.tool_use, m.file_types, m.context_length)
+```
+
+Capabilities a provider's listing does not report are `None`, meaning unknown. What each
+provider can report is in the [API reference](docs/api.md#list_models).
+
 ### Warm-up, Residency and Preloading
 
 Every provider charges some costs once per process: an SDK import, a TLS handshake, a

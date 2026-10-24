@@ -152,6 +152,32 @@ def post_json(
         _raise_for_http_error(exc, url)
 
 
+def is_reachable(url: str, timeout: float) -> bool:
+    """Whether a server answers at ``url`` at all.
+
+    Any HTTP response counts, a 4xx included: a server that rejects the request
+    is still running. Only a failure to connect or to answer in time means it is
+    not. Never raises, which is what lets ``list_providers()`` probe a machine
+    with nothing installed.
+
+    Args:
+        url: Absolute URL to request.
+        timeout: Seconds to wait for the response.
+
+    Returns:
+        True if the server responded, False otherwise.
+    """
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout):
+            return True
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def get_json(
     url: str,
     timeout: int,

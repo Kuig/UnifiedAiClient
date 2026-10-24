@@ -674,6 +674,47 @@ class TestUnloadSupportMatrix(unittest.TestCase):
                 self.assertIs(overrides, declared)
 
 
+class TestEmbeddingsSupportMatrix(unittest.TestCase):
+    """Which providers implement embeddings, against an explicit table."""
+
+    _SUPPORTS_EMBEDDINGS = {
+        "ollama": True,
+        "google": True,
+        "openai": True,
+        "mistral": True,
+        "cohere": True,
+        "meta": True,
+        "groq": True,
+        "xai": True,
+        "lmstudio": True,
+        "llamacpp": True,
+        "script": True,
+        # No embeddings API of its own, see README "Text Embeddings".
+        "anthropic": False,
+    }
+
+    def test_table_covers_every_registered_provider(self) -> None:
+        self.assertEqual(
+            set(self._SUPPORTS_EMBEDDINGS), set(_PROVIDER_CLASSES),
+            "a provider was added or removed without updating this table",
+        )
+
+    def test_declared_support_matches_the_table(self) -> None:
+        for name, expected in self._SUPPORTS_EMBEDDINGS.items():
+            with self.subTest(provider=name):
+                cls = _provider_class_by_name(name)
+                self.assertIs(cls.SUPPORTS_EMBEDDINGS, expected)
+
+    def test_providers_without_support_refuse_rather_than_pretend(self) -> None:
+        for name, declared in self._SUPPORTS_EMBEDDINGS.items():
+            if declared:
+                continue
+            with self.subTest(provider=name):
+                provider = _provider_class_by_name(name)(ProviderConfig())
+                with self.assertRaises(NotImplementedError):
+                    provider.get_embedding("m", "text")
+
+
 class TestFileSupportMatrix(FileFixtureCase):
     """Every provider declares what it can carry, and refuses the rest.
 

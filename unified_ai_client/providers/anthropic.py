@@ -12,7 +12,13 @@ from unified_ai_client.file_utils import (
     normalize_file_paths,
 )
 from unified_ai_client.http import get_json, post_json
-from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
+from unified_ai_client.models import (
+    AiRequest,
+    AiResponse,
+    ModelInfo,
+    ProviderConfig,
+    ToolCall,
+)
 from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.anthropic")
@@ -53,6 +59,8 @@ class AnthropicProvider(BaseProvider):
     # Claude 4.6 is where adaptive thinking was introduced. Below it only the
     # fixed-budget form is accepted; from 4.7 on only the adaptive one is.
     _ADAPTIVE_SINCE: tuple[int, int] = (4, 6)
+    # Claude 3.7 is where extended thinking was introduced.
+    _THINKING_SINCE: tuple[int, int] = (3, 7)
     # Anthropic's documented floor for budget_tokens.
     _MIN_THINKING_BUDGET: int = 1024
 
@@ -221,6 +229,49 @@ class AnthropicProvider(BaseProvider):
         """
         self._require_api_key()
         return get_json(f"{self.base_url}{endpoint}", timeout, self._auth_headers())
+
+    def list_models(self, *, timeout: int | None = None) -> list[ModelInfo]:
+        """List models through ``GET /v1/models``.
+
+        The listing carries an id and a display name. What the rest of the
+        fields hold is this library's knowledge of the Claude line, not the
+        endpoint's: every Claude model calls tools and takes images and PDFs,
+        and extended thinking arrived with 3.7, read off the model name by
+        ``_model_version()``. A name that does not parse leaves ``reasoning``
+        unknown.
+
+        Args:
+            timeout: Seconds to wait. Defaults to the configured timeout.
+
+        Returns:
+            One ``ModelInfo`` per model, newest first as the API orders them.
+
+        Raises:
+            NonRetryableHttpError: On a 4xx other than 408/409/425/429.
+            ProviderHttpError: On any other HTTP error response.
+            urllib.error.URLError: On connection errors.
+            ValueError: If no API key is set.
+        """
+        # The endpoint pages at 20 by default; 1000 is its documented ceiling.
+        resp = self._get("/v1/models?limit=1000", self._resolve_timeout(timeout))
+        models: list[ModelInfo] = []
+        for item in resp.get("data", []):
+            model_id = item.get("id")
+            if not model_id:
+                continue
+            version = self._model_version(model_id)
+            models.append(
+                ModelInfo(
+                    id=model_id,
+                    provider=self.provider_name,
+                    display_name=item.get("display_name"),
+                    reasoning=None if version is None else version >= self._THINKING_SINCE,
+                    tool_use=True,
+                    file_types=self.SUPPORTED_FILE_TYPES,
+                    embeddings=False,
+                )
+            )
+        return models
 
     def warm_up(
         self,

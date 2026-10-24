@@ -13,7 +13,13 @@ from unified_ai_client.file_utils import (
     normalize_file_paths,
 )
 from unified_ai_client.http import get_json, post_json
-from unified_ai_client.models import AiRequest, AiResponse, ProviderConfig, ToolCall
+from unified_ai_client.models import (
+    AiRequest,
+    AiResponse,
+    ModelInfo,
+    ProviderConfig,
+    ToolCall,
+)
 from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.openai_compat")
@@ -58,6 +64,12 @@ class OpenAiCompatProvider(BaseProvider):
     _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset(
         {"temperature", "max_tokens", "top_k", "top_p"}
     )
+
+    SUPPORTS_EMBEDDINGS: bool = True
+
+    # Meaningful only for the two local subclasses: the cloud ones are judged by
+    # their credential and never probed.
+    PROBE_PATH: str | None = "/v1/models"
 
     LAZY_MODEL_LOAD: bool = False
     """Whether this endpoint defers loading the model until first inference.
@@ -426,6 +438,33 @@ class OpenAiCompatProvider(BaseProvider):
             reasoning_text=raw_reasoning,
             tool_calls=tool_calls,
         )
+
+    def list_models(self, *, timeout: int | None = None) -> list[ModelInfo]:
+        """List models through ``GET /v1/models``.
+
+        The OpenAI-compatible listing carries an id and little else, so every
+        capability field is left ``None``: the endpoint does not say which models
+        reason, call tools or accept images, and guessing from the name would
+        age as fast as the catalogue does.
+
+        Args:
+            timeout: Seconds to wait. Defaults to the configured timeout.
+
+        Returns:
+            One ``ModelInfo`` per entry in the response's ``data`` array.
+
+        Raises:
+            NonRetryableHttpError: On a 4xx other than 408/409/425/429.
+            ProviderHttpError: On any other HTTP error response.
+            urllib.error.URLError: On connection errors.
+            ValueError: If this provider requires an API key and none is set.
+        """
+        resp = self._get("/v1/models", self._resolve_timeout(timeout))
+        return [
+            ModelInfo(id=item["id"], provider=self.provider_name)
+            for item in resp.get("data", [])
+            if item.get("id")
+        ]
 
     def get_embedding(self, model: str, text: str) -> list[float]:
         """Generate a text embedding vector.
