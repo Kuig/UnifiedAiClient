@@ -173,6 +173,41 @@ object that rejects unrecognised fields, so instead of forwarding anything it ac
 named list: `response_schema`, `stop_sequences`, `presence_penalty`, `frequency_penalty`
 and `seed`. An option outside that list and outside the table above does not reach Gemini.
 
+## Sharing the library between projects
+
+Provider configuration, cached provider instances, the list of loaded models and Google's
+uploaded files all live at module level, so their scope is the Python process.
+
+### Two projects in one process
+
+When project A imports project B and both call this library, there is a single copy of that
+state and both see it:
+
+| Shared state | Effect |
+|---|---|
+| `configure_provider()` settings | The last call wins for both. Options merge key by key, so a `timeout` or `url` set by B silently applies to A's calls. |
+| Cached provider instances | Built once, with the credentials found in the working directory at that moment. A second `secrets.json` with other keys is ignored until the instance is evicted. Environment variables still take precedence over the file. |
+| `cleanup()` | Unloads every model and deletes every Google upload tracked in the process, including those the other project still needs. The next call pays the reload or re-upload. |
+| `set_verbosity()` | There is one logger, so the last setting wins. |
+
+A project meant to be imported by others should not call `configure_provider()`,
+`set_verbosity()` or `cleanup()`, and should pass per-call overrides through `extra_options`.
+The application at the top owns configuration and cleanup. `cleanup(unload_models=False)`
+leaves loaded models in place.
+
+### Two projects in separate virtual environments
+
+Each process has its own copy of the library, so configuration, credentials and cleanup
+never cross. Only what lives outside the process is shared:
+
+- A local server (Ollama, LM Studio, llama.cpp) is one resource for both. Each process
+  unloads only the models it loaded itself, but a model unloaded by one is reloaded on the
+  other's next request, and two large models may not fit in memory together.
+- Cloud rate limits and quotas are per API key. `sleep_time` is applied per process and
+  does not coordinate between them.
+- With editable installs pointing at the same source directory, the fallback `config.json`
+  described below is the same file for both.
+
 ## `config.json`, the file-based fallback
 
 Settings can also be written to a `config.json` shipped inside the library directory,

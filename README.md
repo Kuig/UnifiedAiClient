@@ -252,3 +252,12 @@ resident. It is registered with `atexit` on the first `call_ai()`, `warm_up()` o
 `get_embedding()`, so you normally never call it, and it runs after an unhandled exception or
 a Ctrl+C too. Pass `unload_models=False` to keep the models warm; see
 [docs/warm-up.md](docs/warm-up.md) for eager cleanup.
+
+### Using it from several projects
+
+> **Warning.** Settings, cached providers and `cleanup()` are shared by everything in the
+> same process. If project A imports project B, B's `configure_provider()` changes A's calls
+> and either one's `cleanup()` unloads models the other still uses, so only the top-level
+> application should call them. Projects in separate virtual environments do not share
+> this state, but still share the local server (Ollama and the like) and the API quota.
+> Details in [docs/configuration.md](docs/configuration.md#sharing-the-library-between-projects).
