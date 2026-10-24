@@ -100,16 +100,6 @@ class BaseProvider(ABC):
     went the same way.
     """
 
-    DEFAULT_TEMPERATURE: float = 0.7
-    """The temperature used when neither the caller nor the config set one.
-
-    ``AiRequest.temperature`` defaults to None so that "not given" stays
-    distinguishable from "given 0.7", which is what lets a temperature
-    registered through ``configure_provider()` actually reach the payload. The
-    value that used to be the signature default lives here instead, so the
-    behaviour a caller sees when configuring nothing is unchanged.
-    """
-
     _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset()
     """The subset of ``_LIBRARY_OPTION_KEYS`` this adapter reads for itself.
 
@@ -191,9 +181,11 @@ class BaseProvider(ABC):
         """Resolve one common lever across its three possible sources.
 
         The precedence is the same for every one of them: an explicit call-time
-        argument, then ``extra_options``, then the provider's own default.
-        ``None`` is the "not given" signal, which is why the sampling parameters
-        on ``AiRequest`` default to it rather than to a value.
+        argument, then ``extra_options``, then ``default``. ``None`` is the "not
+        given" signal, which is why the sampling parameters on ``AiRequest``
+        default to it rather than to a value, and a ``None`` result means "leave
+        the key off the wire": the provider's own default then applies, rather
+        than one this library invented.
 
         Args:
             value: The named argument off the request, or None if unset.
@@ -234,6 +226,29 @@ class BaseProvider(ABC):
             The number of seconds to wait.
         """
         return timeout if timeout is not None else self.config.timeout
+
+    def _resolve_keep_alive(self, keep_alive: str | int | None) -> str | int | None:
+        """Resolve the residency to request, explicit argument first.
+
+        Precedence is the explicit argument, then the ``keep_alive`` registered
+        via ``configure_provider()``, then nothing at all, which leaves the
+        backend's own default in charge (for Ollama, ``OLLAMA_KEEP_ALIVE``,
+        five minutes unless changed). The middle step is the one that matters:
+        ``call()`` reads that same config key, so a warm-up or a preload that
+        skipped it would load the model with a different residency than every
+        request that follows it.
+
+        Only meaningful for a provider with ``SUPPORTS_UNLOAD``.
+
+        Args:
+            keep_alive: The caller's explicit value, or None to fall back.
+
+        Returns:
+            The value to send, or None when neither source set one.
+        """
+        if keep_alive is not None:
+            return keep_alive
+        return (self.config.extra_options or {}).get("keep_alive")
 
     @staticmethod
     def _estimate_reasoning_tokens(
@@ -365,7 +380,7 @@ class BaseProvider(ABC):
     def preload_model(
         self,
         model: str,
-        keep_alive: str | int = "15m",
+        keep_alive: str | int | None = None,
         context_size: int | None = None,
         extra_options: dict | None = None,
     ) -> None:
@@ -387,7 +402,9 @@ class BaseProvider(ABC):
             keep_alive: How long to keep the model in memory. A number is
                 seconds, ``0`` unloads the model once idle and ``-1`` keeps
                 it resident indefinitely; a string is a Go duration such as
-                ``'15m'``. Ignored by providers with no residency concept.
+                ``'15m'``. ``None`` falls back to the value registered via
+                ``configure_provider()``, then to the server's own default.
+                Ignored by providers with no residency concept.
             context_size: Context window size in tokens (provider-specific).
                 Ollama maps this to ``num_ctx``. Ignored by providers that
                 do not support preloading.

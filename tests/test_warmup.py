@@ -92,7 +92,7 @@ class TestWarmUpContract(unittest.TestCase):
             def call(self, request):  # type: ignore[no-untyped-def]
                 raise NotImplementedError
 
-            def preload_model(self, model, keep_alive="15m", context_size=None,
+            def preload_model(self, model, keep_alive=None, context_size=None,
                               extra_options=None):  # type: ignore[no-untyped-def]
                 pass
 
@@ -208,7 +208,41 @@ class TestWarmUpOllama(unittest.TestCase):
             result = provider.warm_up("gemma4:12b")
 
         self.assertIs(result, True)
-        preload.assert_called_once_with("gemma4:12b", "15m", timeout=None)
+        preload.assert_called_once_with("gemma4:12b", None, timeout=None)
+
+    def test_nothing_configured_leaves_keep_alive_to_the_server(self) -> None:
+        """No library default: the server's own OLLAMA_KEEP_ALIVE applies.
+
+        This used to send "15m", a value the library invented, so a server
+        configured for a different residency was overridden on every warm-up.
+        """
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(ProviderConfig(url="http://localhost:11434"))
+        with patch.object(provider, "_post", return_value={}) as post:
+            provider.warm_up("gemma4:12b")
+
+        self.assertNotIn("keep_alive", post.call_args.args[1])
+
+    def test_preload_uses_keep_alive_from_config(self) -> None:
+        """Regression: preload_model() ignored the configured keep_alive.
+
+        warm_up() resolved it and passed it down, but a direct preload sent a
+        hard-coded "15m" instead, so the model loaded with a different
+        residency than every call that followed it.
+        """
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(
+            ProviderConfig(
+                url="http://localhost:11434",
+                extra_options={"keep_alive": "45m"},
+            )
+        )
+        with patch.object(provider, "_post", return_value={}) as post:
+            provider.preload_model("gemma4:12b")
+
+        self.assertEqual(post.call_args.args[1]["keep_alive"], "45m")
 
     def test_warm_up_uses_keep_alive_from_config(self) -> None:
         """keep_alive must come from config, not from the signature default.
@@ -571,6 +605,56 @@ class TestWarmUpScript(unittest.TestCase):
         self.assertEqual(received["keep_alive"], "30m")
         self.assertEqual(received["context_size"], 8000)
 
+    def test_script_preload_falls_back_to_the_configured_settings(self) -> None:
+        """Regression: a script's preload ignored configure_provider().
+
+        keep_alive arrived as a hard-coded "15m" and the registered
+        extra_options never arrived at all, unlike Ollama's preload, which
+        has always folded them in.
+        """
+        from unified_ai_client.providers.script import ScriptProvider
+
+        provider = ScriptProvider(ProviderConfig(extra_options={
+            "keep_alive": "45m", "context_size": 4096, "flavour": "x",
+        }))
+        captured: dict = {}
+
+        def fake_run(cmd, payload, timeout):  # noqa: ANN001, ANN202
+            captured.update(payload)
+            return {}
+
+        with patch(
+            "unified_ai_client.providers.script._run_script", side_effect=fake_run
+        ):
+            provider.preload_model("s.py", extra_options={"extra": 1})
+
+        self.assertEqual(captured["keep_alive"], "45m")
+        self.assertEqual(captured["context_size"], 4096)
+        self.assertEqual(captured["extra_options"]["flavour"], "x")
+        self.assertEqual(captured["extra_options"]["extra"], 1)
+
+    def test_script_warm_up_sends_null_keep_alive_when_nothing_is_set(self) -> None:
+        """The protocol keeps the field present and uses null for "your call"."""
+        from unified_ai_client.providers.script import ScriptProvider
+
+        captured: dict = {}
+
+        def fake_run(cmd, payload, timeout):  # noqa: ANN001, ANN202
+            captured.update(payload)
+            return {}
+
+        with patch(
+            "unified_ai_client.providers.script._run_script", side_effect=fake_run
+        ):
+            ScriptProvider(ProviderConfig()).warm_up("s.py")
+            self.assertIn("keep_alive", captured)
+            self.assertIsNone(captured["keep_alive"])
+
+            ScriptProvider(
+                ProviderConfig(extra_options={"keep_alive": -1})
+            ).warm_up("s.py")
+            self.assertEqual(captured["keep_alive"], -1)
+
     def test_legacy_script_preload_still_warns(self) -> None:
         """The signal that a preload call did nothing must survive.
 
@@ -649,6 +733,27 @@ class TestClientWarmUp(ProviderRegistryIsolation):
         register.assert_called_once()
 
 
+class TestClientPreloadModel(ProviderRegistryIsolation):
+    """client.preload_model() and call_ai() must agree on the residency."""
+
+    def test_the_configured_keep_alive_reaches_the_preload(self) -> None:
+        """Regression: the public signature defaulted to a hard "15m".
+
+        Every call_ai() after it sent the configured value instead, so the
+        model was loaded with one residency and then served with another.
+        """
+        from unified_ai_client import configure_provider, preload_model
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        configure_provider("ollama", url="http://localhost:11434", keep_alive="45m")
+        # Patched on the class, not an instance: preload_model() resolves the
+        # provider itself, and configure_provider() evicts any cached one.
+        with patch.object(OllamaProvider, "_post", return_value={}) as post:
+            preload_model("ollama", "gemma4:12b")
+
+        self.assertEqual(post.call_args.args[1]["keep_alive"], "45m")
+
+
 # ---------------------------------------------------------------------------
 # 8. Live warm-up tests
 # ---------------------------------------------------------------------------
@@ -717,7 +822,7 @@ class TestUnloadModel(ProviderRegistryIsolation):
             def call(self, request):  # noqa: ANN001, ANN201
                 raise NotImplementedError
 
-            def preload_model(self, model, keep_alive="15m", context_size=None,
+            def preload_model(self, model, keep_alive=None, context_size=None,
                               extra_options=None):  # noqa: ANN001, ANN201
                 raise NotImplementedError
 

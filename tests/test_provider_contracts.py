@@ -1434,15 +1434,43 @@ class TestSamplingParameters(unittest.TestCase):
             ))
         self.assertEqual(seen["payload"]["top_p"], 0.1)
 
-    def test_ollama_keeps_its_house_defaults(self) -> None:
-        """The local provider's output must not change with this.
+    def test_ollama_leaves_sampling_and_residency_to_the_model(self) -> None:
+        """No house defaults: the Modelfile and the server decide.
 
-        Ollama's own defaults are 40/0.9, so falling through to them would
-        quietly alter generation for every existing caller.
+        Ollama used to receive top_k=64, top_p=0.95, temperature=0.7 and
+        keep_alive="15m" on every request that set nothing, values this library
+        invented that overrode whatever the model's own Modelfile tuned.
         """
-        options = self._ollama_options()
-        self.assertEqual(options["top_k"], 64)
-        self.assertEqual(options["top_p"], 0.95)
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(ProviderConfig())
+        for use_generate in (False, True):
+            with self.subTest(use_generate=use_generate):
+                seen = {}
+
+                def fake_post(self, endpoint, payload, timeout):
+                    seen["payload"] = payload
+                    return _OK_RESPONSE
+
+                with patch.object(OllamaProvider, "_post", fake_post):
+                    provider.call(AiRequest(
+                        provider="ollama", model="m", prompt="hi", timeout=30,
+                        extra_options={"use_generate": use_generate},
+                    ))
+                payload = seen["payload"]
+                for key in ("temperature", "top_k", "top_p"):
+                    self.assertNotIn(key, payload["options"])
+                self.assertNotIn("keep_alive", payload)
+
+    def test_ollama_embedding_leaves_keep_alive_to_the_server(self) -> None:
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        provider = OllamaProvider(ProviderConfig())
+        with patch.object(
+            OllamaProvider, "_post", return_value={"embeddings": [[0.1]]}
+        ) as post:
+            provider.get_embedding("m", "hi")
+        self.assertNotIn("keep_alive", post.call_args.args[1])
 
     def test_ollama_still_honours_an_explicit_value(self) -> None:
         self.assertEqual(self._ollama_options(top_k=10)["top_k"], 10)
@@ -2112,26 +2140,26 @@ class TestTemperatureResolution(ProviderRegistryIsolation):
                 self.assertEqual(payload["temperature"], 0.9)
         self.assertEqual(_ollama_options(config, temperature=0.9)["temperature"], 0.9)
 
-    def test_configuring_nothing_still_sends_the_old_default(self) -> None:
-        """The compatibility half: 0.7 was the signature default for years."""
+    def test_configuring_nothing_sends_no_temperature(self) -> None:
+        """The provider's own default applies, not one this library invents.
+
+        0.7 used to be sent on every call that set nothing. Beyond overriding a
+        local server's preset, the newer reasoning models reject any explicit
+        temperature, so the invented value turned a plain call into a 400.
+        """
         config = ProviderConfig()
         for name in ("openai", "anthropic"):
             with self.subTest(provider=name):
-                self.assertEqual(
-                    _capture_http_payload(name, config)["temperature"], 0.7
-                )
-        self.assertEqual(_ollama_options(config)["temperature"], 0.7)
+                self.assertNotIn("temperature", _capture_http_payload(name, config))
+        self.assertNotIn("temperature", _ollama_options(config))
 
-    def test_the_script_protocol_never_receives_null(self) -> None:
-        """docs/script-protocol.md declares this field `float`, not `float | null`.
-
-        top_k and top_p are documented as nullable and are forwarded raw; this
-        one is not, so a script doing arithmetic on it must keep working.
-        """
+    def _script_payload(self, config: ProviderConfig, **request_kwargs) -> dict:
         from unified_ai_client.providers.script import ScriptProvider
 
-        provider = ScriptProvider(ProviderConfig())
-        request = AiRequest(provider="script", model="s.py", prompt="hi", timeout=10)
+        provider = ScriptProvider(config)
+        request = AiRequest(
+            provider="script", model="s.py", prompt="hi", timeout=10, **request_kwargs
+        )
         captured: dict = {}
 
         def fake_run(cmd, payload, timeout):
@@ -2142,9 +2170,35 @@ class TestTemperatureResolution(ProviderRegistryIsolation):
             "unified_ai_client.providers.script._run_script", side_effect=fake_run
         ):
             provider.call(request)
+        return captured
 
-        self.assertIsNotNone(captured["temperature"])
-        self.assertEqual(captured["temperature"], 0.7)
+    def test_the_script_protocol_receives_null_when_nothing_is_set(self) -> None:
+        """docs/script-protocol.md: null means "use your own default".
+
+        temperature joined top_k and top_p as a nullable field when the library
+        stopped inventing a value for it. The field is still always present.
+        """
+        captured = self._script_payload(ProviderConfig())
+        for key in ("temperature", "top_k", "top_p", "max_tokens"):
+            with self.subTest(field=key):
+                self.assertIn(key, captured)
+                self.assertIsNone(captured[key])
+
+    def test_the_script_receives_what_was_configured(self) -> None:
+        """Regression: configure_provider("script", ...) never reached the script.
+
+        The payload carried only the call-time extra_options, so both the
+        configured sampling levers and any script-specific setting were lost.
+        """
+        config = ProviderConfig(extra_options={"temperature": 0.1, "flavour": "x"})
+        captured = self._script_payload(config, extra_options={"extra": 1})
+        self.assertEqual(captured["temperature"], 0.1)
+        self.assertEqual(captured["extra_options"]["flavour"], "x")
+        self.assertEqual(captured["extra_options"]["extra"], 1)
+        # An explicit argument still beats the configured value.
+        self.assertEqual(
+            self._script_payload(config, temperature=0.9)["temperature"], 0.9
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -19,8 +19,6 @@ from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.ollama")
 
-_DEFAULT_KEEP_ALIVE: str | int = "15m"
-
 # An unload queues behind any generation already running, so it gets its own
 # short deadline rather than the provider timeout, which is usually minutes.
 _UNLOAD_TIMEOUT: int = 30
@@ -81,15 +79,6 @@ class OllamaProvider(BaseProvider):
       serve audio-capable models, but reaching them needs its OpenAI-compatible
       endpoint, which this adapter does not use.
     """
-
-    # call_ai() sends no top_k/top_p unless the caller asks, because no single
-    # pair is valid everywhere: OpenAI's Chat Completions API rejects top_k
-    # outright. Ollama accepts both, and these were the values every request
-    # carried before that default moved, so they are kept here rather than
-    # silently handing generation back to Ollama's own 40/0.9 and changing the
-    # output of every existing caller.
-    DEFAULT_TOP_K: int = 64
-    DEFAULT_TOP_P: float = 0.95
 
     DEFAULT_URL: str = "http://localhost:11434"
 
@@ -386,7 +375,10 @@ class OllamaProvider(BaseProvider):
         # let an explicit named parameter win over both — it is the more
         # specific signal the caller gave for this exact call. Only when
         # neither an explicit parameter nor any extra_options set a value
-        # does Ollama's own default apply.
+        # does Ollama's own default apply, and it applies because the key is
+        # left out: the Modelfile's PARAMETER lines and the server defaults
+        # are what the model's author tuned, and this library has no better
+        # value to substitute for them.
         #
         # This used to run in the opposite order: temperature/top_k/top_p
         # were set from the request first, and _fold_options(opts, options)
@@ -396,21 +388,20 @@ class OllamaProvider(BaseProvider):
         _fold_options(self.config.extra_options or {}, options)
         _fold_options(request.extra_options or {}, options)
 
-        options["temperature"] = self._prefer_request(
-            request.temperature, opts, "temperature", self.DEFAULT_TEMPERATURE
-        )
-        options["top_k"] = self._prefer_request(
-            request.top_k, opts, "top_k", self.DEFAULT_TOP_K
-        )
-        options["top_p"] = self._prefer_request(
-            request.top_p, opts, "top_p", self.DEFAULT_TOP_P
-        )
+        for key, value in (
+            ("temperature", request.temperature),
+            ("top_k", request.top_k),
+            ("top_p", request.top_p),
+        ):
+            resolved = self._prefer_request(value, opts, key)
+            if resolved is not None:
+                options[key] = resolved
 
         # Call-time max_tokens takes precedence
         if request.max_tokens is not None:
             options["num_predict"] = request.max_tokens
 
-        keep_alive = opts.get("keep_alive", _DEFAULT_KEEP_ALIVE)
+        keep_alive = opts.get("keep_alive")
 
         if use_generate:
             # Map back to /api/generate format
@@ -420,8 +411,9 @@ class OllamaProvider(BaseProvider):
                 "prompt": effective_prompt,
                 "stream": False,
                 "options": options,
-                "keep_alive": keep_alive,
             }
+            if keep_alive is not None:
+                payload["keep_alive"] = keep_alive
             if multimodal_data:
                 payload["images"] = multimodal_data
             
@@ -441,8 +433,9 @@ class OllamaProvider(BaseProvider):
                 "messages": messages,
                 "stream": False,
                 "options": options,
-                "keep_alive": keep_alive,
             }
+            if keep_alive is not None:
+                payload["keep_alive"] = keep_alive
 
             if request.format_json:
                 payload["format"] = "json"
@@ -514,31 +507,10 @@ class OllamaProvider(BaseProvider):
             tool_calls=tool_calls,
         )
 
-    def _resolve_keep_alive(self, keep_alive: str | int | None) -> str | int:
-        """Resolve the residency to request, explicit argument first.
-
-        Precedence is the explicit argument, then the ``keep_alive`` registered
-        via ``configure_provider()``, then the library default. The middle step
-        is the one that matters: ``call()`` reads that same config key, so a
-        warm-up that skipped it would load the model with a different residency
-        than every request that follows it.
-
-        Args:
-            keep_alive: The caller's explicit value, or None to fall back.
-
-        Returns:
-            The value to put on the wire.
-        """
-        if keep_alive is not None:
-            return keep_alive
-        opts = self.config.extra_options or {}
-        return opts.get("keep_alive", _DEFAULT_KEEP_ALIVE)
-
-
     def preload_model(
         self,
         model: str,
-        keep_alive: str | int = _DEFAULT_KEEP_ALIVE,
+        keep_alive: str | int | None = None,
         context_size: int | None = None,
         extra_options: dict | None = None,
         *,
@@ -556,6 +528,8 @@ class OllamaProvider(BaseProvider):
             keep_alive: How long to keep the model loaded. A number is seconds,
                 ``0`` unloads it once idle and ``-1`` keeps it resident
                 indefinitely; a string is a Go duration such as ``'15m'``.
+                ``None`` falls back to the value registered via
+                ``configure_provider()``, then to the server's own default.
             context_size: Context window size in tokens. Mapped to ``num_ctx``.
                 Takes priority over ``context_size`` in ``extra_options``.
             extra_options: Additional provider-specific options merged into the
@@ -575,11 +549,10 @@ class OllamaProvider(BaseProvider):
         if context_size is not None:
             options["num_ctx"] = context_size
 
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": [],
-            "keep_alive": keep_alive,
-        }
+        payload: dict[str, Any] = {"model": model, "messages": []}
+        effective_keep_alive = self._resolve_keep_alive(keep_alive)
+        if effective_keep_alive is not None:
+            payload["keep_alive"] = effective_keep_alive
         if options:
             payload["options"] = options
 
@@ -663,11 +636,10 @@ class OllamaProvider(BaseProvider):
         Raises:
             RuntimeError: If the server returns no embeddings.
         """
-        payload = {
-            "model": model,
-            "input": text,
-            "keep_alive": self._resolve_keep_alive(None),
-        }
+        payload: dict[str, Any] = {"model": model, "input": text}
+        keep_alive = self._resolve_keep_alive(None)
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
         resp = self._post("/api/embed", payload, self.config.timeout)
         embeddings = resp.get("embeddings", [])
         if embeddings and len(embeddings) > 0:

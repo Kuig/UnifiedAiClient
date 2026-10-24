@@ -59,11 +59,21 @@ unload_model("ollama", "gemma4:12b")
 `keep_alive` accepts a number of seconds, `0` to unload once idle, `-1` to stay resident
 indefinitely, or a Go duration string such as `"15m"`. When it is omitted, whatever was
 registered via `configure_provider()` applies, so a warm-up and the calls that follow it
-always agree on the residency. Only `ollama` and `script` have a residency concept; the
+always agree on the residency; when nothing was registered, nothing is sent and the
+server's own default applies. Only `ollama` and `script` have a residency concept; the
 rest accept the argument and ignore it.
 
 Note that the residency timer is an idle countdown that starts when a request *finishes*,
 not a budget for the request. A model serving a call is never evicted mid-wait.
+
+On Ollama every request resets that timer to whatever it carries, and a request carrying
+no `keep_alive` resets it to the server default. A `keep_alive=-1` passed only to
+`warm_up()` therefore lasts until the first `call_ai()` that sends none. To pin a model
+for the whole session, register the value instead:
+
+```python
+configure_provider("ollama", keep_alive=-1)
+```
 
 `warm_up()` never raises. A failed warm-up is a missed optimisation, not an error, so it
 returns `False` and lets the `call_ai()` that follows report the real problem through its
@@ -82,7 +92,7 @@ from unified_ai_client import preload_model
 preload_model(
     provider="ollama",
     model="gemma4:e2b",
-    keep_alive="15m",
+    keep_alive="15m",                             # omit to use the configured value
     context_size=8000,                            # allocates VRAM with correct num_ctx
     extra_options={"visual_token_budget": 1120},  # any other provider-specific setting
 )

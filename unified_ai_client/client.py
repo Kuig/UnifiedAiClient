@@ -60,7 +60,8 @@ def call_ai(
             input. Supports images, audio, text files, and PDFs. The provider
             handles all encoding and upload internally.
         temperature: Sampling temperature. ``None`` falls back to the value
-            registered through ``configure_provider()``, and finally to 0.7.
+            registered through ``configure_provider()``, and when there is none
+            sends nothing, leaving the provider's own default in place.
         thinking: Enable extended reasoning/thinking mode (``True``/``False``)
             or use the provider's default behavior (``"default"``).
         format_json: Force JSON-formatted response.
@@ -74,11 +75,12 @@ def call_ai(
         top_k: Sampling parameter top_k. ``None`` sends nothing and leaves the
             provider's own default in place, which is the only portable
             answer: OpenAI's Chat Completions API rejects ``top_k`` as an
-            unknown argument, while Ollama and Anthropic accept it. Providers
-            with a house default of their own document it.
+            unknown argument, while Ollama and Anthropic accept it.
         top_p: Sampling parameter top_p. ``None`` leaves the provider's own
             default in place.
-        max_tokens: Limit on the number of generated tokens.
+        max_tokens: Limit on the number of generated tokens. ``None`` leaves
+            the provider's own default in place, except on ``anthropic``,
+            whose API requires the field and therefore gets 8192.
         sleep_time: Rate limit delay in seconds before calling the API.
             Overrides the value set via ``configure_provider()`` for this call.
         extra_options: Optional dict of provider-specific options merged into
@@ -180,7 +182,7 @@ def call_ai(
 def preload_model(
     provider: str,
     model: str,
-    keep_alive: str | int = "15m",
+    keep_alive: str | int | None = None,
     context_size: int | None = None,
     extra_options: dict | None = None,
 ) -> None:
@@ -213,9 +215,12 @@ def preload_model(
             when a request *finishes*, not a budget for the request: a model
             serving a call is never evicted mid-wait.
 
-            Unlike ``context_size`` and ``extra_options``, this is not
-            persisted via ``configure_provider()``, because it is a property of
-            the request rather than of the provider.
+            ``None`` falls back to the ``keep_alive`` registered via
+            ``configure_provider()``, the same value every later ``call_ai()``
+            sends, and when there is none leaves the server's own default in
+            place. Unlike ``context_size`` and ``extra_options``, an explicit
+            value here is not persisted via ``configure_provider()``, because
+            it is a property of the request rather than of the provider.
         context_size: Context window size in tokens. Ollama maps this to
             ``num_ctx`` in the API payload. If provided, registered via
             ``configure_provider()`` so it persists across all ``call_ai()``

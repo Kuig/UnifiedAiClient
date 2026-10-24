@@ -49,6 +49,12 @@ class AnthropicProvider(BaseProvider):
 
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "document"})
 
+    # Sent only when neither the caller nor the config set max_tokens. Unlike
+    # the sampling parameters, which are left to the server when unset, this
+    # field is mandatory on /v1/messages, so some value has to be chosen. It
+    # also sizes the thinking budget on models older than 4.6.
+    DEFAULT_MAX_TOKENS: int = 8192
+
     # The four common levers, each mapped onto its own field in call(). The rest
     # of the library's namespace belongs to other adapters and is dropped rather
     # than forwarded: /v1/messages rejects an unknown top-level field.
@@ -444,16 +450,22 @@ class AnthropicProvider(BaseProvider):
             user_content = self._build_user_content(request.prompt, file_paths)
             messages.append({"role": "user", "content": user_content})
 
-        max_tokens = self._prefer_request(request.max_tokens, opts, "max_tokens", 8192)
+        # The one default this adapter still has to supply: the Messages API
+        # rejects a request without max_tokens, so leaving it to the server is
+        # not an option here the way it is for the sampling parameters below.
+        max_tokens = self._prefer_request(
+            request.max_tokens, opts, "max_tokens", self.DEFAULT_MAX_TOKENS
+        )
 
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": self._prefer_request(
-                request.temperature, opts, "temperature", self.DEFAULT_TEMPERATURE
-            ),
         }
+
+        temperature = self._prefer_request(request.temperature, opts, "temperature")
+        if temperature is not None:
+            payload["temperature"] = temperature
 
         top_k = self._prefer_request(request.top_k, opts, "top_k")
         if top_k is not None:

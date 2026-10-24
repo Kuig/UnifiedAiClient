@@ -211,10 +211,11 @@ model load, a file upload. Without a warm-up, all of it lands on whichever `call
 runs first.
 
 ```python
-from unified_ai_client import warm_up, unload_model
+from unified_ai_client import configure_provider, warm_up, unload_model
 
 warm_up("google", "gemini-2.5-flash", file_paths=["paper.pdf"])
-warm_up("ollama", "gemma4:12b", keep_alive=-1)   # pin it in VRAM
+configure_provider("ollama", keep_alive=-1)      # every request keeps it resident
+warm_up("ollama", "gemma4:12b")                  # load it into VRAM now
 unload_model("ollama", "gemma4:12b")             # release it
 ```
 

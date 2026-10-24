@@ -169,10 +169,11 @@ class AiRequest:
             multimodal input. Accepts images, audio, text files, and PDFs.
             The provider handles all encoding, upload, and fallback internally.
         temperature: Sampling temperature, or ``None`` to fall back to the
-            configured value and finally to 0.7. ``None`` rather than a number
-            for the same reason as ``top_k``: with a value there is no way to
-            tell "not given" from "given the default", so a temperature set
-            through ``configure_provider()`` could never win.
+            configured value and, failing that, to send nothing and leave the
+            provider's own default in place. ``None`` rather than a number for
+            the same reason as ``top_k``: with a value there is no way to tell
+            "not given" from "given the default", so a temperature set through
+            ``configure_provider()`` could never win.
         thinking: Whether to enable extended thinking/reasoning mode (True/False)
             or use the provider's default behavior ("default").
         format_json: Whether to force JSON output format.
@@ -187,7 +188,8 @@ class AiRequest:
         top_p: Sampling parameter top_p, or ``None`` for the provider's own
             default.
         max_tokens: Limit on generated tokens, or ``None`` for the provider's
-            own default.
+            own default. ``anthropic`` is the exception, because its API
+            requires the field: see ``AnthropicProvider.DEFAULT_MAX_TOKENS``.
         sleep_time: Carried for reference only. Rate limiting is applied once
             in ``call_ai()`` before the retry loop, and no provider reads this.
         tools: Optional list of tool definitions the model can use.

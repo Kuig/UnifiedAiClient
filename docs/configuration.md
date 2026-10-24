@@ -148,15 +148,20 @@ behaviour:
 | Option | Providers | Default | Description |
 |---|---|---|---|
 | `context_size` | `ollama` | unset | Context window in tokens, sent as `num_ctx`. Prefer setting it through `preload_model()`, so Ollama allocates VRAM once instead of reloading on the first call. |
-| `keep_alive` | `ollama`, `script` | `"15m"` | How long the model stays resident once idle. A number is seconds, `0` unloads it, `-1` keeps it resident indefinitely; a string is a Go duration such as `"15m"`. Set here it governs every call, warm-up and embedding for the provider; `warm_up()` and `preload_model()` take it per call. |
-| `max_tokens` | all | unset | Response length cap, mapped per provider (`num_predict` on Ollama, `max_output_tokens` on Google). Also a per-call argument, which wins. |
+| `keep_alive` | `ollama`, `script` | unset | How long the model stays resident once idle. A number is seconds, `0` unloads it, `-1` keeps it resident indefinitely; a string is a Go duration such as `"15m"`. Set here on `ollama` it governs every call, warm-up, preload and embedding; on `script` it reaches the `warm_up` and `preload` modes, the only ones that carry the field. `warm_up()` and `preload_model()` also take it per call. Unset, nothing is sent and the server's own default applies (`OLLAMA_KEEP_ALIVE`, five minutes unless changed). |
+| `max_tokens` | all | unset | Response length cap, mapped per provider (`num_predict` on Ollama, `max_output_tokens` on Google). Also a per-call argument, which wins. Unset, nothing is sent, except on `anthropic`, whose API requires the field and so receives `8192`. |
 | `use_generate` | `ollama` | `False` | Routes to `/api/generate` instead of `/api/chat`. That endpoint has no place for tools, tool results, message history or a system prompt: passing any of them together with `use_generate=True` raises `NonRetryableError` rather than dropping them silently. It also does not separate the thinking trace, so leave it off unless a model requires it. |
 | `disable_safety` | `google` | `False` | Turns off Gemini's safety filters. |
 | `upload_poll_timeout` | `google` | `15` | Seconds to wait for an uploaded file to reach the `ACTIVE` state before giving up. |
 | `task_type` | `google` | unset | Embedding task type, passed to `embed_content`. |
 | `output_dimensionality` | `google` | unset | Embedding vector size, passed to `embed_content`. |
-| `top_k`, `top_p` | all | `64` / `0.95` | Sampling parameters. Also per-call arguments, which win. |
-| `temperature` | all | `0.7` | Sampling temperature. Also a per-call argument, which wins. |
+| `top_k`, `top_p` | all | unset | Sampling parameters. Also per-call arguments, which win. Unset, nothing is sent and the provider's own default applies. |
+| `temperature` | all | unset | Sampling temperature. Also a per-call argument, which wins. Unset, nothing is sent and the provider's own default applies. |
+
+The library invents no sampling or residency value of its own: a lever that neither the
+call nor the configuration sets is left off the request, so the provider's default, and on
+a local server the model's own preset, stays in charge. `script` is the one place the
+field still travels, as `null`, because its protocol keeps every field present.
 
 Anything else is passed through verbatim to the provider payload. On Ollama that means it
 lands inside the `options` object, which is how a model-specific knob such as

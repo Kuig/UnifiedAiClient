@@ -102,18 +102,21 @@ class ScriptProvider(BaseProvider):
     # so there is nothing to enumerate.
     SUPPORTS_EMBEDDINGS: bool = True
 
-    # Deliberately empty: this adapter reads none of the library's options and
-    # hands the whole extra_options dict to the script untouched. Only the
-    # script knows which settings it understands, and that passthrough is part
-    # of the public contract in docs/script-protocol.md.
+    # Deliberately empty: this adapter hands the whole merged extra_options dict
+    # to the script untouched, library keys included. It does read the four
+    # sampling levers out of it to fill their dedicated payload fields, but it
+    # never removes them, so nothing here is consumed in the sense the other
+    # adapters mean. Only the script knows which settings it understands, and
+    # that passthrough is part of the public contract in
+    # docs/script-protocol.md.
     _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset()
 
     def __init__(self, config: ProviderConfig) -> None:
         """Initialize the ScriptProvider.
 
         Args:
-            config: ProviderConfig. Not used directly but kept for API
-                consistency with other providers.
+            config: ProviderConfig. Supplies the timeout and the options
+                registered via ``configure_provider()``.
         """
         self.config = config
 
@@ -135,30 +138,30 @@ class ScriptProvider(BaseProvider):
         """
         cmd = _resolve_interpreter(request.model)
 
+        # Config-level and call-level options together, as every other adapter
+        # sees them: until this was merged, anything registered through
+        # configure_provider("script", ...) never reached the script at all.
+        opts = self._merge_options(request)
+
         payload = {
             "mode": "generate",
             "prompt": request.prompt,
             "system_prompt": request.system_prompt,
             "messages": request.messages,
             "file_path": normalize_file_paths(request.file_path),
-            # Resolved here rather than forwarded raw: docs/script-protocol.md
-            # declares this field a float, not "float or null" as it does for
-            # top_k and top_p, so a None would break a script doing arithmetic
-            # on it. The configured value is not folded in either, because the
-            # whole extra_options dict travels alongside and the script, not
-            # this adapter, decides what to make of what it finds there.
-            "temperature": (
-                request.temperature
-                if request.temperature is not None
-                else self.DEFAULT_TEMPERATURE
-            ),
+            # The four sampling levers resolve the way they do on every other
+            # adapter, call-time over configured, and travel as null when
+            # neither set one: docs/script-protocol.md defines null as "use
+            # your own default", the same rule a server applies to a missing
+            # key.
+            "temperature": self._prefer_request(request.temperature, opts, "temperature"),
             "thinking": request.thinking,
             "format_json": request.format_json,
             "timeout": request.timeout,
-            "top_k": request.top_k,
-            "top_p": request.top_p,
-            "max_tokens": request.max_tokens,
-            "extra_options": request.extra_options,
+            "top_k": self._prefer_request(request.top_k, opts, "top_k"),
+            "top_p": self._prefer_request(request.top_p, opts, "top_p"),
+            "max_tokens": self._prefer_request(request.max_tokens, opts, "max_tokens"),
+            "extra_options": opts or None,
             "tools": [
                 {
                     "name": t.name,
@@ -202,7 +205,7 @@ class ScriptProvider(BaseProvider):
     def preload_model(
         self,
         model: str,
-        keep_alive: str | int = "15m",
+        keep_alive: str | int | None = None,
         context_size: int | None = None,
         extra_options: dict | None = None,
     ) -> None:
@@ -218,16 +221,25 @@ class ScriptProvider(BaseProvider):
             model: Path to the script file.
             keep_alive: Forwarded to the script, which decides what it means.
                 A number is seconds, ``0`` means unload once idle and ``-1``
-                means keep resident; a string is a Go duration.
-            context_size: Context window size in tokens, or None.
-            extra_options: Additional script-specific settings, or None.
+                means keep resident; a string is a Go duration. ``None`` falls
+                back to the value registered via ``configure_provider()``, and
+                travels as null when there is none.
+            context_size: Context window size in tokens. ``None`` falls back
+                to the registered value, then to null.
+            extra_options: Additional script-specific settings, merged over
+                the ones registered via ``configure_provider()``.
         """
         cmd = _resolve_interpreter(model)
+        registered = self.config.extra_options or {}
+        merged_options = {**registered, **(extra_options or {})}
         payload = {
             "mode": "preload",
-            "keep_alive": keep_alive,
-            "context_size": context_size,
-            "extra_options": extra_options,
+            "keep_alive": self._resolve_keep_alive(keep_alive),
+            "context_size": (
+                context_size if context_size is not None
+                else registered.get("context_size")
+            ),
+            "extra_options": merged_options or None,
             "timeout": self.config.timeout,
         }
         try:
@@ -265,7 +277,9 @@ class ScriptProvider(BaseProvider):
             file_paths: Optional path or list of paths the script may want to
                 read or index ahead of the first call.
             keep_alive: Forwarded to the script, which decides what it means.
-                Omitted from the payload when None.
+                ``None`` falls back to the value registered via
+                ``configure_provider()``; the field is always present, and is
+                null when neither source set one.
             timeout: Seconds to allow the script. Defaults to the timeout
                 registered for this provider.
 
@@ -278,7 +292,7 @@ class ScriptProvider(BaseProvider):
         payload = {
             "mode": "warm_up",
             "file_path": normalize_file_paths(file_paths),
-            "keep_alive": keep_alive,
+            "keep_alive": self._resolve_keep_alive(keep_alive),
             "timeout": effective_timeout,
         }
         try:

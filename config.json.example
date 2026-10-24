@@ -4,10 +4,7 @@
     "ollama": {
         "url": "http://localhost:11434",
         "timeout": 300,
-        "keep_alive": "15m",
-        "context_size": 0,
-        "top_k": 64,
-        "top_p": 0.95
+        "context_size": 0
     },
 
     "google": {

@@ -347,10 +347,10 @@ class GoogleProvider(BaseProvider):
             contents.append(types.Content(role="user", parts=function_response_parts))
 
         # --- Build generation config ---
+        # A None here is dropped by the SDK's own serialisation, which leaves
+        # the model's default temperature in charge.
         config_kwargs = {
-            "temperature": self._prefer_request(
-                request.temperature, opts, "temperature", self.DEFAULT_TEMPERATURE
-            ),
+            "temperature": self._prefer_request(request.temperature, opts, "temperature"),
             "system_instruction": request.system_prompt,
             "safety_settings": self._build_safety_settings(opts.get("disable_safety", False)),
             "thinking_config": self._build_thinking_config(

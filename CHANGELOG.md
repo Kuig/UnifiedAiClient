@@ -21,6 +21,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   class-level `SUPPORTS_EMBEDDINGS` and `PROBE_PATH`. An adapter written before them keeps
   working unchanged.
 
+### Changed
+
+- **Breaking (behaviour):** the library no longer invents sampling or residency values. A
+  `temperature`, `top_k`, `top_p` or `keep_alive` that neither the call nor
+  `configure_provider()` sets is now left off the request, so the provider's own default
+  applies, and on a local server the model's own preset. Previously every request carried
+  `temperature=0.7`, and Ollama requests also carried `top_k=64`, `top_p=0.95` and
+  `keep_alive="15m"`, overriding the Modelfile. The newer reasoning models reject any
+  explicit temperature, so the invented value also turned a plain call into a 400. To keep
+  the old output, configure the old values:
+  `configure_provider("ollama", temperature=0.7, top_k=64, top_p=0.95, keep_alive="15m")`.
+  `BaseProvider.DEFAULT_TEMPERATURE`, `OllamaProvider.DEFAULT_TOP_K` and
+  `OllamaProvider.DEFAULT_TOP_P` are removed.
+- Anthropic still sends `max_tokens=8192` when none is set, because `/v1/messages` requires
+  the field. The value is now `AnthropicProvider.DEFAULT_MAX_TOKENS` and is documented.
+- **Breaking (script protocol):** `temperature` in the `generate` payload is now
+  `float | null`, like `top_k` and `top_p`, null meaning "use your own default". The
+  `preload` payload's `keep_alive` is nullable too. A script doing arithmetic on either must
+  handle null.
+- `preload_model()`'s `keep_alive` now defaults to `None`, like `warm_up()`'s.
+
+### Fixed
+
+- `preload_model()` honours the `keep_alive` registered via `configure_provider()`. It used
+  to send a hard-coded `"15m"`, so the model was loaded with one residency and then served
+  by every `call_ai()` with another. Applies to Ollama and `script` alike.
+- `script` receives what was registered through `configure_provider("script", ...)`. The
+  `generate` and `preload` payloads used to carry only the call-time `extra_options`, so
+  configured script settings, and a configured `temperature`, `top_k`, `top_p` or
+  `max_tokens`, never reached the script. `warm_up` and `preload` also fall back to a
+  configured `keep_alive` and `context_size`.
+- `docs/configuration.md` listed `top_k` / `top_p` as defaulting to `64` / `0.95` on every
+  provider; only Ollama ever applied them.
+
 ## [0.5.8] - 2026-09-12
 
 ### Changed

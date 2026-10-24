@@ -103,14 +103,14 @@ The script reads **one JSON object** from stdin. The object contains the followi
 | `system_prompt` | `string \| null` | ✅ Yes | System instruction, or null if not provided. |
 | `messages` | `array \| null` | ✅ Yes | Chat history as a list of role/content objects, or null. |
 | `file_path` | `array[string]` | ✅ Yes | List of absolute paths to attached files. Empty list if no files. Never null. |
-| `temperature` | `float` | ✅ Yes | Sampling temperature. Range: 0.0–2.0. |
+| `temperature` | `float \| null` | ✅ Yes | Sampling temperature, range 0.0–2.0, or null when neither the caller nor the configuration set one. Null means "use your own default", the same rule as `top_k`. |
 | `thinking` | `bool \| string` | ✅ Yes | Whether extended reasoning was requested (`true`/`false`) or let the provider decide (`"default"`). |
 | `format_json` | `bool` | ✅ Yes | Whether JSON-formatted output was requested. |
 | `timeout` | `int` | ✅ Yes | Maximum seconds allowed for the entire call. |
-| `top_k` | `int \| null` | ✅ Yes | Sampling parameter top_k, or null when the caller did not set one. Null means "use your own default": there is no value valid across every backend, so the library no longer invents one. |
-| `top_p` | `float \| null` | ✅ Yes | Sampling parameter top_p, or null when the caller did not set one. Same rule as `top_k`. |
-| `max_tokens` | `int \| null` | ✅ Yes | Limit on the number of generated tokens, or null. |
-| `extra_options` | `dict \| null` | ✅ Yes | Dictionary of provider-specific options, or null. |
+| `top_k` | `int \| null` | ✅ Yes | Sampling parameter top_k, or null when neither the caller nor the configuration set one. Null means "use your own default": there is no value valid across every backend, so the library never invents one. |
+| `top_p` | `float \| null` | ✅ Yes | Sampling parameter top_p, or null. Same rule as `top_k`. |
+| `max_tokens` | `int \| null` | ✅ Yes | Limit on the number of generated tokens, or null. Same rule as `top_k`. |
+| `extra_options` | `dict \| null` | ✅ Yes | Every option registered through `configure_provider("script", ...)` merged with the call's own `extra_options` (the call wins on the same key), or null when both are empty. Passed whole, library-defined keys included. |
 | `tools` | `array \| null` | ✅ Yes | List of tool definitions the model may call, or null if no tools are provided. |
 | `tool_results` | `array \| null` | ✅ Yes | List of tool execution results to inject into the conversation, or null. |
 
@@ -181,8 +181,8 @@ Rules:
     "thinking": false,
     "format_json": false,
     "timeout": 300,
-    "top_k": 64,
-    "top_p": 0.95,
+    "top_k": null,
+    "top_p": null,
     "max_tokens": null,
     "extra_options": null,
     "tools": [
@@ -245,8 +245,8 @@ as a new user message, because the prompt is present in `messages` already.
     "thinking": false,
     "format_json": false,
     "timeout": 300,
-    "top_k": 64,
-    "top_p": 0.95,
+    "top_k": null,
+    "top_p": null,
     "max_tokens": null,
     "extra_options": null,
     "tools": [
@@ -278,7 +278,7 @@ as a new user message, because the prompt is present in `messages` already.
     "system_prompt": null,
     "messages": null,
     "file_path": ["/home/user/photos/landscape.jpg"],
-    "temperature": 0.7,
+    "temperature": null,
     "thinking": false,
     "format_json": false,
     "timeout": 300
@@ -398,7 +398,7 @@ run first.
 |---|---|---|---|
 | `mode` | `string` | ✅ Yes | Always `"warm_up"` for this payload. |
 | `file_path` | `array[string]` | ✅ Yes | Files the caller expects to attach later, so the script can read or index them ahead of time. Empty list if none. Never null. |
-| `keep_alive` | `string \| int \| null` | ✅ Yes | How long the caller wants anything loaded here kept resident, or null to let the script decide. Same values as in `preload`. |
+| `keep_alive` | `string \| int \| null` | ✅ Yes | How long the caller wants anything loaded here kept resident, or null to let the script decide. Same values and same fallback as in `preload`. |
 | `timeout` | `int` | ✅ Yes | Maximum seconds allowed for the warm-up. |
 
 The script path is not sent: the script already knows where it lives.
@@ -439,9 +439,9 @@ model should be loaded with.
 | Field | Type | Always present | Description |
 |---|---|---|---|
 | `mode` | `string` | ✅ Yes | Always `"preload"` for this payload. |
-| `keep_alive` | `string \| int` | ✅ Yes | How long the caller wants the model kept resident. A number is seconds, `0` means unload once idle, `-1` means keep resident indefinitely; a string is a Go duration such as `"15m"`. The script decides what this means in its own terms. |
-| `context_size` | `int \| null` | ✅ Yes | Context window size in tokens, or null. |
-| `extra_options` | `dict \| null` | ✅ Yes | Script-specific settings, or null. |
+| `keep_alive` | `string \| int \| null` | ✅ Yes | How long the caller wants the model kept resident. A number is seconds, `0` means unload once idle, `-1` means keep resident indefinitely; a string is a Go duration such as `"15m"`. When the call gives none, the value registered through `configure_provider()` is sent; null when there is neither, meaning "use your own default". The script decides what this means in its own terms. |
+| `context_size` | `int \| null` | ✅ Yes | Context window size in tokens, falling back to the registered value, or null. |
+| `extra_options` | `dict \| null` | ✅ Yes | Script-specific settings: the registered ones merged with the call's own, or null. |
 | `timeout` | `int` | ✅ Yes | Maximum seconds allowed for the preload. |
 
 **Example input:**
@@ -561,7 +561,8 @@ The following fields are passed for completeness but many scripts will not use t
   supplied arrives as given, including ones the script may not handle. Validate what
   you receive, and report an unusable attachment through the normal error channel
   rather than answering as though you had read it.
-- `temperature`: A hint for output randomness. Deterministic scripts may ignore it.
+- `temperature`: A hint for output randomness, or null to use the script's own default.
+  Deterministic scripts may ignore it. A script doing arithmetic on it must handle null.
 
 ---
 
@@ -695,7 +696,8 @@ def handle_preload(request: dict) -> dict:
     Returns:
         A response dict with a 'preloaded' key.
     """
-    keep_alive: str | int = request.get("keep_alive", "15m")
+    # null in either field means "use your own default".
+    keep_alive: str | int | None = request.get("keep_alive")
     context_size: int | None = request.get("context_size")
 
     # Replace with a real model load using these settings.

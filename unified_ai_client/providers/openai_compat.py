@@ -346,9 +346,6 @@ class OpenAiCompatProvider(BaseProvider):
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
-            "temperature": self._prefer_request(
-                request.temperature, opts, "temperature", self.DEFAULT_TEMPERATURE
-            ),
             "stream": False,
         }
         if request.format_json:
@@ -380,6 +377,13 @@ class OpenAiCompatProvider(BaseProvider):
         max_tokens = self._prefer_request(request.max_tokens, opts, "max_tokens")
         if max_tokens is not None and max_tokens > 0:
             payload["max_tokens"] = max_tokens
+
+        # Unset means the server's own default, never one invented here: the
+        # reasoning models reject any temperature but their own, and a local
+        # server's preset is what the model's author tuned.
+        temperature = self._prefer_request(request.temperature, opts, "temperature")
+        if temperature is not None:
+            payload["temperature"] = temperature
 
         top_k = self._prefer_request(request.top_k, opts, "top_k")
         if top_k is not None:
