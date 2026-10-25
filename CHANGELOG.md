@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-25
+
 ### Added
 
 - `AiResponse.message`: the turn as a `messages` entry, with `tool_calls` as
@@ -523,6 +525,17 @@ is the intended correction: that retry could never have succeeded.
 
 - First release. `call_ai()` as the single entry point, returning a normalised `AiResponse`.
 
+[Unreleased]: https://github.com/Kuig/UnifiedAiClient/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Kuig/UnifiedAiClient/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/Kuig/UnifiedAiClient/compare/v0.5.8...v0.6.0
+[0.5.8]: https://github.com/Kuig/UnifiedAiClient/compare/v0.5.7...v0.5.8
+[0.5.7]: https://github.com/Kuig/UnifiedAiClient/compare/v0.5.6...v0.5.7
+[0.5.6]: https://github.com/Kuig/UnifiedAiClient/compare/v0.5.5...v0.5.6
+[0.5.5]: https://github.com/Kuig/UnifiedAiClient/compare/v0.5.4...v0.5.5
+[0.5.4]: https://github.com/Kuig/UnifiedAiClient/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/Kuig/UnifiedAiClient/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/Kuig/UnifiedAiClient/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/Kuig/UnifiedAiClient/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Kuig/UnifiedAiClient/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/Kuig/UnifiedAiClient/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Kuig/UnifiedAiClient/compare/v0.3.3...v0.4.0
