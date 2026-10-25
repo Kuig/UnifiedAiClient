@@ -224,6 +224,13 @@ class TestListModelsOllama(unittest.TestCase):
         self.assertEqual(bge.file_types, frozenset())
         self.assertIsNone(bge.context_length)
 
+    def test_the_audio_capability_is_reported(self) -> None:
+        (model,) = self._models(
+            [{"name": "gemma4:e2b"}],
+            {"gemma4:e2b": {"capabilities": ["completion", "vision", "audio"]}},
+        ).values()
+        self.assertEqual(model.file_types, frozenset({"image", "audio"}))
+
     def test_a_failed_show_keeps_the_model_with_unknown_capabilities(self) -> None:
         models = self._models(
             [{"name": "ok"}, {"name": "broken"}],

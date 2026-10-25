@@ -61,7 +61,7 @@ provider.
 | `openai` | ✅ base64 | ✅ base64 | ❌ Raises | ✅ Inlined | ✅ base64 |
 | `anthropic` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ✅ base64 |
 | `llamacpp` | ✅ base64 | ✅ base64 | ✅ base64 | ✅ Inlined | ❌ Raises |
-| `ollama` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ❌ Raises |
+| `ollama` | ✅ base64 | ✅ base64 (WAV, MP3, FLAC) | ❌ Raises | ✅ Inlined | ❌ Raises |
 | `mistral` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ❌ Raises |
 | `cohere` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ❌ Raises |
 | `meta` | ✅ base64 | ❌ Raises | ❌ Raises | ✅ Inlined | ❌ Raises |
@@ -171,10 +171,9 @@ an error of its own, which is not retried. See
 
 ## Ollama and audio
 
-Ollama serves audio-capable models such as Gemma 4 `e2b`, but its native `/api/chat`
-endpoint, which this adapter uses, has no field to carry audio; putting it in
-`images[]` is silently ignored. Reaching those models needs Ollama's
-OpenAI-compatible endpoint, which costs the `/api/chat` options this adapter depends
-on (`context_size`, `keep_alive`, native thinking). Until that is wired up, audio to
-`ollama` in `call_ai()` raises. This is a limitation of the adapter, not of Ollama.
-Embeddings are different: `/api/embed` does carry audio, so `get_embedding()` accepts it.
+Ollama carries audio in the same `images[]` field as images, on `/api/chat` and on
+`/api/generate`, and tells the two apart by content. Its decoder reads WAV (with a
+complete RIFF header), MP3 and FLAC; OGG, Opus, M4A and AAC are refused by the server,
+so the library refuses them first, before anything is encoded. The model needs an
+audio encoder (Gemma 4 `e2b` and `e4b` have one; `list_models()` reports it as
+`"audio"` in `file_types`): a tag without one answers with an error of its own.

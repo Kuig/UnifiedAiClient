@@ -13,7 +13,7 @@ for the same use case: calling LLM providers through a unified interface.
 | **Script / subprocess provider** | ✅ stdin/stdout JSON protocol | ❌ | ❌ | ❌ |
 | **Unified call interface** | `call_ai(provider=, model=)` | `completion("provider/model")` | `client.chat.completions.create("provider:model")` | `client.chat.completions.create()` |
 | **Multimodal (images)** | ✅ all supporting providers | ✅ | ✅ partial | ✅ |
-| **Multimodal (audio)** | ✅ Google, OpenAI, llama.cpp | ✅ partial | ❌ | ✅ |
+| **Multimodal (audio)** | ✅ Google, OpenAI, llama.cpp, Ollama | ✅ partial | ❌ | ✅ |
 | **Multimodal (PDF)** | ✅ Google, OpenAI, Anthropic | ✅ | ❌ | ✅ |
 | **Multimodal (video)** | ✅ Google, llama.cpp | ✅ partial | ❌ | ❌ |
 | **Unsupported file handling** | ✅ Raises `UnsupportedFileError` | Provider error | Provider error | Provider error |

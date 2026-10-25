@@ -20,9 +20,8 @@ class LlamaCppProvider(OpenAiCompatProvider):
     DEFAULT_URL: str = "http://localhost:8080"
 
     # llama-server routes an input_audio block through miniaudio (mp3, wav,
-    # flac), so this is the one local provider that takes audio directly, and
-    # an input_video block through ffmpeg. Both need a model, and an mmproj,
-    # that handle the modality; the server refuses the request otherwise.
+    # flac) and an input_video block through ffmpeg. Both need a model, and an
+    # mmproj, that handle the modality; the server refuses the request otherwise.
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "audio", "video"})
 
     # /v1/embeddings takes the same blocks inside an input object, one vector

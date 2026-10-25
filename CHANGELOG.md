@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UnsupportedOperationError` on the first attempt instead of spending the retry budget, and
   `warm_up()`, `preload_model()` and `unload_model()` log the decline at debug level instead
   of a warning. Backward compatible: a script without the marker behaves as before.
+- Audio on `ollama`: WAV, MP3 and FLAC travel in `images[]` on `/api/chat` and
+  `/api/generate`, verified live on Ollama 0.40.11 with `gemma4:e2b`. Other audio formats,
+  which the server answers with a 400, are refused before anything is encoded.
+  `list_models("ollama")` reports `"audio"` in `file_types` when `/api/show` lists it.
+- `BaseProvider.SUPPORTED_EXTENSIONS` narrows a supported file class to the extensions an
+  endpoint decodes, checked by `validate_files()` alongside the class itself.
 
 ### Fixed
 

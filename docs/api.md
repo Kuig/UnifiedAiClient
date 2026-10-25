@@ -602,7 +602,8 @@ to the request.
 The abstract base every adapter subclasses. Exported for consumers that call a provider
 directly through `get_provider()`, and for anyone implementing an adapter out of tree. Its
 class-level `SUPPORTED_FILE_TYPES` declares which file classes the adapter accepts,
-`SUPPORTED_EMBEDDING_FILE_TYPES` which ones it can embed, `SUPPORTS_UNLOAD` whether it holds
+`SUPPORTED_EMBEDDING_FILE_TYPES` which ones it can embed, `SUPPORTED_EXTENSIONS` which
+extensions of a class its endpoint decodes (empty: all of them), `SUPPORTS_UNLOAD` whether it holds
 a model resident at all, and `SUPPORTS_EMBEDDINGS` whether `embed()` is implemented.
 
 `call()` is the only abstract method. `preload_model()`, `warm_up()`, `unload_model()`,

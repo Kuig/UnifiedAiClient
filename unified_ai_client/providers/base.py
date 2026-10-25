@@ -80,10 +80,18 @@ class BaseProvider(ABC):
     """File classes this provider can embed, alongside or instead of text.
 
     The embeddings counterpart of ``SUPPORTED_FILE_TYPES``, and kept apart from
-    it because the two endpoints differ: Ollama's ``/api/chat`` takes images
-    only, while its ``/api/embed`` also takes audio. ``'text'`` is accepted
+    it because the two endpoints differ: a provider may embed a class it cannot
+    send in a chat, or the reverse. ``'text'`` is accepted
     everywhere and inlined into the input, as it is for generation. Empty means
     text only.
+    """
+
+    SUPPORTED_EXTENSIONS: dict[str, frozenset[str]] = {}
+    """Narrows a supported class to the extensions the endpoint decodes.
+
+    A class absent from it takes every extension ``classify_file()`` assigns to
+    it. Set an entry only for what has been verified: an extension left out is
+    refused before anything is sent, one wrongly kept fails at the server.
     """
 
     PROBE_PATH: str | None = None
@@ -511,6 +519,7 @@ class BaseProvider(ABC):
             paths,
             self.provider_name,
             self.SUPPORTED_FILE_TYPES if supported is None else supported,
+            self.SUPPORTED_EXTENSIONS,
         )
 
     @abstractmethod

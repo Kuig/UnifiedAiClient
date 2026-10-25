@@ -930,8 +930,8 @@ class TestEmbeddingsSupportMatrix(unittest.TestCase):
 class TestEmbeddingFileSupportMatrix(unittest.TestCase):
     """Which file classes each provider can embed, against an explicit table.
 
-    Kept apart from TestFileSupportMatrix because the endpoints differ: Ollama's
-    /api/embed carries audio, its /api/chat does not.
+    Kept apart from TestFileSupportMatrix because the endpoints differ: a
+    provider may embed a class it cannot send in a chat, or the reverse.
     """
 
     _SUPPORT = {
@@ -947,6 +947,20 @@ class TestEmbeddingFileSupportMatrix(unittest.TestCase):
 
     def test_table_covers_every_registered_provider(self) -> None:
         self.assertEqual(set(self._SUPPORT), set(_PROVIDER_CLASSES))
+
+    def test_extension_narrowing_names_only_declared_classes(self) -> None:
+        """A narrowing must narrow something the provider supports, with
+        extensions that really belong to that class."""
+        from unified_ai_client.file_utils import classify_file
+
+        for name in _PROVIDER_CLASSES:
+            cls = _provider_class_by_name(name)
+            declared = cls.SUPPORTED_FILE_TYPES | cls.SUPPORTED_EMBEDDING_FILE_TYPES
+            for file_type, extensions in cls.SUPPORTED_EXTENSIONS.items():
+                with self.subTest(provider=name, file_type=file_type):
+                    self.assertIn(file_type, declared)
+                    for ext in extensions:
+                        self.assertEqual(classify_file(f"x{ext}"), file_type)
 
     def test_declared_support_matches_the_table(self) -> None:
         for name, expected in self._SUPPORT.items():
@@ -1242,7 +1256,8 @@ class TestFileSupportMatrix(FileFixtureCase):
         "anthropic": {"image", "document"},
         # input_video is llama-server's own extension, decoded with ffmpeg.
         "llamacpp": {"image", "audio", "video"},
-        "ollama": {"image"},
+        # images[] carries audio too, decoded by content (verified on 0.40.11).
+        "ollama": {"image", "audio"},
         "mistral": {"image"},
         "cohere": {"image"},
         "meta": {"image"},
@@ -1692,14 +1707,31 @@ class TestHistoryMessageKeepsEverything(FileFixtureCase):
 class TestProviderRefusalsEndToEnd(FileFixtureCase):
     """The refusal must happen while building content, not at the transport."""
 
-    def test_ollama_refuses_audio(self) -> None:
-        """images[] carries images only; audio there is silently ignored."""
+    def test_ollama_refuses_audio_it_cannot_decode(self) -> None:
+        """OGG is a 400 from the server; refused here, before anything is sent."""
         from unified_ai_client.exceptions import UnsupportedFileError
 
         provider = _provider_class("ollama", "OllamaProvider")(ProviderConfig())
-        path = self.make(".mp3")
-        with self.assertRaises(UnsupportedFileError):
+        path = self.make(".ogg")
+        with self.assertRaises(UnsupportedFileError) as ctx:
             provider._process_files_for_message([path], "what do you hear?")
+        self.assertIn(".wav", str(ctx.exception))
+
+    def test_ollama_carries_decodable_audio_in_images(self) -> None:
+        provider = _provider_class("ollama", "OllamaProvider")(ProviderConfig())
+        for suffix in (".wav", ".mp3", ".flac"):
+            with self.subTest(suffix=suffix):
+                _, images = provider._process_files_for_message(
+                    [self.make(suffix, b"RIFF")], "what do you hear?"
+                )
+                self.assertEqual(images, [base64.b64encode(b"RIFF").decode()])
+
+    def test_ollama_refuses_pdfs(self) -> None:
+        from unified_ai_client.exceptions import UnsupportedFileError
+
+        provider = _provider_class("ollama", "OllamaProvider")(ProviderConfig())
+        with self.assertRaises(UnsupportedFileError):
+            provider._process_files_for_message([self.make(".pdf")], "summarise")
 
     def test_ollama_still_carries_images_and_text(self) -> None:
         provider = _provider_class("ollama", "OllamaProvider")(ProviderConfig())
@@ -3208,7 +3240,7 @@ class TestAttachmentRefusalIsWordedOnce(FileFixtureCase):
     _CASES = (
         ("groq", "document", ".pdf"),   # base OpenAiCompat builder: image + audio only
         ("anthropic", "audio", ".mp3"),  # Messages API has no audio block
-        ("ollama", "audio", ".mp3"),     # /api/chat carries images[] and nothing else
+        ("ollama", "document", ".pdf"),  # images[] carries images and audio only
     )
 
     def _refusal(self, name: str, declared: str, suffix: str) -> str:

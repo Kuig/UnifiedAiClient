@@ -116,17 +116,24 @@ class OllamaProvider(BaseProvider):
     dependencies like the official 'ollama' Python library.
 
     File handling:
-    - Images: encoded as base64 and sent in the 'images' field.
+    - Images and audio: encoded as base64 and sent in the 'images' field, which
+      the server decodes by content. Audio is WAV, MP3 or FLAC only, and needs
+      a model with an audio encoder (Gemma 4 e2b/e4b); a tag without one is
+      refused by the server.
     - Text files: inlined into the prompt using inline_text_attachments().
-    - Audio and PDFs: rejected. /api/chat has no field for either. Ollama does
-      serve audio-capable models, but reaching them needs its OpenAI-compatible
-      endpoint, which this adapter does not use.
+    - PDFs: rejected. Neither endpoint has a field for them.
     """
 
     DEFAULT_URL: str = "http://localhost:11434"
 
-    # /api/chat carries attachments in images[] and nothing else.
-    SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image"})
+    # images[] carries both; the server tells them apart by content.
+    SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "audio"})
+
+    # What the audio decoder reads, verified on 0.40.11: OGG, Opus, M4A and AAC
+    # are a 400 "Failed to load image or audio file".
+    SUPPORTED_EXTENSIONS: dict[str, frozenset[str]] = {
+        "audio": frozenset({".wav", ".mp3", ".flac"}),
+    }
 
     # Ollama keeps a model in VRAM between requests and can be told to drop it.
     SUPPORTS_UNLOAD: bool = True
@@ -264,8 +271,9 @@ class OllamaProvider(BaseProvider):
                 reasoning="thinking" in capabilities,
                 tool_use="tools" in capabilities,
                 embeddings="embedding" in capabilities,
-                file_types=(
-                    frozenset({"image"}) if "vision" in capabilities else frozenset()
+                file_types=frozenset(
+                    file_type for capability, file_type in (("vision", "image"), ("audio", "audio"))
+                    if capability in capabilities
                 ),
             )
 
@@ -283,11 +291,10 @@ class OllamaProvider(BaseProvider):
     ) -> tuple[str, list[str]]:
         """Process a list of file paths for an Ollama message.
 
-        Images are base64-encoded into the 'images' field; text files are
-        inlined into the prompt. Anything else is rejected: /api/chat carries no
-        other kind of attachment, so a file placed in images[] that is not an
-        image is read as a corrupt image or ignored outright, and the model
-        answers as though nothing had been attached.
+        Images and audio are base64-encoded into the 'images' field; text files
+        are inlined into the prompt. Anything else is rejected: the endpoints
+        carry no other kind of attachment, and a PDF placed in images[] would
+        fail to decode.
 
         Args:
             file_paths: List of file paths to process.
@@ -298,15 +305,16 @@ class OllamaProvider(BaseProvider):
 
         Raises:
             FileNotFoundError: If an attachment does not exist.
-            UnsupportedFileError: If an attachment is neither an image nor text.
+            UnsupportedFileError: If an attachment is not an image, audio in a
+                decodable format, or text.
         """
         effective_prompt, native = self._partition_attachments(file_paths, prompt)
 
         multimodal_data: list[str] = []
         for fp, ft in native:
-            if ft != "image":
+            if ft not in ("image", "audio"):
                 raise self._unsupported_native_error(fp, ft)
-            _log.debug("Ollama: encoding '%s' as base64 image data", fp)
+            _log.debug("Ollama: encoding '%s' as base64 %s data", fp, ft)
             multimodal_data.append(encode_file_base64(fp))
 
         return effective_prompt, multimodal_data

@@ -97,7 +97,8 @@ live in that module, and an adapter that bypasses it silently loses both.
 Set `SUPPORTED_FILE_TYPES` to what you have **verified** the endpoint accepts (the default
 inherited from `OpenAiCompatProvider` is `{"image"}`, from `BaseProvider` it is empty;
 declaring a class whose content block the builder cannot produce raises at request-build
-time rather than at import), and
+time rather than at import), `SUPPORTED_EXTENSIONS` when the endpoint decodes only some
+extensions of a class, and
 `SUPPORTS_UNLOAD` only if the endpoint keeps a model resident and offers a way to release
 it, in which case override `unload_model()` and `preload_model()` too: a contract test
 asserts that the flag and the two overrides agree. Set `LAZY_MODEL_LOAD` only for a local

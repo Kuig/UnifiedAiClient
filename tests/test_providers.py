@@ -891,6 +891,45 @@ class TestOllamaLive(ProviderRegistryIsolation):
         self.assertIsInstance(final.text, str)
 
 
+    def test_ollama_live_audio_reaches_the_model(self) -> None:
+        """A WAV in images[] is decoded into audio tokens, not ignored.
+
+        Measured against the same prompt without the file: the tone is a
+        second long, roughly 25 tokens on Gemma 4, so the prompt grows.
+        """
+        import math
+        import struct
+        import wave
+        from unified_ai_client import list_models
+
+        self._require_model()
+        audio_models = [
+            m.id for m in list_models("ollama") if m.file_types and "audio" in m.file_types
+        ]
+        if not audio_models:
+            self.skipTest("No Ollama model with the audio capability installed")
+        model = audio_models[0]
+        TestOllamaLive._model_used = model
+
+        fd, path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        try:
+            with wave.open(path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(b"".join(
+                    struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / 16000)))
+                    for i in range(16000)
+                ))
+            prompt = "Describe the attached sound in three words."
+            control = self._live_call(model, prompt=prompt)
+            heard = self._live_call(model, prompt=prompt, file_path=path)
+        finally:
+            os.unlink(path)
+        self.assertGreater(heard.input_tokens, control.input_tokens)
+
+
 # ---------------------------------------------------------------------------
 # 7. Script provider
 # ---------------------------------------------------------------------------

@@ -107,6 +107,7 @@ def validate_files(
     paths: list[str],
     provider_name: str,
     supported: frozenset[str],
+    extensions: dict[str, frozenset[str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Reject attachments a provider cannot transmit, before the request is built.
 
@@ -125,6 +126,10 @@ def validate_files(
         provider_name: Provider name, used in the error message.
         supported: File classes this provider can transmit natively, from
             ``BaseProvider.SUPPORTED_FILE_TYPES``.
+        extensions: Optional narrowing of a supported class to the extensions
+            the endpoint can actually decode, from
+            ``BaseProvider.SUPPORTED_EXTENSIONS``. A class absent from it takes
+            every extension the library assigns to that class.
 
     Returns:
         One ``(path, file_type)`` pair per accepted path, in the order given.
@@ -136,7 +141,7 @@ def validate_files(
         MissingFileError: If a path does not exist or is not a regular file.
             A ``FileNotFoundError`` subclass, so existing handlers still catch it.
         UnsupportedFileError: If a file's class is neither ``'text'`` nor one
-            the provider supports.
+            the provider supports, or its extension is outside the narrowing.
     """
     classified: list[tuple[str, str]] = []
 
@@ -145,6 +150,14 @@ def validate_files(
             raise MissingFileError(f"Attachment not found: '{path}'")
 
         file_type = classify_file(path)
+        allowed = (extensions or {}).get(file_type)
+        if file_type in supported and allowed is not None:
+            ext = os.path.splitext(path)[1].lower()
+            if ext not in allowed:
+                raise UnsupportedFileError(
+                    f"Provider '{provider_name}' accepts {file_type} files only as "
+                    f"{', '.join(sorted(allowed))}: '{path}'."
+                )
         if file_type == "text" or file_type in supported:
             classified.append((path, file_type))
             continue
