@@ -116,11 +116,9 @@ class BaseProvider(ABC):
 
     Membership here means "never travels raw". An adapter that owns a key
     consumes it explicitly and declares it in ``_CONSUMED_OPTION_KEYS``; an
-    adapter that does not own it drops it. Both halves matter: until 0.5.5 only
-    Ollama filtered anything, so ``configure_provider("groq", use_generate=False)``
-    put ``use_generate`` in the body of /v1/chat/completions, and the
-    ``context_size`` that config.json.example shipped for lmstudio and llamacpp
-    went the same way.
+    adapter that does not own it drops it. Both halves matter: without the
+    second, ``configure_provider("groq", use_generate=False)`` would put
+    ``use_generate`` in the body of /v1/chat/completions.
     """
 
     _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset()

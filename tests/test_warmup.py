@@ -105,7 +105,7 @@ class TestWarmUpContract(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 2. Google — the only provider that does substantial work
+# 2. Google: the only provider that does substantial work
 # ---------------------------------------------------------------------------
 
 class TestWarmUpGoogle(unittest.TestCase):
@@ -468,7 +468,7 @@ class TestWarmUpLocalServers(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 6. Script provider — the extended stdin/stdout protocol
+# 6. Script provider: the extended stdin/stdout protocol
 # ---------------------------------------------------------------------------
 
 _WARMING_SCRIPT = '''\
@@ -658,8 +658,8 @@ class TestWarmUpScript(unittest.TestCase):
     def test_legacy_script_preload_still_warns(self) -> None:
         """The signal that a preload call did nothing must survive.
 
-        Moved off the stdlib `warnings` module onto `logging`, per
-        CLAUDE.md's "logs through stdlib logging only" rule: `warnings.warn`
+        Moved off the stdlib `warnings` module onto `logging`, since the
+        library logs through stdlib logging only: `warnings.warn`
         was the one place in the library that did not, and it bypassed
         set_verbosity("silent") entirely since it never touched the
         unified_ai_client logger tree.
@@ -673,7 +673,7 @@ class TestWarmUpScript(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 7. client.warm_up() — the public entry point
+# 7. client.warm_up(): the public entry point
 # ---------------------------------------------------------------------------
 
 class TestClientWarmUp(ProviderRegistryIsolation):
@@ -927,8 +927,8 @@ class TestCleanupIsArmedWhenAModelIsTracked(ProviderRegistryIsolation):
     """Tracking a resident model and arming its release are the same event.
 
     Regression: preload_model() recorded the model in _LOADED_MODELS but never
-    called _register_cleanup(), so a process that only preloaded — the very
-    thing keep_alive=-1 is for — exited with the model still in VRAM and no
+    called _register_cleanup(), so a process that only preloaded (the very
+    thing keep_alive=-1 is for) exited with the model still in VRAM and no
     atexit hook to free it.
     """
 

@@ -144,7 +144,7 @@ class TestProviderNameRoundTrip(ProviderRegistryIsolation):
     ``BaseProvider.provider_name`` derives the name from the class name, while
     ``get_provider()`` holds the authoritative mapping. Nothing else ties the
     two together, so a class renamed for style would quietly start naming a
-    provider the caller cannot pass — inside the very refusal messages the
+    provider the caller cannot pass, inside the very refusal messages the
     attachment policy asks them to act on.
     """
 
@@ -1614,9 +1614,9 @@ class TestHistoryMessageKeepsEverything(FileFixtureCase):
     its tool_calls branch without ever looking at file_paths; google's tool_calls
     branch was the 'if' half of an if/else whose 'else' appended the text Part;
     ollama's file branch built its own entry dict and never checked tool_calls.
-    Three different bugs from the same cause -- an exclusive branch where the
-    fields should have been independent -- which is exactly the shape that
-    produced the .mp3 bug CLAUDE.md documents.
+    Three different bugs from the same cause (an exclusive branch where the
+    fields should have been independent), the same shape that once turned an
+    .mp3 into a placeholder the model answered as though it had heard.
     """
 
     def _history(self, path: str) -> list[dict]:
@@ -2367,7 +2367,7 @@ class TestGoogleBlockedResponse(unittest.TestCase):
     def test_a_blocked_prompt_logs_the_reason(self) -> None:
         """Regression: candidates=[] fell into the same except as a genuinely
         malformed response, and the real reason (safety, prohibited content)
-        was discarded along with it — the caller got AiResponse(text=""),
+        was discarded along with it: the caller got AiResponse(text=""),
         indistinguishable from the model simply saying nothing.
         """
         from unified_ai_client.providers.google import GoogleProvider

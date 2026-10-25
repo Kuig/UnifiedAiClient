@@ -31,7 +31,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 
 # ---------------------------------------------------------------------------
-# Helpers — disposable temp files and Ollama availability probes
+# Helpers: disposable temp files and Ollama availability probes
 # ---------------------------------------------------------------------------
 
 def _make_text_file(content: str = "Hello from UnifiedAiClient test.") -> str:
@@ -407,7 +407,7 @@ class TestFileUtils(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 4. Config loading — load_secrets (os.environ + secrets.json) and load_config
+# 4. Config loading: load_secrets (os.environ + secrets.json) and load_config
 # ---------------------------------------------------------------------------
 
 class TestSecrets(unittest.TestCase):
@@ -522,7 +522,7 @@ class TestConfigLoading(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 5. Dispatch — get_provider() resolves the correct class
+# 5. Dispatch: get_provider() resolves the correct class
 # ---------------------------------------------------------------------------
 
 class TestDispatch(ProviderRegistryIsolation):
@@ -547,7 +547,7 @@ class TestDispatch(ProviderRegistryIsolation):
 
 
 # ---------------------------------------------------------------------------
-# 6. Live tests — Ollama (most likely available locally)
+# 6. Live tests: Ollama (most likely available locally)
 # ---------------------------------------------------------------------------
 
 class TestOllamaLive(ProviderRegistryIsolation):
@@ -892,7 +892,7 @@ class TestScriptProvider(ProviderRegistryIsolation):
         the platform this project develops on. The documented JSON payload
         happens to survive that anyway, because `json.dumps()` defaults to
         `ensure_ascii=True` and escapes every non-ASCII character before it
-        ever reaches the pipe — but a script's stderr on a crash is raw text,
+        ever reaches the pipe, but a script's stderr on a crash is raw text,
         not JSON, and that path is where the mojibake or UnicodeDecodeError
         actually surfaces. Asserted directly on the call rather than through
         an end-to-end pipe, since the failure mode depends on the parent's
@@ -979,7 +979,7 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# 8. Ollama provider — offline unit tests
+# 8. Ollama provider: offline unit tests
 # ---------------------------------------------------------------------------
 
 class TestModelResidency(ProviderRegistryIsolation):
@@ -1354,7 +1354,7 @@ class TestOllamaOffline(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 9. Google provider — offline unit tests
+# 9. Google provider: offline unit tests
 # ---------------------------------------------------------------------------
 
 class TestGoogleOffline(unittest.TestCase):

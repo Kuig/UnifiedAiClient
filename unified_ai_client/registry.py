@@ -21,14 +21,11 @@ _log = logging.getLogger("unified_ai_client.registry")
 class ProviderSpec:
     """Everything get_provider() needs to build one provider, and nothing else.
 
-    Until 0.5.8 this information was duplicated by hand across the
-    dispatch chain, the eager api_key_* lookups, the ValueError message and
-    two docstrings in client.py alone, plus several more hand-typed tables
-    in the test suite. This is the single place it is written down now.
+    This is the single place the dispatch, the credential lookup and the
+    unknown-provider message are derived from.
 
-    module/class_name are looked up lazily via importlib, exactly as the
-    old if/elif chain's per-branch imports did, so building "ollama" never
-    imports Google's SDK. api_key_name is the secrets.json/env-var key this
+    module/class_name are looked up lazily via importlib, so building
+    "ollama" never imports Google's SDK. api_key_name is the secrets.json/env-var key this
     provider reads, or None for a provider that takes no credential at all
     (ollama, script) or checks it elsewhere (google, in its lazy client
     getter).
@@ -70,34 +67,27 @@ _PROVIDER_SPECS: dict[str, ProviderSpec] = {
     "script": ProviderSpec("unified_ai_client.providers.script", "ScriptProvider"),
 }
 
-# --- Thread-safe programmatic provider configuration registry ---
-# Populated via configure_provider(). Takes priority over file-based config.
+# Populated via configure_provider(); takes priority over config.json.
 _PROVIDER_CONFIGS: dict[str, ProviderConfig] = {}
 _PROVIDER_CONFIGS_LOCK = threading.Lock()
 
-# --- Thread-safe global provider instance cache ---
 _PROVIDERS: dict[str, BaseProvider] = {}
 _PROVIDERS_LOCK = threading.Lock()
 
-# --- Thread-safe registry of models a local provider currently holds resident ---
-# (provider_name, model) pairs, populated for providers declaring SUPPORTS_UNLOAD
-# and drained by cleanup(). Module-level rather than per-provider on purpose:
-# configure_provider() evicts the cached provider instance, so anything tracked
-# on the instance would be silently lost the moment someone reconfigures.
+# (provider_name, model) pairs a local server holds resident, drained by
+# cleanup(). Module-level because configure_provider() evicts the instance, and
+# anything tracked there would be lost on reconfiguration.
 _LOADED_MODELS: set[tuple[str, str]] = set()
 _LOADED_MODELS_LOCK = threading.Lock()
 
-# --- Names of every provider built in this process ---
-# Distinct from _PROVIDERS, which configure_provider() empties: a provider whose
-# instance was evicted may still hold module-level resources, and cleanup() has
-# to be able to reach it by name to release them.
+# Every provider name built in this process. Unlike _PROVIDERS it survives
+# eviction, so cleanup() can still reach an evicted provider's resources.
 _BUILT_PROVIDERS: set[str] = set()
 
-# --- Resource cleanup registration flag ---
 _CLEANUP_REGISTERED = False
 _CLEANUP_LOCK = threading.Lock()
 
-# --- Legacy file-based config path (kept for backward compat with load_config) ---
+# The file-based fallback, kept for backward compatibility.
 _LIB_ROOT = Path(__file__).parent.parent
 _effective_config_path: str = str(os.path.join(_LIB_ROOT, "config.json"))
 
@@ -159,20 +149,14 @@ def configure_provider(name: str, **kwargs: Any) -> None:
     with _PROVIDER_CONFIGS_LOCK:
         existing = _PROVIDER_CONFIGS.get(name)
         if existing is None:
-            # Seed from the file, so the documented "programmatic > config.json
-            # > defaults" chain resolves per field rather than per provider.
-            # Registering a single extra used to replace the whole section:
-            # configure_provider("ollama", context_size=8000) silently dropped
-            # the url and timeout config.json had set, with no log to say so.
-            # load_config() always returns an instance, falling back to the
-            # dataclass defaults when there is no file, so there is no second
-            # branch to keep in step.
+            # Seeded from the file so the chain "programmatic > config.json >
+            # defaults" resolves per field, not per provider: one registered
+            # extra must not discard the url and timeout the file set.
             from unified_ai_client.config import load_config
             existing = load_config(
                 _effective_config_path, ProviderConfig, section=name
             )
 
-        # Merge: keep existing values, override only explicitly supplied fields
         merged_known: dict[str, Any] = {}
         if existing.url is not None:
             merged_known["url"] = existing.url
@@ -191,7 +175,6 @@ def configure_provider(name: str, **kwargs: Any) -> None:
         name, config.url, config.timeout, config.sleep_time, config.extra_options,
     )
 
-    # Invalidate cached provider instance so the next call rebuilds with new config
     with _PROVIDERS_LOCK:
         _PROVIDERS.pop(name, None)
 
@@ -251,13 +234,8 @@ def get_provider(provider_name: str) -> BaseProvider:
                 f"providers: {', '.join(repr(n) for n in _PROVIDER_SPECS)}."
             )
 
-        # 1. Resolve configuration: programmatic > file > default
         config = _resolve_config(provider_name)
 
-        # 2. Look up the one credential this provider actually needs, if any.
-        # Only this key is read, not all eight: until 0.5.8 get_provider()
-        # computed every cloud provider's secret on every cache miss,
-        # including a request for "ollama", which never uses any of them.
         api_key = ""
         if spec.api_key_name is not None:
             from unified_ai_client.config import load_secrets
@@ -266,12 +244,11 @@ def get_provider(provider_name: str) -> BaseProvider:
             # urllib fail with a type error instead of a missing-key message.
             api_key = load_secrets(os.getcwd()).get(spec.api_key_name) or ""
 
-        # 3. Instantiate the provider adapter, importing its module lazily so
-        # resolving "ollama" never pulls in Google's SDK.
         _log.debug(
             "Building provider '%s' (cache miss): url=%s timeout=%s",
             provider_name, config.url, config.timeout,
         )
+        # Imported lazily, so resolving "ollama" never pulls in Google's SDK.
         provider_class = _provider_class(spec)
         provider_instance: BaseProvider = (
             provider_class(config, api_key=api_key)
@@ -452,11 +429,8 @@ def cleanup(*, unload_models: bool = True) -> None:
     with _LOADED_MODELS_LOCK:
         loaded = sorted(_LOADED_MODELS)
 
-    # Cleared entry by entry, only on success, instead of upfront: an unload
-    # that raises must stay in _LOADED_MODELS so the next cleanup() call still
-    # knows about it and retries. Clearing before the loop used to lose that
-    # tracking the moment a single unload failed, silently turning a retryable
-    # failure into a permanent leak for the rest of the process.
+    # Cleared entry by entry, only on success: an unload that raises stays
+    # tracked, so the next cleanup() retries it instead of leaking it.
     released: list[tuple[str, str]] = []
     for provider_name, model in loaded:
         # Resolved by name for the same reason as above, and safe here only

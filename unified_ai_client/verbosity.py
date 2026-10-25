@@ -5,7 +5,7 @@ import threading
 
 # Console verbosity control for unified_ai_client's own internal logging.
 #
-# Scoped entirely to the "unified_ai_client" logger and its children — never
+# Scoped entirely to the "unified_ai_client" logger and its children, never
 # the root logger, matching the same rule silence_sdks() follows for
 # third-party loggers. A caller that never calls set_verbosity() sees no
 # change: nothing here runs at import time.
@@ -32,7 +32,7 @@ def set_verbosity(level: str) -> None:
     """Control how much of unified_ai_client's own activity is printed to the console.
 
     Attaches (or removes) a ``StreamHandler`` on the ``"unified_ai_client"``
-    logger only — never the root logger, so this cannot interfere with a
+    logger only, never the root logger, so this cannot interfere with a
     host application's own logging configuration or duplicate output onto
     its handlers. Every level, including ``"silent"``, disables propagation
     to the root logger, so calling this at least once takes full ownership

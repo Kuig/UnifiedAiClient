@@ -150,11 +150,8 @@ class ProviderHttpError(urllib.error.HTTPError):
         # read, and leaving the original stream attached would hand callers a
         # file object that is spent.
         super().__init__(url, code, detail, hdrs, None)
-        # HTTPError substitutes an empty BytesIO for a None fp and wraps it in
-        # a tempfile wrapper, which emits a ResourceWarning when the exception
-        # is finally collected. There is nothing to read from it -- the body
-        # lives in ``body`` -- so close it now rather than leave every raised
-        # error warning in the consumer's own logs.
+        # HTTPError wraps a None fp in a tempfile wrapper that emits a
+        # ResourceWarning when collected; the body lives in ``body``, so close it.
         self.close()
         self.detail = detail
         self.body = body

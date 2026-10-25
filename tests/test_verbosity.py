@@ -140,7 +140,7 @@ class TestSetVerbosityIsThreadSafe(VerbosityIsolation):
     Regression: the module-level `_handler` was read, then mutated, with no
     lock. Two threads could interleave their remove-old/add-new sequence and
     leave a handler attached to the logger that `_handler` no longer
-    references, which no later call would ever find to remove — an orphan
+    references, which no later call would ever find to remove: an orphan
     that silently duplicates every line this library logs.
     """
 
@@ -153,7 +153,7 @@ class TestSetVerbosityIsThreadSafe(VerbosityIsolation):
         with no lock at all, and the race almost never shows up experimentally.
         This patches addHandler so the first call parks *inside* the section
         it is supposed to hold exclusively, then checks whether a second call
-        reached that same point before being let go — which it must not, with
+        reached that same point before being let go, which it must not, with
         the lock in place.
         """
         import threading
@@ -179,7 +179,7 @@ class TestSetVerbosityIsThreadSafe(VerbosityIsolation):
             second = threading.Thread(target=set_verbosity, args=("warning",))
             second.start()
             # A generous window for the second call to race in if the critical
-            # section were unprotected — it needs only a few bytecode steps to
+            # section were unprotected: it needs only a few bytecode steps to
             # reach its own addHandler, nowhere near this long.
             second.join(timeout=0.3)
 

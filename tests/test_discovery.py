@@ -20,7 +20,8 @@ for _path in (str(_TESTS_DIR.parent), str(_TESTS_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-# Top-level import, not tests.test_providers: see CLAUDE.md.
+# Top-level import, not tests.test_providers: tests/ is not a package and
+# discovery puts it on sys.path, so the qualified form would load the module twice.
 from test_providers import ProviderRegistryIsolation  # noqa: E402
 
 from unified_ai_client import list_models, list_providers  # noqa: E402

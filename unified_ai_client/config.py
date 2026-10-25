@@ -7,9 +7,8 @@ from typing import Any
 _log = logging.getLogger("unified_ai_client.config")
 
 
-# Mapping from environment variable names to the snake_case keys used in
-# secrets.json and returned by load_secrets().  Only sensitive credentials
-# belong here — server URLs are configuration and live in config.json.
+# Environment variable to the snake_case key used in secrets.json. Credentials
+# only: server URLs are configuration and live in config.json.
 _ENV_VAR_MAP: dict[str, str] = {
     "GOOGLE_API_KEY": "google_api_key",
     "ANTHROPIC_API_KEY": "anthropic_api_key",
@@ -46,13 +45,13 @@ def load_secrets(project_root: str, filename: str = "secrets.json") -> dict[str,
     """Load API credentials from environment variables and/or a secrets.json file.
 
     Both sources are optional and may coexist. When the same key is present in
-    both, **environment variables take priority** (standard 12-factor convention —
+    both, **environment variables take priority** (standard 12-factor convention:
     deployment-level config beats file-level config).
 
     Sources (highest → lowest priority):
 
-    1. Environment variables (``os.environ``) — set by shell, Docker, CI/CD, etc.
-    2. ``secrets.json`` at ``project_root`` — for local development.
+    1. Environment variables (``os.environ``): set by shell, Docker, CI/CD, etc.
+    2. ``secrets.json`` at ``project_root``: for local development.
 
     Supported keys:
 
@@ -73,7 +72,7 @@ def load_secrets(project_root: str, filename: str = "secrets.json") -> dict[str,
     mirrors it and must stay in step with it.
 
     Server URLs for local providers (Ollama, LM Studio, llama.cpp) are
-    **not** credentials — they belong in ``config.json`` and are never
+    **not** credentials; they belong in ``config.json`` and are never
     read from environment variables by this function.
 
     Args:
@@ -84,7 +83,6 @@ def load_secrets(project_root: str, filename: str = "secrets.json") -> dict[str,
         A merged dictionary of ``snake_case`` key → string value pairs.
         Returns an empty dict if neither source provides any values.
     """
-    # Start with secrets.json (lower priority)
     merged: dict[str, str] = {}
     json_path = os.path.join(project_root, filename)
     if os.path.exists(json_path):
@@ -100,7 +98,6 @@ def load_secrets(project_root: str, filename: str = "secrets.json") -> dict[str,
         except Exception as exc:
             _log.warning("Ignoring malformed %s: %s", json_path, exc)
 
-    # Override with environment variables (higher priority)
     for env_key, secret_key in _ENV_VAR_MAP.items():
         value = os.environ.get(env_key, "").strip()
         if value:
@@ -151,7 +148,6 @@ def load_config(
                 )
                 return dataclass_type()
 
-        # Extract only the keys that match the dataclass fields
         fields = dataclass_type.__dataclass_fields__
         filtered_data = {k: v for k, v in data.items() if k in fields}
         if "extra_options" in fields:

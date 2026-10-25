@@ -13,10 +13,6 @@ from unified_ai_client.exceptions import (
 
 _log = logging.getLogger("unified_ai_client.file_utils")
 
-# ---------------------------------------------------------------------------
-# File type classification
-# ---------------------------------------------------------------------------
-
 _IMAGE_EXTS: frozenset[str] = frozenset({
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
 })
@@ -107,11 +103,6 @@ def normalize_file_paths(file_path: str | list[str] | None) -> list[str]:
     return list(file_path)
 
 
-# ---------------------------------------------------------------------------
-# Validation
-# ---------------------------------------------------------------------------
-
-
 def validate_files(
     paths: list[str],
     provider_name: str,
@@ -174,11 +165,6 @@ def validate_files(
     return classified
 
 
-# ---------------------------------------------------------------------------
-# File reading and encoding
-# ---------------------------------------------------------------------------
-
-
 def read_text_file(path: str) -> str:
     """Read a text file and return its content.
 
@@ -231,18 +217,12 @@ def audio_format_name(path: str) -> str:
         Lowercase codec name (e.g. 'wav', 'mp3', 'flac', 'opus').
     """
     ext = os.path.splitext(path)[1].lower().lstrip(".")
-    # Map extension aliases to canonical codec names
     _aliases: dict[str, str] = {
         "m4a": "mp4",
         "aac": "aac",
         "ogg": "ogg",
     }
     return _aliases.get(ext, ext)
-
-
-# ---------------------------------------------------------------------------
-# Text file inlining
-# ---------------------------------------------------------------------------
 
 
 def format_text_attachment(file_path: str) -> str:

@@ -137,13 +137,8 @@ def call_ai(
     )
 
     if file_path and tool_results:
-        # Every adapter treats tool_results as "the consumer already put the
-        # user turn in messages", so a file_path passed alongside it is never
-        # attached to this request: on the chat providers it is silently
-        # skipped, and on Ollama it used to be read and base64-encoded first
-        # and only then discarded. Attaching a file on a tool-result
-        # continuation is not supported, so this is the caller's one signal
-        # that it happened rather than nothing at all.
+        # With tool_results the user turn is already in messages, so no adapter
+        # attaches file_path to this request; this is the caller's one signal.
         _log.warning(
             "call_ai: file_path was given alongside tool_results and will "
             "not be attached to this request; attachments are only sent on "
@@ -184,8 +179,7 @@ def _resolve_timeout(prov: Any, timeout: int | None) -> int:
 
     Done here rather than in each adapter: every provider reads the request's
     timeout directly, so a None arriving there would be one fallback per
-    adapter to get right. call_ai() once defaulted to a hard 300 that silently
-    outranked configure_provider().
+    adapter to get right.
 
     Args:
         prov: The resolved provider.
@@ -291,7 +285,6 @@ def preload_model(
         provider, model, keep_alive, context_size,
     )
 
-    # Register settings so they persist into all subsequent call_ai() calls
     if context_size is not None or extra_options:
         config_kwargs: dict[str, Any] = {}
         if context_size is not None:
@@ -300,7 +293,6 @@ def preload_model(
             config_kwargs.update(extra_options)
         configure_provider(provider, **config_kwargs)
 
-    # get_provider after configure_provider so it picks up the new config
     prov = get_provider(provider)
     prov.preload_model(model, keep_alive, context_size=context_size, extra_options=extra_options)
     _record_loaded(provider, prov, model)

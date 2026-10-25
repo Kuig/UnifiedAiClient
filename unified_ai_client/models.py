@@ -159,7 +159,7 @@ class AiRequest:
     """Internal request object passed to provider adapters.
 
     Constructed by client.py from call_ai() arguments. Not part of the
-    public API — consumers never create this directly.
+    public API: consumers never create this directly.
 
     Attributes:
         provider: Provider name (e.g., 'ollama', 'google', 'anthropic').
