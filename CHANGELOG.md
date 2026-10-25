@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Appending both runs a tool loop of any length on every provider, including Claude with
   thinking on (signed thinking blocks travel back) and Gemini 3 (thought signatures travel
   back; without them the API answers 400). Verified live on `gemini-3.5-flash`.
+- Script protocol: a script declines a mode by exiting non-zero with
+  `{"error": {"type": "unsupported_mode"}}` on stdout. `get_embedding()` then raises
+  `UnsupportedOperationError` on the first attempt instead of spending the retry budget, and
+  `warm_up()`, `preload_model()` and `unload_model()` log the decline at debug level instead
+  of a warning. Backward compatible: a script without the marker behaves as before.
 
 ### Fixed
 

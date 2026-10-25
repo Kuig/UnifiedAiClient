@@ -681,8 +681,10 @@ embedding model without the encoder.
 ### `UnsupportedOperationError`
 
 Raised when a provider is asked for something it does not offer at all: embeddings on
-`anthropic`, `meta`, `groq` or `xai`, or a `dimensions` value a provider has no way to
-request. Raised before anything is sent. Subclasses `NonRetryableError` and
+`anthropic`, `meta`, `groq` or `xai`, a `dimensions` value a provider has no way to
+request, or a mode a `script` declares unsupported (see
+[the script protocol](script-protocol.md)). Raised before anything is sent, except for the
+script, which is the one that says so. Subclasses `NonRetryableError` and
 `NotImplementedError`, which is what those cases raised before, so existing handlers keep
 working.
 

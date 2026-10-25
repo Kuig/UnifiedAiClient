@@ -528,6 +528,22 @@ if __name__ == "__main__":
 '''
 
 
+_DECLARING_UNSUPPORTED_SCRIPT = '''\
+from __future__ import annotations
+import json, sys
+
+def main() -> None:
+    req = json.loads(sys.stdin.read())
+    if req.get("mode") != "generate":
+        print(json.dumps({"error": {"type": "unsupported_mode"}}))
+        sys.exit(2)
+    print(json.dumps({"text": "ok"}))
+
+if __name__ == "__main__":
+    main()
+'''
+
+
 class TestWarmUpScript(unittest.TestCase):
     """Scripts can now react to warm-up and preload instead of being assumed idle."""
 
@@ -670,6 +686,58 @@ class TestWarmUpScript(unittest.TestCase):
         ) as cm:
             self.provider.preload_model(script)
         self.assertTrue(any("preload" in line for line in cm.output))
+
+
+class TestScriptDeclaresUnsupportedMode(ProviderRegistryIsolation):
+    """The protocol's "mode not implemented" marker, told apart from a crash.
+
+    Without it a non-zero exit means either, so get_embedding() on a script
+    without embed spent the whole retry budget, and every decline of an
+    optional mode was logged as a possible failure.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.script = _make_script(_DECLARING_UNSUPPORTED_SCRIPT)
+
+    def tearDown(self) -> None:
+        os.unlink(self.script)
+        super().tearDown()
+
+    def test_embed_fails_once_without_retrying(self) -> None:
+        import subprocess
+        from unified_ai_client import get_embedding
+        from unified_ai_client.exceptions import UnsupportedOperationError
+
+        with patch(
+            "unified_ai_client.providers.script.subprocess.run", wraps=subprocess.run
+        ) as run, self.assertRaises(UnsupportedOperationError) as ctx:
+            get_embedding(provider="script", model=self.script, text="hi",
+                          max_retries=3, retry_base_delay=0.0)
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("embed", str(ctx.exception))
+        self.assertIsInstance(ctx.exception, RuntimeError)
+
+    def test_optional_modes_decline_quietly(self) -> None:
+        from unified_ai_client.providers.script import ScriptProvider
+
+        provider = ScriptProvider(ProviderConfig(timeout=30))
+        with self.assertLogs("unified_ai_client.providers.script", "DEBUG") as cm:
+            self.assertIs(provider.warm_up(self.script), False)
+            provider.preload_model(self.script)
+            provider.unload_model(self.script)
+        self.assertEqual([r.levelname for r in cm.records], ["DEBUG"] * 3)
+
+    def test_a_script_without_the_marker_still_warns(self) -> None:
+        """Backward compatible: a bare non-zero exit keeps its old meaning."""
+        from unified_ai_client.providers.script import ScriptProvider
+
+        legacy = _make_script(_LEGACY_SCRIPT)
+        try:
+            with self.assertLogs("unified_ai_client.providers.script", "WARNING"):
+                ScriptProvider(ProviderConfig(timeout=30)).unload_model(legacy)
+        finally:
+            os.unlink(legacy)
 
 
 # ---------------------------------------------------------------------------

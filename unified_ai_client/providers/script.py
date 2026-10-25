@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from unified_ai_client.exceptions import UnsupportedOperationError
 from unified_ai_client.file_utils import normalize_file_paths
 from unified_ai_client.models import (
     AiRequest,
@@ -18,6 +19,9 @@ from unified_ai_client.models import (
 from unified_ai_client.providers.base import BaseProvider
 
 _log = logging.getLogger("unified_ai_client.providers.script")
+
+_UNSUPPORTED_MODE = "unsupported_mode"
+"""The ``error.type`` a script writes to stdout when it declines a mode."""
 
 
 def _resolve_interpreter(script_path: str) -> list[str]:
@@ -60,7 +64,10 @@ def _run_script(cmd: list[str], payload: dict, timeout: int) -> dict:
 
     Raises:
         subprocess.TimeoutExpired: If the script exceeds timeout seconds.
-        RuntimeError: If the script exits with a non-zero return code.
+        UnsupportedOperationError: If the script exits non-zero and declares
+            the mode unsupported on stdout. Never retried.
+        RuntimeError: If the script exits with a non-zero return code for any
+            other reason, including a script that predates that declaration.
         json.JSONDecodeError: If stdout is not valid JSON.
     """
     result = subprocess.run(
@@ -73,12 +80,26 @@ def _run_script(cmd: list[str], payload: dict, timeout: int) -> dict:
         timeout=timeout,
     )
     if result.returncode != 0:
+        if _declares_unsupported_mode(result.stdout):
+            raise UnsupportedOperationError(
+                f"Script '{cmd[-1]}' does not implement mode '{payload.get('mode')}'."
+            )
         stderr_detail = result.stderr.strip() or "(no stderr output)"
         raise RuntimeError(
             f"Script '{cmd[-1]}' exited with code {result.returncode}. "
             f"Stderr: {stderr_detail}"
         )
     return json.loads(result.stdout)
+
+
+def _declares_unsupported_mode(stdout: str) -> bool:
+    """Whether a failed script's stdout is the "mode not implemented" marker."""
+    try:
+        data = json.loads(stdout)
+    except ValueError:
+        return False
+    error = data.get("error") if isinstance(data, dict) else None
+    return isinstance(error, dict) and error.get("type") == _UNSUPPORTED_MODE
 
 
 class ScriptProvider(BaseProvider):
@@ -100,22 +121,15 @@ class ScriptProvider(BaseProvider):
     would be guesswork.
     """
 
-    # Only the script knows whether it holds a model, so the modes are offered
-    # and a script that does not implement them declines by exiting non-zero.
+    # Only the script knows whether it holds a model or embeds text, so these
+    # modes are offered and a script without them declines. There is no
+    # list_models: the "model" is the script's own path.
     SUPPORTS_UNLOAD: bool = True
-
-    # The embed mode is offered the same way: a script without it exits non-zero.
-    # There is deliberately no list_models: the "model" is the script's own path,
-    # so there is nothing to enumerate.
     SUPPORTS_EMBEDDINGS: bool = True
 
-    # Deliberately empty: this adapter hands the whole merged extra_options dict
-    # to the script untouched, library keys included. It does read the four
-    # sampling levers out of it to fill their dedicated payload fields, but it
-    # never removes them, so nothing here is consumed in the sense the other
-    # adapters mean. Only the script knows which settings it understands, and
-    # that passthrough is part of the public contract in
-    # docs/script-protocol.md.
+    # Empty on purpose: the whole merged extra_options dict reaches the script,
+    # library keys included, since only the script knows what it understands.
+    # The sampling levers are read out of it but never removed.
     _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset()
 
     def __init__(self, config: ProviderConfig) -> None:
@@ -145,9 +159,6 @@ class ScriptProvider(BaseProvider):
         """
         cmd = _resolve_interpreter(request.model)
 
-        # Config-level and call-level options together, as every other adapter
-        # sees them: until this was merged, anything registered through
-        # configure_provider("script", ...) never reached the script at all.
         opts = self._merge_options(request)
 
         payload = {
@@ -156,11 +167,7 @@ class ScriptProvider(BaseProvider):
             "system_prompt": request.system_prompt,
             "messages": request.messages,
             "file_path": normalize_file_paths(request.file_path),
-            # The four sampling levers resolve the way they do on every other
-            # adapter, call-time over configured, and travel as null when
-            # neither set one: docs/script-protocol.md defines null as "use
-            # your own default", the same rule a server applies to a missing
-            # key.
+            # null means "use your own default" in the protocol.
             "temperature": self._prefer_request(request.temperature, opts, "temperature"),
             "thinking": request.thinking,
             "format_json": request.format_json,
@@ -189,7 +196,6 @@ class ScriptProvider(BaseProvider):
 
         data = _run_script(cmd, payload, request.timeout)
 
-        # Parse tool calls if returned by the script
         raw_tool_calls = data.get("tool_calls") or []
         tool_calls: list[ToolCall] = [
             ToolCall(
@@ -219,11 +225,9 @@ class ScriptProvider(BaseProvider):
     ) -> None:
         """Ask the script to preload itself via the 'preload' protocol mode.
 
-        Scripts are free to ignore the mode: one that implements only
-        'generate' exits non-zero on anything else, which is read here as
-        "not supported" and reported with a warning, exactly as before this
-        mode existed. A script that does implement it, however, now gets the
-        chance to load a model or open an index ahead of the first call.
+        A script that declares the mode unsupported is logged at debug level.
+        Any other non-zero exit is a warning: it may be a real failure, or a
+        script that declines without the declaration.
 
         Args:
             model: Path to the script file.
@@ -250,21 +254,7 @@ class ScriptProvider(BaseProvider):
             "extra_options": merged_options or None,
             "timeout": self.config.timeout,
         }
-        try:
-            _run_script(cmd, payload, self.config.timeout)
-        except RuntimeError as exc:
-            # RuntimeError is what _run_script raises for a non-zero exit,
-            # which the protocol overloads to mean two different things: "I
-            # do not implement this mode" and "I tried and crashed" look
-            # identical on the wire (docs/script-protocol.md), so the message
-            # below cannot claim more certainty than the protocol itself has.
-            # TimeoutExpired, JSONDecodeError and FileNotFoundError are left
-            # to propagate: none of them means "not implemented".
-            _log.warning(
-                "Script '%s' does not implement mode 'preload', or failed "
-                "while trying: %s",
-                model, exc,
-            )
+        self._run_optional_mode(cmd, payload, self.config.timeout)
 
     def warm_up(
         self,
@@ -276,9 +266,9 @@ class ScriptProvider(BaseProvider):
     ) -> bool:
         """Ask the script to warm itself up via the 'warm_up' protocol mode.
 
-        A script that implements only 'generate' exits non-zero on any other
-        mode. That is read here as "nothing to warm up" and reported as False
-        rather than as an error, which is what the warm-up contract asks for.
+        A script that declines the mode, with or without declaring it, has
+        nothing to warm up: that is False, not an error, as the warm-up
+        contract asks.
 
         Args:
             model: Path to the script file.
@@ -303,17 +293,8 @@ class ScriptProvider(BaseProvider):
             "keep_alive": self._resolve_keep_alive(keep_alive),
             "timeout": effective_timeout,
         }
-        try:
-            data = _run_script(cmd, payload, effective_timeout)
-        except RuntimeError as exc:
-            # Same ambiguity as preload_model(): a non-zero exit means either
-            # "no such mode" or "tried and crashed", and the protocol does not
-            # distinguish the two.
-            _log.warning(
-                "Script '%s' does not implement mode 'warm_up', or failed "
-                "while trying: %s",
-                model, exc,
-            )
+        data = self._run_optional_mode(cmd, payload, effective_timeout)
+        if data is None:
             return False
         return bool(data.get("warmed_up", True))
 
@@ -321,10 +302,8 @@ class ScriptProvider(BaseProvider):
         """Ask the script to release what it holds, via the 'unload' mode.
 
         Declining is the normal case, not a misconfiguration: most scripts hold
-        nothing between calls and exit non-zero on a mode they do not implement.
-        That is logged as a warning, like a decline in ``preload_model()`` and
-        ``warm_up()``, because a non-zero exit may also be a real failure, and
-        otherwise ignored.
+        nothing between calls. Logged and otherwise ignored, as in
+        ``preload_model()``.
 
         Args:
             model: Path to the script file.
@@ -337,18 +316,31 @@ class ScriptProvider(BaseProvider):
             "mode": "unload",
             "timeout": effective_timeout,
         }
-        try:
-            _run_script(cmd, payload, effective_timeout)
-        except RuntimeError as exc:
-            # Same ambiguity as preload_model() and warm_up(); raised to
-            # warning to match them, since a swallowed real failure here is
-            # no less worth surfacing than the other two.
-            _log.warning(
-                "Script '%s' does not implement mode 'unload', or failed "
-                "while trying: %s",
-                model, exc,
-            )
+        self._run_optional_mode(cmd, payload, effective_timeout)
 
+    @staticmethod
+    def _run_optional_mode(cmd: list[str], payload: dict, timeout: int) -> dict | None:
+        """Run a mode a script may decline, logging a decline instead of raising.
+
+        A declared decline is debug-level. A bare non-zero exit stays a
+        warning, because without the declaration it cannot be told from a
+        crash. A timeout, unparseable output or a missing script still
+        propagates: none of them means "not implemented".
+
+        Returns:
+            The script's output, or None when it declined.
+        """
+        mode = payload["mode"]
+        try:
+            return _run_script(cmd, payload, timeout)
+        except UnsupportedOperationError:
+            _log.debug("Script '%s' does not implement mode '%s'", cmd[-1], mode)
+        except RuntimeError as exc:
+            _log.warning(
+                "Script '%s' does not implement mode '%s', or failed while "
+                "trying: %s", cmd[-1], mode, exc,
+            )
+        return None
     def embed(self, request: EmbeddingRequest) -> list[list[float]]:
         """Generate embeddings by spawning the target script in embed mode.
 
@@ -367,6 +359,8 @@ class ScriptProvider(BaseProvider):
 
         Raises:
             subprocess.TimeoutExpired: If the script exceeds the timeout.
+            UnsupportedOperationError: If the script declares ``embed``
+                unsupported. Raised on the first attempt, never retried.
             RuntimeError: If the script exits with a non-zero return code.
             json.JSONDecodeError: If stdout is not valid JSON.
             KeyError: If the response JSON is missing the 'embedding' field.
@@ -380,8 +374,6 @@ class ScriptProvider(BaseProvider):
                 payload["file_path"] = files
             if request.dimensions is not None:
                 payload["dimensions"] = request.dimensions
-            # The resolved timeout, which used to be a hard-coded 300 that
-            # ignored configure_provider("script", timeout=...).
             data = _run_script(cmd, payload, request.timeout)
             vectors.append([float(x) for x in data["embedding"]])
         return self._check_vector_count(vectors, request)

@@ -76,19 +76,23 @@ is being requested:
 | `"preload"` | `preload_model()` | Load a model or resource into memory. Optional. |
 | `"unload"` | `unload_model()`, `cleanup()` | Release a loaded model or resource. Optional. |
 
-Scripts that only implement `"generate"` may treat any other `mode` as an error
-(exit non-zero with a descriptive stderr message). Scripts that also implement
-`"embed"`, `"warm_up"`, `"preload"`, or `"unload"` must branch on this field and
-handle each payload they claim to support.
+A script declines a mode it does not implement by exiting non-zero **and** writing
+this object to stdout:
+
+```json
+{"error": {"type": "unsupported_mode"}}
+```
+
+Scripts that also implement `"embed"`, `"warm_up"`, `"preload"`, or `"unload"` must
+branch on this field and handle each payload they claim to support.
 
 Only `"generate"` is mandatory. The other four modes are opt-in: `warm_up()`
 reports that there was nothing to warm up, `preload_model()` and `unload_model()`
-log a warning and move on, and `get_embedding()` raises for the caller who asked
-for something the script cannot do. The protocol cannot tell "this mode is not
-implemented" from "the script crashed", both being a non-zero exit, so
-`get_embedding()` treats it like any other failure and retries it up to
-`max_retries` times with backoff before raising. A caller who knows its script has
-no `embed` mode should not call it, or pass `max_retries=0`.
+log the decline at debug level and move on, and `get_embedding()` raises
+`UnsupportedOperationError` on the first attempt, without retrying. A script that
+exits non-zero without the object (any script written before it existed) still
+works: the library cannot tell its decline from a crash, so the optional modes log
+a warning, and `get_embedding()` retries it like any other failure.
 
 A script that holds a model between calls should implement `"preload"` and
 `"unload"` as a pair. `cleanup()` sends `"unload"` at process exit for every
@@ -408,9 +412,9 @@ a wrong answer with nothing to show for it.
 }
 ```
 
-If the script does not support embedding, it must exit with a non-zero return code
-and write a descriptive message to stderr. ScriptProvider will propagate the
-`RuntimeError` to the caller.
+If the script does not support embedding, it declines the mode as described in
+section 1, and `get_embedding()` raises `UnsupportedOperationError` without
+retrying.
 
 ### 2.6 Input: `warm_up` payload (stdin, optional)
 
@@ -452,8 +456,8 @@ The script path is not sent: the script already knows where it lives.
 ```
 
 A script that implements the mode but has nothing to do should return
-`{"warmed_up": false}` rather than exiting non-zero. Reserve the non-zero exit
-for "I do not implement this mode at all".
+`{"warmed_up": false}` rather than exiting non-zero. Reserve the decline of
+section 1 for "I do not implement this mode at all".
 
 ### 2.8 Input: `preload` payload (stdin, optional)
 
@@ -525,8 +529,8 @@ No fields are defined and none are inspected. Print `{}`.
 ```
 
 Declining this mode is the normal case rather than an error: most scripts hold
-nothing between calls. A non-zero exit is logged as a warning, since the protocol cannot
-tell a decline from a crash, and otherwise ignored: `unload_model()` returns to its caller
+nothing between calls. A declared decline is logged at debug level, a bare non-zero
+exit as a warning, since it may be a crash; `unload_model()` returns to its caller
 either way.
 
 > [!IMPORTANT]
@@ -540,7 +544,8 @@ either way.
 | Exit code | Meaning | ScriptProvider behaviour |
 |---|---|---|
 | `0` | Success. Stdout contains valid response JSON. | Parse stdout, return `AiResponse`. |
-| Any non-zero | Failure. Stderr should contain a human-readable error message. | Raise `RuntimeError` with stderr content. The retry wrapper in UnifiedAiClient will attempt the call again up to `max_retries` times. |
+| Any non-zero, stdout `{"error": {"type": "unsupported_mode"}}` | The mode is not implemented. | Raise `UnsupportedOperationError`, never retried. The optional modes catch it and log at debug level. |
+| Any other non-zero | Failure. Stderr should contain a human-readable error message. | Raise `RuntimeError` with stderr content. The retry wrapper in UnifiedAiClient will attempt the call again up to `max_retries` times. |
 
 ---
 
@@ -673,8 +678,8 @@ def handle_generate(request: dict) -> dict:
 def handle_embed(request: dict) -> dict:
     """Handle an embed request and return the response dict.
 
-    Remove this function entirely if the script does not support embeddings.
-    In that case, the 'embed' branch in main() should exit non-zero.
+    Remove this function entirely if the script does not support embeddings,
+    together with its branch in main(), which then declines the mode.
 
     Args:
         request: The parsed request dict (contains 'text').
@@ -698,9 +703,9 @@ def handle_embed(request: dict) -> dict:
 def handle_warm_up(request: dict) -> dict:
     """Handle a warm-up request and return the response dict.
 
-    Remove this function entirely if there is nothing to prepare ahead of time.
-    In that case the 'warm_up' branch in main() should exit non-zero, which the
-    library reads as "nothing to warm up" rather than as an error.
+    Remove this function entirely if there is nothing to prepare ahead of time,
+    together with its branch in main(), which then declines the mode: the
+    library reads that as "nothing to warm up" rather than as an error.
 
     Args:
         request: The parsed request dict (contains 'file_path', 'timeout').
@@ -774,6 +779,7 @@ def main() -> None:
             response = handle_unload(request)
         else:
             print(f"Unsupported mode: '{mode}'", file=sys.stderr)
+            print(json.dumps({"error": {"type": "unsupported_mode"}}))
             sys.exit(1)
 
         print(json.dumps(response))
@@ -796,7 +802,8 @@ For each pre-existing script to be integrated as a `"script"` provider:
 - [ ] **Read from stdin, not from CLI args.** Replace `argparse` input with
   `json.loads(sys.stdin.read())`.
 - [ ] **Dispatch on `mode`.** Read `request.get("mode", "generate")` and branch
-  accordingly. If only `generate` is needed, treat any other mode as an error.
+  accordingly. Decline any other mode with `{"error": {"type": "unsupported_mode"}}`
+  on stdout and a non-zero exit.
 - [ ] **Write one JSON object to stdout, then exit.** Replace any `print()` output
   with a single `print(json.dumps(response))` at the end.
 - [ ] **Move all diagnostic output to stderr.** Replace `print(...)` debug/log lines
