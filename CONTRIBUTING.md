@@ -94,7 +94,10 @@ through `unified_ai_client/http.py`, overriding `_auth_headers()` for its creden
 Do not build requests with `urllib` directly: error classification and body extraction
 live in that module, and an adapter that bypasses it silently loses both.
 
-Set `SUPPORTED_FILE_TYPES` to what you have **verified** the endpoint accepts, and
+Set `SUPPORTED_FILE_TYPES` to what you have **verified** the endpoint accepts (the default
+inherited from `OpenAiCompatProvider` is `{"image"}`, from `BaseProvider` it is empty;
+declaring a class whose content block the builder cannot produce raises at request-build
+time rather than at import), and
 `SUPPORTS_UNLOAD` only if the endpoint keeps a model resident and offers a way to release
 it, in which case override `unload_model()` and `preload_model()` too: a contract test
 asserts that the flag and the two overrides agree. Set `LAZY_MODEL_LOAD` only for a local
@@ -104,24 +107,24 @@ one-token completion rather than a free metadata GET. Set `SUPPORTS_EMBEDDINGS` 
 endpoint has been verified to take. For a local server, set `PROBE_PATH` to a cheap GET path,
 which is how `list_providers()` tells that it is running. Override `list_models()` if the
 endpoint can enumerate its models, setting a `ModelInfo` capability only when the endpoint
-reports it and leaving it `None` otherwise. The
-inherited default is `{"image"}`, and declaring a class whose content block the builder
-cannot produce raises at request-build time rather than at import.
+reports it and leaving it `None` otherwise.
 
 Then wire it in and document it:
 
 - an entry in `_PROVIDER_SPECS` in `registry.py` (module path, class name, and the secrets key
-  name if it needs one) — the dispatch, the `ValueError` message and the api-key lookup are all
+  name if it needs one): the dispatch, the `ValueError` message and the api-key lookup are all
   derived from it, so that one entry is the whole of it;
 - the entry in the environment-variable map in `config.py`;
 - `config.json.example`, `secrets.json.example` and `.env.example`;
 - the provider tables in `README.md`, `COMPARISON.md`, `docs/multimodal.md`,
-  `docs/reasoning.md`, `docs/tool-calling.md` and `docs/warm-up.md`;
+  `docs/reasoning.md`, `docs/tool-calling.md`, `docs/warm-up.md`, the default-URL table in
+  `docs/configuration.md`, and the embeddings and `list_models` tables in `docs/api.md`;
 - an entry under `## [Unreleased]` in `CHANGELOG.md`;
 - a row in every hand-written table in `tests/test_provider_contracts.py`. Those tables are
   keyed by provider name, and `TestFileSupportMatrix._SUPPORT`,
-  `TestUnloadSupportMatrix._SUPPORTS_UNLOAD` and
-  `TestEmbeddingsSupportMatrix._SUPPORTS_EMBEDDINGS` assert the declared capabilities against an
+  `TestUnloadSupportMatrix._SUPPORTS_UNLOAD`,
+  `TestEmbeddingsSupportMatrix._SUPPORTS_EMBEDDINGS` and
+  `TestEmbeddingFileSupportMatrix._SUPPORT` assert the declared capabilities against an
   explicit list, so a provider added without a row there fails the suite. `TestDispatch` and
   the import tests need no new entry: they loop over `_PROVIDER_CLASSES`, itself derived from
   `_PROVIDER_SPECS`, so the registry entry above already covers them.

@@ -20,7 +20,7 @@ leaves the decision to the provider. Here is what each provider actually does wi
 |---|---|---|---|
 | `google` | `thinking_level` on Gemini 3.x, `thinking_budget` on 2.5 | minimised explicitly | provider default, thoughts still captured |
 | `ollama` | sends `think: true`, on `/api/chat` and on `/api/generate` alike | sends `think: false` | field omitted |
-| `anthropic` | `{"type": "adaptive"}` on Claude 4.6 and later (with `"display": "summarized"` from 4.7, where the trace is otherwise returned empty), `{"type": "enabled", "budget_tokens": N}` below | `{"type": "disabled"}` on 4.6 and later; `{"type": "between_tools"}` on Sonnet 5.5; on Opus 5.5 and Fable, which cannot turn thinking off, the field is omitted and `output_config.effort` is set to `"low"`, the closest the API allows; below 4.6 the field is omitted, which is already the off state | field omitted |
+| `anthropic` | `{"type": "adaptive"}` on Claude 4.6 and later (with `"display": "summarized"` from 4.7, where the trace is otherwise returned empty), `{"type": "enabled", "budget_tokens": N}` below | `{"type": "disabled"}` on 4.6 and later; `{"type": "between_tools"}` on Sonnet 5.5 and later; on Opus 5.5 and later, and on every Fable and Mythos model, which cannot turn thinking off, the field is omitted and `output_config.effort` is set to `"low"`, the closest the API allows; below 4.6 the field is omitted, which is already the off state | field omitted |
 | `openai`, `mistral`, `groq`, `xai`, `cohere` | `reasoning_effort: "high"` | `reasoning_effort: "none"` | field omitted |
 | `llamacpp` | `reasoning_effort: "high"` plus `chat_template_kwargs: {"enable_thinking": true}` | `reasoning_effort: "none"` plus `chat_template_kwargs: {"enable_thinking": false}` | fields omitted |
 | `meta`, `lmstudio` | no documented reasoning control in the API; the value is ignored | ignored | ignored |
@@ -78,6 +78,6 @@ value is dropped with a warning in the log. From Claude 4.7 on the API refuses a
 whether thinking is on or not, and the resulting error is the API's own.
 
 `reasoning_tokens` reports the tokens spent thinking, and is `0` where the provider does
-not report it separately. Ollama is the one case where the figure is **estimated** rather
-than reported: it returns a single `eval_count`, which the adapter splits between the
-thinking and the answer in proportion to their character counts.
+not report it separately. On Ollama and Anthropic the figure is **estimated** rather than
+reported: both return a single output count covering trace and answer together, which the
+adapter splits between the two in proportion to their character counts.

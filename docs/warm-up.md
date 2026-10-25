@@ -145,8 +145,9 @@ deleted to free cloud quota, and local models still resident are unloaded to fre
 Files uploaded by `warm_up()` go into the same cache `call_ai()` reads from, so warming up
 does not change the resource lifecycle.
 
-`atexit` cleanup is registered automatically on the first `call_ai()`, `warm_up()` or
-`get_embedding()`, whichever comes first, so a process that only ever warms up still
+`atexit` cleanup is registered automatically on the first `call_ai()`, `warm_up()`,
+`get_embedding()` or `get_embeddings()`, or a `preload_model()` that loads a model,
+whichever comes first, so a process that only ever warms up still
 cleans up after itself. Because it runs at exit, it also covers an unhandled exception and
 a Ctrl+C, and that is what makes an indefinite `keep_alive=-1` a safe policy rather than a
 leak: whatever happens to the process, the VRAM comes back.

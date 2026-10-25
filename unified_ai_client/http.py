@@ -146,7 +146,7 @@ def post_json(
         The parsed JSON response.
 
     Raises:
-        NonRetryableHttpError: On a 4xx other than 408/409/425/429.
+        NonRetryableHttpError: On a 4xx other than 408/409/425/429, or a 501.
         ProviderHttpError: On any other HTTP error response.
         urllib.error.URLError: On a connection failure, which stays retryable.
         json.JSONDecodeError: If the response body is not JSON.
@@ -204,7 +204,7 @@ def get_json(
         The parsed JSON response.
 
     Raises:
-        NonRetryableHttpError: On a 4xx other than 408/409/425/429.
+        NonRetryableHttpError: On a 4xx other than 408/409/425/429, or a 501.
         ProviderHttpError: On any other HTTP error response.
         urllib.error.URLError: On a connection failure, which stays retryable.
         json.JSONDecodeError: If the response body is not JSON.

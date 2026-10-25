@@ -81,8 +81,9 @@ class AiResponse:
             provider.
         reasoning_is_summary: True when ``reasoning_text`` is a summary the
             provider generated from the model's actual chain of thought, rather
-            than the raw trace. Google returns thought summaries; Ollama,
-            Anthropic and the OpenAI-compatible providers return the raw text.
+            than the raw trace. Google returns thought summaries, and so does
+            Anthropic from Claude 4 on; Ollama and the OpenAI-compatible
+            providers return the raw text.
             Consumers that measure the trace (length, composition, self-
             corrections) must not compare a summarised trace against a raw one.
         tool_calls: List of tool calls requested by the model.
@@ -107,7 +108,7 @@ class ProviderInfo:
         requires_api_key: Whether this provider needs a credential. A cloud
             provider listed here has one, or an explicit ``url``.
         file_types: Attachment classes it carries natively (``'image'``,
-            ``'audio'``, ``'document'``). Text files are always accepted and
+            ``'audio'``, ``'video'``, ``'document'``). Text files are always accepted and
             never listed. Empty for ``script``, which declares nothing: only the
             script knows what it can open.
         supports_unload: Whether it keeps a model resident and can release it.

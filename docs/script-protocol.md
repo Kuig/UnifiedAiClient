@@ -71,7 +71,7 @@ is being requested:
 | `mode` value | Triggered by | Description |
 |---|---|---|
 | `"generate"` | `call_ai()` | Standard text generation. |
-| `"embed"` | `get_embedding()` | Embedding vector generation. Optional. |
+| `"embed"` | `get_embedding()`, `get_embeddings()` | Embedding vector generation, one text per payload. Optional. |
 | `"warm_up"` | `warm_up()` | Prepare for a later call without generating. Optional. |
 | `"preload"` | `preload_model()` | Load a model or resource into memory. Optional. |
 | `"unload"` | `unload_model()`, `cleanup()` | Release a loaded model or resource. Optional. |
@@ -81,16 +81,20 @@ Scripts that only implement `"generate"` may treat any other `mode` as an error
 `"embed"`, `"warm_up"`, `"preload"`, or `"unload"` must branch on this field and
 handle each payload they claim to support.
 
-Only `"generate"` is mandatory. The other four modes are opt-in, and declining
-them costs nothing: `warm_up()` reports that there was nothing to warm up,
-`preload_model()` emits a warning and moves on, `unload_model()` records the
-decline at debug level and returns, and `get_embedding()` raises for the caller
-who asked for something the script cannot do.
+Only `"generate"` is mandatory. The other four modes are opt-in: `warm_up()`
+reports that there was nothing to warm up, `preload_model()` and `unload_model()`
+log a warning and move on, and `get_embedding()` raises for the caller who asked
+for something the script cannot do. The protocol cannot tell "this mode is not
+implemented" from "the script crashed", both being a non-zero exit, so
+`get_embedding()` treats it like any other failure and retries it up to
+`max_retries` times with backoff before raising. A caller who knows its script has
+no `embed` mode should not call it, or pass `max_retries=0`.
 
 A script that holds a model between calls should implement `"preload"` and
 `"unload"` as a pair. `cleanup()` sends `"unload"` at process exit for every
-model the script was asked to load, which is what stops a long-lived resource
-outliving the process that asked for it.
+script the process used, through `call_ai()`, `get_embedding()`, `warm_up()` or
+`preload_model()`, which is what stops a long-lived resource outliving the process
+that asked for it. A script that holds nothing simply declines.
 
 ### 2.2 Input: `generate` payload (stdin)
 
@@ -99,10 +103,10 @@ The script reads **one JSON object** from stdin. The object contains the followi
 | Field | Type | Always present | Description |
 |---|---|---|---|
 | `mode` | `string` | ✅ Yes | Always `"generate"` for this payload. |
-| `prompt` | `string` | ✅ Yes | The user prompt text. Never null or empty. |
+| `prompt` | `string` | ✅ Yes | The user prompt text. Never null, but may be empty, for instance when the instruction is in `system_prompt` and the input is an attachment. |
 | `system_prompt` | `string \| null` | ✅ Yes | System instruction, or null if not provided. |
 | `messages` | `array \| null` | ✅ Yes | Chat history as a list of role/content objects, or null. |
-| `file_path` | `array[string]` | ✅ Yes | List of absolute paths to attached files. Empty list if no files. Never null. |
+| `file_path` | `array[string]` | ✅ Yes | Paths to attached files, exactly as the caller passed them (relative paths are relative to the caller's working directory). Empty list if no files. Never null. |
 | `temperature` | `float \| null` | ✅ Yes | Sampling temperature, range 0.0–2.0, or null when neither the caller nor the configuration set one. Null means "use your own default", the same rule as `top_k`. |
 | `thinking` | `bool \| string` | ✅ Yes | Whether extended reasoning was requested (`true`/`false`) or let the provider decide (`"default"`). |
 | `format_json` | `bool` | ✅ Yes | Whether JSON-formatted output was requested. |
@@ -281,7 +285,13 @@ as a new user message, because the prompt is present in `messages` already.
     "temperature": null,
     "thinking": false,
     "format_json": false,
-    "timeout": 300
+    "timeout": 300,
+    "top_k": null,
+    "top_p": null,
+    "max_tokens": null,
+    "extra_options": null,
+    "tools": null,
+    "tool_results": null
 }
 ```
 
@@ -296,7 +306,13 @@ as a new user message, because the prompt is present in `messages` already.
     "temperature": 0.5,
     "thinking": true,
     "format_json": false,
-    "timeout": 180
+    "timeout": 180,
+    "top_k": null,
+    "top_p": null,
+    "max_tokens": null,
+    "extra_options": null,
+    "tools": null,
+    "tool_results": null
 }
 ```
 
@@ -509,8 +525,9 @@ No fields are defined and none are inspected. Print `{}`.
 ```
 
 Declining this mode is the normal case rather than an error: most scripts hold
-nothing between calls. A non-zero exit is recorded at debug level and otherwise
-ignored, and `unload_model()` returns to its caller either way.
+nothing between calls. A non-zero exit is logged as a warning, since the protocol cannot
+tell a decline from a crash, and otherwise ignored: `unload_model()` returns to its caller
+either way.
 
 > [!IMPORTANT]
 > Every mode must print a **valid JSON object** on stdout, even an empty `{}`.
@@ -631,8 +648,10 @@ def handle_generate(request: dict) -> dict:
     # file_path is now always a list (may be empty)
     file_paths: list[str] = request.get("file_path") or []
 
-    # thinking flag: implement extended reasoning when True
-    thinking: bool = request.get("thinking", False)
+    # thinking: True or False when the caller asked, "default" to let the script
+    # decide. Compare with `is True`: "default" is a non-empty string, so a plain
+    # truthiness test would read it as a request to think.
+    thinking: bool = request.get("thinking") is True
 
     # Replace with real logic.
     result_text = f"Echo: {request['prompt']}"
@@ -664,6 +683,11 @@ def handle_embed(request: dict) -> dict:
         A response dict with an 'embedding' key (list of floats).
     """
     text: str = request["text"]
+
+    # This template embeds text only, so it refuses what it cannot honour
+    # rather than returning a vector that silently ignores it (see 2.4).
+    if request.get("file_path") or request.get("dimensions") is not None:
+        raise ValueError("this script embeds text only, at its own size")
 
     # Replace with real embedding logic.
     embedding: list[float] = [0.0]
@@ -720,7 +744,7 @@ def handle_unload(request: dict) -> dict:
 
     Remove this function entirely if the script holds no resident model. If you
     kept handle_preload, keep this one too: they are a pair, and cleanup() sends
-    this mode at process exit for every model the script was asked to load.
+    this mode at process exit for every script the process used.
 
     Args:
         request: The parsed request dict.

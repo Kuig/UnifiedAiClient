@@ -1,10 +1,9 @@
 {
-    "_comment": "Reference of built-in provider defaults. The preferred way to configure providers is now configure_provider() in code (see README). This file is still read as a fallback if configure_provider() was never called for a given provider. Keys: 'url', 'timeout', 'sleep_time' map to ProviderConfig fields; all other keys are collected into extra_options and forwarded as provider-specific settings (e.g. context_size → num_ctx in Ollama, max_tokens → num_predict/max_output_tokens).",
+    "_comment": "Shape reference with example values, not the built-in defaults: every key is optional and docs/configuration.md lists the real defaults. The preferred way to configure providers is configure_provider() in code (see README); this file is still read as a fallback if configure_provider() was never called for a given provider. Keys: 'url', 'timeout', 'sleep_time' map to ProviderConfig fields; all other keys are collected into extra_options and forwarded as provider-specific settings (e.g. context_size to num_ctx in Ollama, max_tokens to num_predict/max_output_tokens). Note that an explicit url also disables the missing-API-key check, being read as a proxy or gateway.",
 
     "ollama": {
         "url": "http://localhost:11434",
-        "timeout": 300,
-        "context_size": 0
+        "timeout": 300
     },
 
     "google": {

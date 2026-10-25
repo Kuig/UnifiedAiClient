@@ -321,9 +321,9 @@ class ScriptProvider(BaseProvider):
 
         Declining is the normal case, not a misconfiguration: most scripts hold
         nothing between calls and exit non-zero on a mode they do not implement.
-        That is logged at debug level and otherwise ignored, unlike
-        ``preload_model()``, where a decline warns because the caller explicitly
-        asked for a load.
+        That is logged as a warning, like a decline in ``preload_model()`` and
+        ``warm_up()``, because a non-zero exit may also be a real failure, and
+        otherwise ignored.
 
         Args:
             model: Path to the script file.

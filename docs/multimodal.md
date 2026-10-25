@@ -50,7 +50,8 @@ A history entry's `files`, its `content`, and a `tool_calls` list, when present,
 independent: none of them is dropped for the others being there. A message that recorded
 both the file the model looked at and the tool call it made from that still carries both on
 every provider. See [Tool Calling](tool-calling.md#a-third-turn-continuing-after-a-tool-result)
-for the matching guarantee on `tool_call_id`.
+for how a `role: "tool"` history entry and its `tool_call_id` are handled, which differs by
+provider.
 
 ## Supported file types per provider
 
@@ -133,12 +134,37 @@ in an image block, and the markup is more useful to the model than a refusal.
 > `.env` files and similar config are inlined verbatim, secrets included.
 > Nothing is scanned or redacted, so check what a file holds before attaching it.
 
+## OCR models
+
+OCR models such as GLM-OCR are ordinary vision models driven by a fixed task prompt
+(`"Text Recognition:"`, `"Table Recognition:"`, `"Formula Recognition:"`), and they want
+near-greedy sampling. Since the library sends no sampling value you did not set, pass the
+ones the model's authors recommend:
+
+```python
+response = call_ai(
+    provider="ollama",                 # or "llamacpp" with the model's mmproj loaded
+    model="glm-ocr",
+    prompt="Text Recognition:",
+    file_path="page-001.png",
+    temperature=0.0, top_p=0.00001, top_k=1, max_tokens=8192,
+    extra_options={"repeat_penalty": 1.1, "use_generate": True},
+)
+```
+
+On Ollama and llama.cpp the repetition setting is spelled `repeat_penalty`; the
+`repetition_penalty` spelling used by vLLM and Hugging Face is not recognised and is
+dropped by the server. `use_generate` is optional on Ollama: GLM-OCR's own guide
+recommends `/api/generate`, and the native `/api/chat` works too. These models read
+images, not PDFs: rasterise each page first.
+
 ## Embedding files
 
 `get_embedding()` takes a `file_path` too, embedding the files together with the text into
 one vector. The rules are the same two, with a set of classes of its own per provider:
 `ollama` embeds images and audio, `llamacpp` images, audio and video, `google` images,
-audio, video and PDFs, and the rest text only. Text files are inlined into the input.
+audio, video and PDFs, `script` receives the paths and decides, and the rest embed text
+only. Text files are inlined into the input.
 Whether a given model can read the medium is up to the model: a text-only tag answers with
 an error of its own, which is not retried. See
 [`get_embedding`](api.md#get_embedding) for the table.

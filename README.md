@@ -10,20 +10,14 @@ Every other provider speaks HTTP through the standard library. See
 
 Supported providers:
 
-| Provider | Type | Implementation Notes / SDK |
+| Provider | Type | Implementation |
 |---|---|---|
 | `"google"` | Cloud | Official `google-genai` SDK |
-| `"anthropic"` | Cloud | Native HTTP API via `urllib` (no SDK dependencies) |
-| `"openai"` | Cloud | Native HTTP API via `urllib` (no SDK dependencies) |
-| `"mistral"` | Cloud | OpenAI-compatible endpoint via `urllib` |
-| `"cohere"` | Cloud | OpenAI-compatible endpoint via `urllib` |
-| `"meta"` | Cloud | OpenAI-compatible endpoint via `urllib` |
-| `"groq"` | Cloud | OpenAI-compatible endpoint via `urllib` |
-| `"xai"` | Cloud | OpenAI-compatible endpoint via `urllib` |
-| `"ollama"` | Local | Native Ollama HTTP API via `urllib` (no SDK dependencies) |
-| `"lmstudio"` | Local | OpenAI-compatible API via `urllib` |
-| `"llamacpp"` | Local | OpenAI-compatible API via `urllib` |
-| `"script"` | External | Subprocess runner with JSON stdin/stdout protocol |
+| `"anthropic"`, `"openai"` | Cloud | Native HTTP API via `urllib` |
+| `"mistral"`, `"cohere"`, `"meta"`, `"groq"`, `"xai"` | Cloud | OpenAI-compatible endpoint via `urllib` |
+| `"ollama"` | Local | Native Ollama HTTP API via `urllib` |
+| `"lmstudio"`, `"llamacpp"` | Local | OpenAI-compatible API via `urllib` |
+| `"script"` | External | Subprocess runner with a JSON stdin/stdout protocol |
 
 ## Documentation
 
@@ -41,8 +35,6 @@ Supported providers:
 | [COMPARISON.md](COMPARISON.md) | How this library compares with LiteLLM, aisuite and the OpenAI SDK. |
 | [CHANGELOG.md](CHANGELOG.md) | What changed in every released version. |
 
----
-
 ## Installation
 
 **Local development** (when you're also editing the library):
@@ -59,8 +51,6 @@ unified-ai-client @ git+https://github.com/Kuig/UnifiedAiClient.git@v0.5.8
 ```
 
 then run `pip install -r requirements.txt`.
-
----
 
 ## Configuration
 
@@ -95,8 +85,6 @@ configure_provider("google", sleep_time=3)
 
 Every credential key, every registrable setting and every built-in default is listed in
 [docs/configuration.md](docs/configuration.md).
-
----
 
 ## Usage
 
@@ -220,15 +208,17 @@ unload_model("ollama", "gemma4:12b")             # release it
 ```
 
 `warm_up()` works on every provider and never raises. Where a model stays resident,
-`keep_alive` sets how long and `unload_model()` releases it early. These, `preload_model()`
-and the `cleanup()` that frees what they hold are in [docs/warm-up.md](docs/warm-up.md).
+`keep_alive` sets how long and `unload_model()` releases it early. `cleanup()` deletes
+remote uploads and unloads resident models; it is registered with `atexit` on first use, so
+it runs after an unhandled exception or a Ctrl+C too, and you normally never call it. All
+of these, and `preload_model()`, are in [docs/warm-up.md](docs/warm-up.md).
 
 ### Text Embeddings
 
 Every provider except `anthropic`, `meta`, `groq` and `xai` serves embeddings, with the
 same retry, rate limiting and timeout handling as `call_ai()`. `ollama`, `llamacpp` and
-`google` also embed images and audio (`llamacpp` and `google` video too) into the same
-vector space as text; the per-provider details are in the
+`google` also embed images and audio (`llamacpp` and `google` video, `google` PDFs too)
+into the same vector space as text; the per-provider details are in the
 [API reference](docs/api.md#get_embedding).
 
 ```python
@@ -244,20 +234,8 @@ image_vector = get_embedding("google", "gemini-embedding-2", "a diagram", file_p
 Run any script implementing the [script protocol](docs/script-protocol.md):
 
 ```python
-response = call_ai(
-    provider="script",
-    model="/path/to/my_scripts/my_llm.py",
-    prompt="Summarize this.",
-)
+response = call_ai(provider="script", model="/path/to/my_llm.py", prompt="Summarize this.")
 ```
-
-### Resource Cleanup
-
-`cleanup()` deletes files uploaded to a remote provider and unloads local models still
-resident. It is registered with `atexit` on the first `call_ai()`, `warm_up()` or
-`get_embedding()`, so you normally never call it, and it runs after an unhandled exception or
-a Ctrl+C too. Pass `unload_models=False` to keep the models warm; see
-[docs/warm-up.md](docs/warm-up.md) for eager cleanup.
 
 ### Using it from several projects
 

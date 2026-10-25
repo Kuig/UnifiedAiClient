@@ -15,14 +15,15 @@ for the same use case: calling LLM providers through a unified interface.
 | **Multimodal (images)** | ✅ all supporting providers | ✅ | ✅ partial | ✅ |
 | **Multimodal (audio)** | ✅ Google, OpenAI, llama.cpp | ✅ partial | ❌ | ✅ |
 | **Multimodal (PDF)** | ✅ Google, OpenAI, Anthropic | ✅ | ❌ | ✅ |
+| **Multimodal (video)** | ✅ Google, llama.cpp | ✅ partial | ❌ | ❌ |
 | **Unsupported file handling** | ✅ Raises `UnsupportedFileError` | Provider error | Provider error | Provider error |
-| **Text embeddings** | ✅ `get_embedding()` | ✅ | ❌ | ✅ |
+| **Embeddings** | ✅ `get_embedding()`, `get_embeddings()`; images, audio and video on Ollama, llama.cpp and Google | ✅ | ❌ | ✅ |
 | **Tool / function calling** | ✅ all providers | ✅ | ✅ | ✅ |
 | **Thinking / reasoning** | ✅ Google, Anthropic, Ollama, OpenAI, Mistral, Groq, xAI, Cohere, llama.cpp | ✅ (transparent) | ❌ explicit | ❌ explicit |
 | **Ollama VRAM-aware preloading** | ✅ `preload_model()` | ❌ | ❌ | n/a |
 | **Local model residency control** | ✅ `keep_alive` plus `unload_model()`, released at exit | ❌ | ❌ | n/a |
-| **Provider warm-up (zero-token)** | ✅ `warm_up()`, all providers | ❌ | ❌ | ❌ |
-| **Normalised response object** | ✅ `text`, `input_tokens`, `output_tokens`, `reasoning_tokens`, `reasoning_text`, `tool_calls` | ✅ `ModelResponse` | ❌ (provider-native) | ❌ (provider-native) |
+| **Provider warm-up (zero-token)** | ✅ `warm_up()`, all providers (one token on LM Studio and llama.cpp, which load lazily) | ❌ | ❌ | ❌ |
+| **Normalised response object** | ✅ `text`, `input_tokens`, `output_tokens`, `reasoning_tokens`, `reasoning_text`, `reasoning_is_summary`, `tool_calls` | ✅ `ModelResponse` | ❌ (provider-native) | ❌ (provider-native) |
 | **Built-in retry / backoff** | ✅ | ✅ | ❌ | ✅ |
 | **JSON output mode** | ✅ `format_json=True` (Anthropic needs a schema, see the API reference) | ✅ | ❌ | ✅ |
 | **Streaming** | ❌ | ✅ | ✅ | ✅ |

@@ -32,7 +32,7 @@ unified_ai_client/
 ├── registry.py           # get_provider(), configure_provider(), list_providers(), cleanup(), the four registries
 ├── models.py             # AiRequest, EmbeddingRequest, AiResponse, ProviderConfig dataclasses
 ├── file_utils.py         # classify_file, validate_files, encode_file_base64, ...
-├── exceptions.py         # UnsupportedFileError, MissingFileError, FileDecodeError
+├── exceptions.py         # NonRetryableError and its family, ProviderHttpError, ModelRefusalError
 ├── config.py             # load_secrets(), load_config() (utility)
 ├── http.py               # Shared urllib transport + HTTP error classification
 ├── retry.py              # Exponential backoff
@@ -43,15 +43,15 @@ unified_ai_client/
     ├── google.py         # Google AI (Gemini): upload caching, thinking, cleanup
     ├── ollama.py         # Ollama: urllib, images[], context_size
     ├── openai_compat.py  # Base for OpenAI-compatible APIs
-    ├── openai.py         # OpenAI: native audio + PDF blocks
+    ├── openai.py         # OpenAI: native PDF blocks, embedding dimensions
     ├── anthropic.py      # Anthropic: urllib, image/document blocks, thinking
     ├── mistral.py        # Mistral (OpenAI-compatible)
     ├── cohere.py         # Cohere (OpenAI-compatible)
-    ├── meta.py           # Meta / Llama API (OpenAI-compatible)
+    ├── meta.py           # Meta Model API (OpenAI-compatible)
     ├── groq.py           # Groq (OpenAI-compatible)
     ├── xai.py            # xAI (OpenAI-compatible)
     ├── lmstudio.py       # LM Studio (OpenAI-compatible)
-    ├── llamacpp.py       # llama.cpp: OpenAI-compatible, native audio
+    ├── llamacpp.py       # llama.cpp: OpenAI-compatible, audio and video, thinking mapping
     └── script.py         # External script via stdin/stdout JSON
 ```
 
@@ -60,7 +60,7 @@ unified_ai_client/
 Two modules, split along one rule: a function that reaches into a registry directly lives in
 `registry.py`; a function that only ever reaches one *through* `get_provider()` /
 `_register_cleanup()` / `_record_loaded()` / `configure_provider()` lives in `client.py`. A
-consumer never has to know the split exists — `unified_ai_client/__init__.py` re-exports both
+consumer never has to know the split exists: `unified_ai_client/__init__.py` re-exports both
 halves under the same public names it always has.
 
 **`registry.py`** holds `get_provider()`, `configure_provider()`, `cleanup()`, `unload_model()`,
@@ -119,7 +119,9 @@ registered settings, and the tool-calling triple `ToolDefinition`, `ToolCall`, `
 ### The provider layer
 
 Every adapter subclasses `BaseProvider` and implements the same contract: take an
-`AiRequest`, produce an `AiResponse`. The twelve of them fall into three families.
+`AiRequest`, produce an `AiResponse`; and, where it serves embeddings, take an
+`EmbeddingRequest` in `embed()` and produce one vector per input. The twelve of them fall
+into three families.
 
 `BaseProvider` is not only that contract: it also holds what all twelve would otherwise
 each write for themselves. Merging config-level and call-level options, resolving a common
@@ -133,9 +135,10 @@ differently in different copies before being consolidated.
 whole `/v1/chat/completions` conversation: message assembly, file blocks, tool schemas,
 reasoning parameters, response parsing. Seven providers (`mistral`, `cohere`, `meta`,
 `groq`, `xai`, `lmstudio`, `llamacpp`) subclass it in about a dozen lines each, setting
-little more than a default URL and whether the endpoint wants a key. `openai` itself adds
-one override, for its native audio and PDF content blocks. A bug fixed in the base class
-is a bug fixed for eight providers.
+little more than a default URL and whether the endpoint wants a key; a path prefix and a
+reasoning hook cover the endpoints that differ there. `openai` itself adds one override,
+for its native PDF content block. A bug fixed in the base class is a bug fixed for eight
+providers.
 
 **The bespoke adapters** are the three whose APIs are not OpenAI-shaped. `google` uses the
 `google-genai` SDK, uploads attachments through the Files API and polls them to the
@@ -159,8 +162,8 @@ reference under `docs/`.
 
 ### The support layer
 
-`file_utils.py` classifies an attachment by extension into `image`, `audio`, `text`,
-`document` or `unknown`, validates a list of paths against what a provider declares it
+`file_utils.py` classifies an attachment by extension into `image`, `audio`, `video`,
+`text`, `document` or `unknown`, validates a list of paths against what a provider declares it
 accepts, encodes to base64, and wraps text attachments in delimited blocks. Every adapter
 branches on the classification it returns, which is why adding a file type starts here.
 
@@ -236,7 +239,8 @@ endpoint is never redirected to a vendor default, even when it matches another p
 **An explicit URL suppresses the missing-credential error.** Pointing a cloud adapter at
 an address of your own is read as "this is a proxy or a gateway", which may legitimately
 need no key. This is deliberate, and it is what lets a local OpenAI-compatible server be
-driven through the `openai` adapter.
+driven through the `openai` adapter. `google` is outside the rule: its SDK picks the
+endpoint itself and always needs the key.
 
 **Text attachments are always accepted; everything else must be native or the call is
 refused.** No provider has a content block for a `.md` or a `.csv`, so text is inlined
@@ -268,9 +272,12 @@ backoff, all exceptions retryable except the deterministic ones. Providers conta
 retry logic of their own.
 
 **Errors.** `UnsupportedFileError` and `FileDecodeError` subclass both `NonRetryableError`
-and `ValueError`; `MissingFileError` pairs `NonRetryableError` with `FileNotFoundError`.
-The second base in each pair keeps handlers written against the old plain-exception
-behaviour working. Any future deterministic failure belongs under the same base.
+and `ValueError`; `MissingFileError` pairs `NonRetryableError` with `FileNotFoundError`;
+`NonRetryableHttpError` pairs it with `urllib`'s `HTTPError`; `UnsupportedOperationError`
+with `NotImplementedError`; `EmptyResponseError` with `RuntimeError`. The second base in
+each pair keeps handlers written against the old plain-exception behaviour working.
+`ModelRefusalError`, for a policy refusal that arrives as a successful response, has only
+the first. Any future deterministic failure belongs under the same base.
 
 **Credentials.** Resolved when a provider instance is first built, from environment
 variables first and a `secrets.json` in the consuming project's working directory second.
@@ -280,7 +287,7 @@ providers are built eagerly, long before anyone knows whether a request will fol
 **Resource lifecycle.** Two kinds of resource outlive a single call. Google holds remote
 files: uploads go into a module-level cache that both `warm_up()` and `call_ai()` read, and
 `cleanup()` deletes them to free cloud quota. Ollama and scripts hold a local model in
-memory: `call_ai()`, `warm_up()`, `preload_model()` and `get_embedding()` record what they
+memory: `call_ai()`, `warm_up()`, `preload_model()` and the embedding functions record what they
 loaded, and `cleanup()` unloads it to free VRAM. Cleanup is registered with `atexit` on the
 first of those calls, so a process that warms up and then crashes still releases both. That
 `atexit` guarantee is what makes an indefinite residency a policy rather than a leak: the

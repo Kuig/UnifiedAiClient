@@ -194,7 +194,7 @@ def warm_up(
 | `model` | `str` | required | Model identifier to warm up. |
 | `file_paths` | `str \| list[str] \| None` | `None` | Files to upload ahead of time. Used only by providers with a remote file store (currently `google`) and by scripts that act on it. Ignored elsewhere. |
 | `keep_alive` | `str \| int \| None` | `None` | How long the model stays resident once loaded. `None` uses whatever `configure_provider()` registered, so a warm-up and the calls after it agree. Values as in `preload_model`. Honoured by `ollama` and `script`. |
-| `timeout` | `int \| None` | `None` | Seconds to wait for the warm-up. `None` uses the provider's configured timeout. Useful when a cold model takes longer to load than a normal request takes to answer. |
+| `timeout` | `int \| None` | `None` | Seconds to wait for the warm-up. `None` uses the provider's configured timeout. Useful when a cold model takes longer to load than a normal request takes to answer. Ignored by `google`, whose SDK calls take no per-call timeout here. |
 
 **Returns:** `True` if something was actually warmed up, `False` if the provider had
 nothing to do or the warm-up failed.
@@ -355,7 +355,7 @@ def list_models(provider: str, *, timeout: int | None = None) -> list[ModelInfo]
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `provider` | `str` | required | Provider name, for example `"ollama"`. |
-| `timeout` | `int \| None` | `None` | Seconds to wait per request. `None` uses the provider's configured timeout. |
+| `timeout` | `int \| None` | `None` | Seconds to wait per request. `None` uses the provider's configured timeout. Ignored by `google`. |
 
 **Returns:** one [`ModelInfo`](#modelinfo) per model.
 
@@ -433,8 +433,9 @@ Releases what every cached provider is holding. Two kinds of resource: remote on
 as files uploaded to Gemini, which are deleted to free cloud quota; and local models still
 resident, which are unloaded to free VRAM.
 
-Registered to run at process exit via `atexit` on the first `call_ai()`, `warm_up()` or
-`get_embedding()`, so it also covers an unhandled exception and a Ctrl+C. That is what
+Registered to run at process exit via `atexit` on the first `call_ai()`, `warm_up()`,
+`get_embedding()` or `get_embeddings()` (and on a `preload_model()` that loads a model), so
+it also covers an unhandled exception and a Ctrl+C. That is what
 makes an indefinite `keep_alive=-1` a safe policy rather than a leak. Callable manually
 for eager cleanup.
 
@@ -505,7 +506,7 @@ The standard response object returned by `call_ai()`.
 | `text` | `str` | required | The generated response text. |
 | `input_tokens` | `int` | `0` | Prompt tokens consumed. |
 | `output_tokens` | `int` | `0` | Completion tokens generated. |
-| `reasoning_tokens` | `int` | `0` | Tokens spent on internal reasoning. `0` where the provider does not report it. On Ollama the figure is estimated, not reported. |
+| `reasoning_tokens` | `int` | `0` | Tokens spent on internal reasoning. `0` where the provider does not report it. On Ollama and Anthropic the figure is estimated from the character ratio, not reported. |
 | `reasoning_text` | `str` | `""` | The reasoning transcript, when the model returned one. Populated whatever `thinking` was set to. |
 | `reasoning_is_summary` | `bool` | `False` | `True` when `reasoning_text` is a provider-generated summary of the chain of thought rather than the raw trace. Google summarises, and so does Anthropic from Claude 4 on; the others return the raw trace. |
 | `tool_calls` | `list[ToolCall]` | `[]` | Tool calls the model requested. Empty when it answered with text. |
@@ -562,9 +563,9 @@ One usable provider, as returned by [`list_providers`](#list_providers). Frozen.
 | `name` | `str` | Registry name, the value to pass as `provider=`. |
 | `local` | `bool` | `True` for a local server or a subprocess, `False` for a cloud endpoint. |
 | `requires_api_key` | `bool` | Whether the provider needs a credential. |
-| `file_types` | `frozenset[str]` | Attachment classes it carries natively (`image`, `audio`, `document`). Text is always accepted and never listed. Empty for `script`, which declares nothing. |
+| `file_types` | `frozenset[str]` | Attachment classes it carries natively (`image`, `audio`, `video`, `document`). Text is always accepted and never listed. Empty for `script`, which declares nothing. |
 | `supports_unload` | `bool` | Whether it keeps a model resident and can release it. |
-| `supports_embeddings` | `bool` | Whether `get_embedding()` is implemented. |
+| `supports_embeddings` | `bool` | Whether the provider serves embeddings (`get_embedding()` and `get_embeddings()`). |
 
 ### `ModelInfo`
 
@@ -596,11 +597,16 @@ to the request.
 The abstract base every adapter subclasses. Exported for consumers that call a provider
 directly through `get_provider()`, and for anyone implementing an adapter out of tree. Its
 class-level `SUPPORTED_FILE_TYPES` declares which file classes the adapter accepts,
-`SUPPORTS_UNLOAD` whether it holds a model resident at all, and `SUPPORTS_EMBEDDINGS`
-whether `get_embedding()` is implemented. `warm_up()`, `unload_model()` and `list_models()`
-are concrete rather than abstract, because "nothing to warm up", "nothing to release" and
-"cannot enumerate" are valid answers, and an adapter written before any of these hooks
-existed keeps working unchanged. The default `list_models()` raises `NotImplementedError`.
+`SUPPORTED_EMBEDDING_FILE_TYPES` which ones it can embed, `SUPPORTS_UNLOAD` whether it holds
+a model resident at all, and `SUPPORTS_EMBEDDINGS` whether `embed()` is implemented.
+
+`call()` is the only abstract method. `preload_model()`, `warm_up()`, `unload_model()`,
+`cleanup()`, `list_models()`, `embed()` and `get_embedding()` are concrete, because "nothing
+to load", "nothing to warm up", "nothing to release" and "cannot enumerate" are valid
+answers, and an adapter written before any of these hooks existed keeps working unchanged.
+The default `list_models()` raises `NotImplementedError`; the default `embed()` raises
+`UnsupportedOperationError`, unless the adapter overrides the older
+`get_embedding(model, text)`, in which case it is served through that, one text at a time.
 
 ## Exceptions
 

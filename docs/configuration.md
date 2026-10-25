@@ -57,7 +57,7 @@ export GOOGLE_API_KEY=your-google-api-key-here
     "openai_api_key": "your-openai-api-key-here",
     "mistral_api_key": "your-mistral-api-key-here",
     "cohere_api_key": "your-cohere-api-key-here",
-    "meta_api_key": "your-llama-api-key-here",
+    "meta_api_key": "your-meta-api-key-here",
     "groq_api_key": "your-groq-api-key-here",
     "xai_api_key": "your-xai-api-key-here"
 }
@@ -72,7 +72,9 @@ See also [`.env.example`](../.env.example) for the environment-variable form.
 A cloud provider called without its key raises `ValueError` naming the key it wants, rather
 than sending an unauthenticated request. The one exception is when you set an explicit `url`
 via `configure_provider()`: that means you have pointed the adapter somewhere other than the
-vendor's own endpoint, so no credential is required. This is what makes it possible to drive
+vendor's own endpoint, so no credential is required. `google` is the exception to the
+exception: its SDK resolves the endpoint itself, ignores `url`, and always wants its key.
+The escape hatch is what makes it possible to drive
 a local OpenAI-compatible server through the `openai` adapter:
 
 ```python
@@ -116,8 +118,8 @@ forwarded to the API payload.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `url` | `str` or `None` | `None` | Base URL of the endpoint. `None` means "use this provider's own default", listed below. An explicit value is always honoured as given. |
-| `timeout` | `int` | `300` | Seconds to wait for a response. Applies to generation, warm-up, preload and embeddings alike; a `timeout` passed to `call_ai()` overrides it for that call. |
-| `sleep_time` | `int` | `0` | Seconds to sleep before a call, for rate limiting. Applied once per `call_ai()`, before the retry loop, so retries do not multiply it. |
+| `timeout` | `int` | `300` | Seconds to wait for a response. Applies to generation, warm-up, preload and embeddings alike; a `timeout` passed to `call_ai()` or `get_embedding()` overrides it for that call. Two exceptions: Ollama's `unload_model()` waits 30 seconds of its own, and `google` ignores it for `warm_up()` and `list_models()`. |
+| `sleep_time` | `int` | `0` | Seconds to sleep before a request, for rate limiting. Applied once per `call_ai()`, `get_embedding()` or `get_embeddings()`, before the retry loop, so retries do not multiply it. |
 
 ### Default endpoint per provider
 
@@ -147,9 +149,10 @@ behaviour:
 
 | Option | Providers | Default | Description |
 |---|---|---|---|
-| `context_size` | `ollama` | unset | Context window in tokens, sent as `num_ctx`. Prefer setting it through `preload_model()`, so Ollama allocates VRAM once instead of reloading on the first call. |
+| `context_size` | `ollama`, `script` | unset | Context window in tokens, sent as `num_ctx` on Ollama and in the `preload` payload on `script`. Prefer setting it through `preload_model()`, so Ollama allocates VRAM once instead of reloading on the first call. |
 | `keep_alive` | `ollama`, `script` | unset | How long the model stays resident once idle. A number is seconds, `0` unloads it, `-1` keeps it resident indefinitely; a string is a Go duration such as `"15m"`. Set here on `ollama` it governs every call, warm-up, preload and embedding; on `script` it reaches the `warm_up` and `preload` modes, the only ones that carry the field. `warm_up()` and `preload_model()` also take it per call. Unset, nothing is sent and the server's own default applies (`OLLAMA_KEEP_ALIVE`, five minutes unless changed). |
 | `max_tokens` | all | unset | Response length cap, mapped per provider (`num_predict` on Ollama, `max_output_tokens` on Google). Also a per-call argument, which wins. Unset, nothing is sent, except on `anthropic`, whose API requires the field and so receives `8192`. |
+| `max_output_tokens` | `google` | unset | Google's own name for `max_tokens`, accepted as an alias. |
 | `use_generate` | `ollama` | `False` | Routes to `/api/generate` instead of `/api/chat`. That endpoint carries one prompt with its attachments, a system prompt and the `thinking` flag, and returns the trace separately as `/api/chat` does. It has no place for tools, tool results or message history: passing any of them together with `use_generate=True` raises `NonRetryableError` rather than dropping them silently. It is also the only way to send the completion-only fields below. |
 | `disable_safety` | `google` | `False` | Turns off Gemini's safety filters. |
 | `upload_poll_timeout` | `google` | `15` | Seconds to wait for an uploaded file to reach the `ACTIVE` state before giving up. |
@@ -242,5 +245,6 @@ Resolution order, highest first:
 2. `config.json` inside the library directory (git-ignored).
 3. The built-in `ProviderConfig` defaults listed above.
 
-[`config.json.example`](../config.json.example) documents the shape and mirrors the
-built-in defaults.
+[`config.json.example`](../config.json.example) documents the shape with example values;
+they are not the built-in defaults, which are the ones listed above. An explicit `url` in
+it is not neutral either: it disables the missing-key check described at the top.

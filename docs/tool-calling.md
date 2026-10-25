@@ -113,6 +113,16 @@ follow_up = call_ai(
 )
 ```
 
+Where this works today:
+
+- the OpenAI-compatible providers forward the entry's `tool_call_id`, which their API
+  requires to link the result to the call;
+- `ollama` forwards the entry without an id, which `/api/chat` does not use;
+- `anthropic` and `google` do **not** support a third turn yet: a `role: "tool"` history
+  entry is passed on as it is, and neither API has that role (Anthropic wants a `user`
+  message with `tool_result` blocks, Google a `function_response` part). Use the two-turn
+  exchange above on those two.
+
 `content`, `files` and `tool_calls` on the same history entry are all preserved together on
 every provider: a message that carries an attachment alongside its `tool_calls` does not
 lose the attachment (or the text) for having both. See
@@ -121,8 +131,9 @@ the file side.
 
 ## Provider compatibility
 
-All providers support tool calling. Whether a specific model will actually use
-tool calling depends on its training, not the provider.
+All providers support tool calling, except Ollama with `use_generate=True`, whose
+`/api/generate` endpoint has no place for tools and refuses them. Whether a specific model
+will actually use tool calling depends on its training, not the provider.
 
 | Provider | Tool Calling | Notes |
 |---|---|---|
