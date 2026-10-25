@@ -190,7 +190,9 @@ class BaseProvider(ABC):
 
         Call-level wins for the same key: it is the more specific signal, and
         docs/configuration.md documents it as the escape hatch that overrides
-        anything registered through ``configure_provider()``.
+        anything registered through ``configure_provider()``. A ``None`` value
+        means "not set here" on either side and is skipped, so it never
+        overrides a registered value nor reaches the wire.
 
         Args:
             request: The request whose ``extra_options`` take precedence.
@@ -199,10 +201,8 @@ class BaseProvider(ABC):
             The merged options, safe to mutate.
         """
         opts: dict[str, Any] = {}
-        if self.config.extra_options:
-            opts.update(self.config.extra_options)
-        if request.extra_options:
-            opts.update(request.extra_options)
+        for layer in (self.config.extra_options, request.extra_options):
+            opts.update({k: v for k, v in (layer or {}).items() if v is not None})
         return opts
 
     @staticmethod

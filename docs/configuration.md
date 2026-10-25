@@ -112,7 +112,13 @@ Calls are **merge-based**: only the fields you pass are updated, and previously 
 values for other fields survive. Each call invalidates the cached provider instance for
 that name, so the next call builds a fresh one with the new settings.
 
+`None` resets a field to the provider's default: `context_size=None` removes the
+registered value, so nothing is sent and the server decides; `timeout=None` restores
+`300`; `url=None` restores the provider's own endpoint. A `null` in `config.json` means the
+same, "not set".
+
 Per-call `extra_options` in `call_ai()` always take precedence over values registered here.
+A `None` there is "not set for this call", so the registered value stays in charge.
 
 ### Known top-level fields
 

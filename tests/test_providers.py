@@ -2121,6 +2121,98 @@ class TestFilePathWithToolResultsIsFlagged(ProviderRegistryIsolation):
             self._call()
 
 
+class TestNoneResetsToTheDefault(ProviderRegistryIsolation):
+    """None is "not set" at every layer, never a value to register or send.
+
+    Reported by a consumer: configure_provider("ollama", context_size=None)
+    stored the None, which reached Ollama as "num_ctx": null, so a context size
+    once registered could not be taken back without restarting the process.
+    timeout=None was worse, a None deadline that made urllib wait forever.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        from unified_ai_client import registry as _registry
+
+        self._registry = _registry
+        self._saved_path = _registry._effective_config_path
+        self._tmp = tempfile.mkdtemp()
+        _registry._effective_config_path = os.path.join(self._tmp, "config.json")
+
+    def tearDown(self) -> None:
+        import shutil
+
+        self._registry._effective_config_path = self._saved_path
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        super().tearDown()
+
+    def _ollama_payload(self, **request_kwargs) -> dict:
+        from unified_ai_client import get_provider
+        from unified_ai_client.models import AiRequest
+
+        provider = get_provider("ollama")
+        captured: dict = {}
+
+        def fake_post(endpoint, payload, timeout):
+            captured.update(payload)
+            return {"message": {"content": "ok"}, "eval_count": 1}
+
+        with patch.object(provider, "_post", side_effect=fake_post):
+            provider.call(AiRequest(
+                provider="ollama", model="m", prompt="hi", timeout=10, **request_kwargs
+            ))
+        return captured
+
+    def test_context_size_none_stops_sending_num_ctx(self) -> None:
+        from unified_ai_client import configure_provider
+
+        configure_provider("ollama", context_size=8192)
+        self.assertEqual(self._ollama_payload()["options"]["num_ctx"], 8192)
+        configure_provider("ollama", context_size=None)
+        self.assertNotIn("num_ctx", self._ollama_payload()["options"])
+
+    def test_keep_alive_none_removes_the_registered_value(self) -> None:
+        from unified_ai_client import configure_provider, get_provider
+
+        configure_provider("ollama", keep_alive="30m")
+        configure_provider("ollama", keep_alive=None)
+        self.assertNotIn("keep_alive", get_provider("ollama").config.extra_options)
+        self.assertNotIn("keep_alive", self._ollama_payload())
+
+    def test_timeout_none_restores_the_default(self) -> None:
+        from unified_ai_client import configure_provider, get_provider
+        from unified_ai_client.models import DEFAULT_TIMEOUT
+
+        configure_provider("ollama", timeout=10)
+        configure_provider("ollama", timeout=None)
+        self.assertEqual(get_provider("ollama").config.timeout, DEFAULT_TIMEOUT)
+
+    def test_url_none_restores_the_providers_own_url(self) -> None:
+        from unified_ai_client import configure_provider, get_provider
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        configure_provider("ollama", url="http://box:11434")
+        configure_provider("ollama", url=None)
+        self.assertEqual(get_provider("ollama").base_url, OllamaProvider.DEFAULT_URL)
+
+    def test_a_call_time_none_leaves_the_configured_value(self) -> None:
+        from unified_ai_client import configure_provider
+
+        configure_provider("ollama", context_size=8192)
+        payload = self._ollama_payload(extra_options={"context_size": None})
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+
+    def test_a_null_in_config_json_is_not_set(self) -> None:
+        from unified_ai_client import get_provider
+        from unified_ai_client.models import DEFAULT_TIMEOUT
+
+        with open(self._registry._effective_config_path, "w", encoding="utf-8") as fh:
+            json.dump({"ollama": {"timeout": None, "context_size": None}}, fh)
+        provider = get_provider("ollama")
+        self.assertEqual(provider.config.timeout, DEFAULT_TIMEOUT)
+        self.assertNotIn("context_size", provider.config.extra_options)
+
+
 class TestConfigureProviderMergesTheFile(ProviderRegistryIsolation):
     """configure_provider() must add to config.json, not replace it."""
 

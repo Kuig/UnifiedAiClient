@@ -52,7 +52,9 @@ _MESSAGE_FIELDS: tuple[str, ...] = (
 def _fold_options(opts: dict[str, Any], options: dict[str, Any]) -> None:
     """Fold merged options into an Ollama model ``options`` dict, in place.
 
-    Four outcomes, and which one a key gets is the whole of the rule:
+    A ``None`` value is "not set" and skipped, so a call-time ``None`` leaves
+    the configured value in place. Otherwise four outcomes, and which one a key
+    gets is the whole of the rule:
 
     - a name Ollama spells differently is translated (``context_size`` becomes
       ``num_ctx``);
@@ -74,6 +76,8 @@ def _fold_options(opts: dict[str, Any], options: dict[str, Any]) -> None:
         options: The Ollama ``options`` dict to update in place.
     """
     for k, v in opts.items():
+        if v is None:
+            continue
         if k in _TRANSLATED_OPTIONS:
             options[_TRANSLATED_OPTIONS[k]] = v
         elif k in _MODEL_PARAM_OPTIONS:

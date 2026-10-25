@@ -111,6 +111,11 @@ def configure_provider(name: str, **kwargs: Any) -> None:
     ``configure_provider("ollama", context_size=8000)`` results in both
     ``url`` and ``context_size`` being active simultaneously.
 
+    ``None`` resets a field to the provider's default: ``context_size=None``
+    removes the registered value, so nothing is sent and the server decides;
+    ``timeout=None`` restores ``DEFAULT_TIMEOUT``; ``url=None`` restores the
+    provider's ``DEFAULT_URL``. It never travels as a value.
+
     The first call for a given provider merges on top of that provider's
     section in the library's ``config.json``, so registering one option does
     not discard the rest of the file. The precedence is per field:
@@ -167,7 +172,10 @@ def configure_provider(name: str, **kwargs: Any) -> None:
         merged_known.update(new_known)
         merged_extra = dict(existing.extra_options or {})
         merged_extra.update(new_extra)
-        config = ProviderConfig(**merged_known, extra_options=merged_extra)
+        config = ProviderConfig(
+            **{k: v for k, v in merged_known.items() if v is not None},
+            extra_options={k: v for k, v in merged_extra.items() if v is not None},
+        )
         _PROVIDER_CONFIGS[name] = config
 
     _log.info(

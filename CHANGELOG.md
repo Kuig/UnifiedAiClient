@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `None` resets a provider option to its default instead of being registered.
+  `configure_provider("ollama", context_size=None)` used to store the `None`, which reached
+  Ollama as `"num_ctx": null`, so a registered context size could not be taken back;
+  `timeout=None` left a `None` deadline that made the request wait forever. The same
+  holds for a `null` in `config.json`, and a `None` in a call's `extra_options` no longer
+  overrides the registered value.
+
 ## [0.7.0] - 2026-10-25
 
 ### Added

@@ -148,13 +148,14 @@ def load_config(
                 )
                 return dataclass_type()
 
+        # A null is "not set", as everywhere else: the field keeps its default.
         fields = dataclass_type.__dataclass_fields__
-        filtered_data = {k: v for k, v in data.items() if k in fields}
+        filtered_data = {k: v for k, v in data.items() if k in fields and v is not None}
         if "extra_options" in fields:
             extra = {k: v for k, v in data.items() if k not in fields}
             if "extra_options" in data and isinstance(data["extra_options"], dict):
                 extra.update(data["extra_options"])
-            filtered_data["extra_options"] = extra
+            filtered_data["extra_options"] = {k: v for k, v in extra.items() if v is not None}
         return dataclass_type(**filtered_data)
     except Exception as exc:
         _log.warning(

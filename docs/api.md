@@ -261,7 +261,8 @@ unload_model("ollama", "gemma4:12b")
 ### `configure_provider`
 
 Registers or updates provider configuration programmatically. Calls are **merge-based**:
-only the fields passed are updated, and previously registered values survive. Each call
+only the fields passed are updated, and previously registered values survive. `None`
+resets a field to the provider's default rather than registering a value. Each call
 invalidates the cached provider instance for that name.
 
 Thread-safe. Concurrent calls for different provider names are fully safe; calling it for
