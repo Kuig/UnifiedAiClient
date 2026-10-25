@@ -438,6 +438,30 @@ class TestSecrets(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir)
 
+    def test_load_secrets_names_keys_no_provider_reads(self) -> None:
+        """A misspelt credential is reported, by name only, and still kept."""
+        import shutil
+        from unified_ai_client.config import load_secrets
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmp_dir, "secrets.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "_comment": "ignored",
+                    "groq_api_key": "fine",
+                    "gorq_api_key": "secret-value",
+                }, f)
+            with patch.dict(os.environ, {}, clear=True), \
+                    self.assertLogs("unified_ai_client.config", "WARNING") as logs:
+                result = load_secrets(tmp_dir)
+            self.assertEqual(result["gorq_api_key"], "secret-value")
+            output = "\n".join(logs.output)
+            self.assertIn("gorq_api_key", output)
+            self.assertNotIn("_comment", output)
+            self.assertNotIn("groq_api_key", output.replace("gorq_api_key", ""))
+            self.assertNotIn("secret-value", output)
+        finally:
+            shutil.rmtree(tmp_dir)
+
     def test_load_secrets_no_sources(self) -> None:
         """load_secrets returns an empty dict with no file and no env vars."""
         from unified_ai_client.config import load_secrets
@@ -477,6 +501,22 @@ class TestConfigLoading(unittest.TestCase):
             self.assertIs(cfg.extra_options.get("disable_safety"), True)
             self.assertEqual(cfg.extra_options.get("upload_poll_timeout"), 20)
             self.assertEqual(cfg.extra_options.get("custom_app_setting"), "hello_world")
+        finally:
+            os.unlink(tmp_config_path)
+
+    def test_a_section_that_is_not_an_object_is_reported(self) -> None:
+        """Falling back to the defaults is tolerated, but not silently."""
+        from unified_ai_client.config import load_config
+        from unified_ai_client.models import ProviderConfig
+
+        tmp_config_fd, tmp_config_path = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(tmp_config_fd, "w", encoding="utf-8") as f:
+                json.dump({"ollama": "http://localhost:11434"}, f)
+            with self.assertLogs("unified_ai_client.config", "WARNING") as logs:
+                cfg = load_config(tmp_config_path, ProviderConfig, section="ollama")
+            self.assertEqual(cfg, ProviderConfig())
+            self.assertIn("ollama", "\n".join(logs.output))
         finally:
             os.unlink(tmp_config_path)
 

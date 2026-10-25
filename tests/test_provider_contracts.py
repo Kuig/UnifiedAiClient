@@ -2775,6 +2775,48 @@ class TestLibraryOptionNamespace(ProviderRegistryIsolation):
                 payload = _capture_http_payload(name, config)
                 self.assertEqual(payload["visual_token_budget"], 1120)
 
+    def test_a_dropped_key_is_logged_rather_than_lost_silently(self) -> None:
+        config = ProviderConfig(extra_options={"context_size": 0, "disable_safety": True})
+        for name in ("openai", "anthropic", "ollama"):
+            with self.subTest(provider=name), \
+                    self.assertLogs("unified_ai_client.providers.base", "DEBUG") as logs:
+                _capture_http_payload(name, config)
+            output = "\n".join(logs.output)
+            self.assertIn("disable_safety", output)
+            if name != "ollama":
+                self.assertIn("context_size", output)
+
+    def test_an_ollama_field_of_another_endpoint_is_logged(self) -> None:
+        with self.assertLogs("unified_ai_client.providers.base", "DEBUG") as logs:
+            payload = _capture_http_payload(
+                "ollama", ProviderConfig(), extra_options={"dimensions": 64}
+            )
+        self.assertNotIn("dimensions", payload)
+        self.assertIn("dimensions", "\n".join(logs.output))
+
+    def test_google_warns_about_a_key_it_cannot_forward(self) -> None:
+        """Google has no passthrough, so a provider-specific key does nothing."""
+        from unified_ai_client.providers.google import GoogleProvider
+
+        provider = GoogleProvider(
+            ProviderConfig(extra_options={"visual_token_budget": 1120, "seed": 7}),
+            api_key="fake-key",
+        )
+        fake_response = MagicMock()
+        fake_response.candidates = []
+        fake_response.prompt_feedback = None
+        fake_client = MagicMock()
+        fake_client.models.generate_content.return_value = fake_response
+        request = AiRequest(provider="google", model="gemini-2.5-flash", prompt="hi", timeout=30)
+
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client), \
+                self.assertLogs("unified_ai_client.providers.base", "WARNING") as logs:
+            provider.call(request)
+
+        output = "\n".join(logs.output)
+        self.assertIn("visual_token_budget", output)
+        self.assertNotIn("seed", output)
+
     def test_the_call_time_escape_hatch_still_wins(self) -> None:
         """0.5.3's precedence must survive the consolidation."""
         options = _ollama_options(

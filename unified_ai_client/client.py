@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 from unified_ai_client.models import (
+    DEFAULT_TIMEOUT,
     AiRequest,
     AiResponse,
     EmbeddingRequest,
@@ -195,7 +196,7 @@ def _resolve_timeout(prov: Any, timeout: int | None) -> int:
     """
     if timeout is not None:
         return timeout
-    return getattr(getattr(prov, "config", None), "timeout", 300)
+    return getattr(getattr(prov, "config", None), "timeout", DEFAULT_TIMEOUT)
 
 
 def _invoke(

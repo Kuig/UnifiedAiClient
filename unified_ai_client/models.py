@@ -2,6 +2,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+DEFAULT_TIMEOUT = 300
+"""Seconds a request may take when neither the call nor the configuration sets one."""
+
 
 @dataclass
 class ToolDefinition:
@@ -269,6 +272,6 @@ class ProviderConfig:
         extra_options: Dictionary of provider-specific configuration options.
     """
     url: str | None = None
-    timeout: int = 300
+    timeout: int = DEFAULT_TIMEOUT
     sleep_time: int = 0
     extra_options: dict = field(default_factory=dict)

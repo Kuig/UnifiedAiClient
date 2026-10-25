@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- An option key an adapter drops is now named in a log record instead of vanishing: `DEBUG`
+  for a library key another provider owns or an Ollama field of another endpoint, `WARNING`
+  for a key `google` cannot forward to `GenerateContentConfig`.
+- `load_secrets()` logs a `WARNING` naming any `secrets.json` key no provider reads (values
+  are never logged; keys starting with `_` are comments). `load_config()` does the same when
+  the file or the requested section is not a JSON object.
+
 ## [0.6.0] - 2026-10-25
 
 ### Added

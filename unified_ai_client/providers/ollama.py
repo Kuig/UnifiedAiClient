@@ -390,6 +390,13 @@ class OllamaProvider(BaseProvider):
                     "only /api/generate accepts it. Set use_generate=True."
                 )
 
+        endpoint_fields = _GENERATE_FIELDS if use_generate else _CHAT_FIELDS
+        self._report_dropped_options(
+            self._foreign_option_keys(opts)
+            | {k for k in opts if k in _TOP_LEVEL_FIELDS - endpoint_fields},
+            "owned by another provider, or not a field of this endpoint",
+        )
+
         # 4. Current User Message — only add when NOT in a tool result continuation.
         # When tool_results are provided, the consumer has already placed the user
         # message in `messages` (history) and the prompt should not be re-appended.
@@ -733,6 +740,10 @@ class OllamaProvider(BaseProvider):
         if keep_alive is not None:
             payload["keep_alive"] = keep_alive
         payload.update(_request_fields(opts, _EMBED_FIELDS))
+        self._report_dropped_options(
+            set(opts) - _EMBED_FIELDS - {"keep_alive"},
+            "/api/embed takes no model options",
+        )
         if request.dimensions is not None:
             payload["dimensions"] = request.dimensions
 

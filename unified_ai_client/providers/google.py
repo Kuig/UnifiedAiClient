@@ -46,6 +46,25 @@ holding a lock across tens of seconds of network I/O.
 """
 
 
+_DEFAULT_UPLOAD_POLL_TIMEOUT = 15
+"""Seconds to wait for an upload to turn ACTIVE when ``upload_poll_timeout`` is unset."""
+
+_FORWARDED_CONFIG_FIELDS: tuple[str, ...] = (
+    "response_schema", "stop_sequences", "presence_penalty", "frequency_penalty", "seed",
+)
+"""``GenerateContentConfig`` fields taken from ``extra_options`` as they are.
+
+The config is a typed model that rejects unknown fields, so this adapter forwards a
+named list instead of everything outside the library namespace.
+"""
+
+_GENERATION_ONLY_KEYS: frozenset[str] = frozenset(
+    {"disable_safety", "temperature", "max_tokens", "max_output_tokens", "top_k", "top_p"}
+    | set(_FORWARDED_CONFIG_FIELDS)
+)
+"""Keys ``call()`` reads that an embedding request has no use for."""
+
+
 class GoogleProvider(BaseProvider):
     """Google AI (Gemini) provider adapter utilizing the google.genai SDK.
 
@@ -111,7 +130,7 @@ class GoogleProvider(BaseProvider):
                     self._client = genai.Client(api_key=self.api_key)
         return self._client
 
-    def _upload_file(self, file_path: str, upload_poll_timeout: int = 15) -> Any:
+    def _upload_file(self, file_path: str, upload_poll_timeout: int = _DEFAULT_UPLOAD_POLL_TIMEOUT) -> Any:
         """Upload a file to Google Cloud or return the cached reference.
 
         If the same local file path has already been uploaded in this
@@ -287,7 +306,7 @@ class GoogleProvider(BaseProvider):
     def _build_parts_for_files(
         self,
         file_paths: list[str],
-        upload_poll_timeout: int = 15,
+        upload_poll_timeout: int = _DEFAULT_UPLOAD_POLL_TIMEOUT,
         supported: frozenset[str] | None = None,
     ) -> list[Any]:
         """Upload files and return a list of Part objects.
@@ -330,7 +349,7 @@ class GoogleProvider(BaseProvider):
 
         opts = self._merge_options(request)
 
-        upload_poll_timeout = opts.get("upload_poll_timeout", 15)
+        upload_poll_timeout = opts.get("upload_poll_timeout", _DEFAULT_UPLOAD_POLL_TIMEOUT)
 
         # --- Build contents list ---
         contents: list[Any] = []
@@ -426,10 +445,20 @@ class GoogleProvider(BaseProvider):
         if max_output_tokens is not None:
             config_kwargs["max_output_tokens"] = max_output_tokens
 
-        # Pass other recognized fields if present in opts
-        for field_name in ("response_schema", "stop_sequences", "presence_penalty", "frequency_penalty", "seed"):
+        for field_name in _FORWARDED_CONFIG_FIELDS:
             if field_name in opts:
                 config_kwargs[field_name] = opts[field_name]
+        self._report_dropped_options(
+            self._foreign_option_keys(opts), "owned by another provider"
+        )
+        self._report_dropped_options(
+            {
+                k for k in opts
+                if k not in self._LIBRARY_OPTION_KEYS and k not in _FORWARDED_CONFIG_FIELDS
+            },
+            "GenerateContentConfig has no such field",
+            logging.WARNING,
+        )
 
         # Tool definitions
         if request.tools:
@@ -553,7 +582,7 @@ class GoogleProvider(BaseProvider):
             Always True: this provider always has something to warm up.
         """
         opts = self.config.extra_options or {}
-        upload_poll_timeout = opts.get("upload_poll_timeout", 15)
+        upload_poll_timeout = opts.get("upload_poll_timeout", _DEFAULT_UPLOAD_POLL_TIMEOUT)
 
         client = self._get_client()
         client.models.get(model=model)
@@ -635,6 +664,10 @@ class GoogleProvider(BaseProvider):
         dimensions = self._prefer_request(request.dimensions, opts, "output_dimensionality")
         if dimensions is not None:
             config_kwargs["output_dimensionality"] = dimensions
+        self._report_dropped_options(
+            {k for k in opts if k not in self._CONSUMED_OPTION_KEYS or k in _GENERATION_ONLY_KEYS},
+            "not read by embed_content",
+        )
 
         contents: Any
         if request.file_path:
@@ -643,7 +676,7 @@ class GoogleProvider(BaseProvider):
                 parts.append(types.Part.from_text(text=request.inputs[0]))
             parts.extend(self._build_parts_for_files(
                 request.file_path,
-                opts.get("upload_poll_timeout", 15),
+                opts.get("upload_poll_timeout", _DEFAULT_UPLOAD_POLL_TIMEOUT),
                 self.SUPPORTED_EMBEDDING_FILE_TYPES,
             ))
             contents = [types.Content(role="user", parts=parts)]

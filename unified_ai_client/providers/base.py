@@ -1,5 +1,7 @@
 from __future__ import annotations
+import logging
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from unified_ai_client.exceptions import (
@@ -16,6 +18,8 @@ if TYPE_CHECKING:
         EmbeddingRequest,
         ModelInfo,
     )
+
+_log = logging.getLogger("unified_ai_client.providers.base")
 
 
 class BaseProvider(ABC):
@@ -233,7 +237,43 @@ class BaseProvider(ABC):
         Returns:
             A new dict holding only the keys outside ``_LIBRARY_OPTION_KEYS``.
         """
+        self._report_dropped_options(
+            self._foreign_option_keys(opts), "owned by another provider"
+        )
         return {k: v for k, v in opts.items() if k not in self._LIBRARY_OPTION_KEYS}
+
+    def _foreign_option_keys(self, opts: dict[str, Any]) -> set[str]:
+        """The library-owned keys in ``opts`` that this adapter does not read.
+
+        Args:
+            opts: Merged options from ``_merge_options()``.
+
+        Returns:
+            The keys this adapter will drop because another adapter owns them.
+        """
+        return {
+            k for k in opts
+            if k in self._LIBRARY_OPTION_KEYS and k not in self._CONSUMED_OPTION_KEYS
+        }
+
+    def _report_dropped_options(
+        self, keys: Iterable[str], reason: str, level: int = logging.DEBUG
+    ) -> None:
+        """Log the option keys a request is about to lose, if any.
+
+        Args:
+            keys: The keys that will not reach the endpoint.
+            reason: Why they are dropped, appended to the message.
+            level: ``DEBUG`` for a key that is valid elsewhere, as one config
+                shared between providers produces on every call; higher for a
+                key nothing in this request can carry.
+        """
+        dropped = sorted(keys)
+        if dropped:
+            _log.log(
+                level, "%s: not sending %s (%s)",
+                type(self).__name__, ", ".join(dropped), reason,
+            )
 
     def _resolve_timeout(self, timeout: int | None) -> int:
         """Resolve an optional timeout against this provider's configuration.

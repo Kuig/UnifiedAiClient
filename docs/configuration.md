@@ -67,6 +67,10 @@ export GOOGLE_API_KEY=your-google-api-key-here
 
 See also [`.env.example`](../.env.example) for the environment-variable form.
 
+A key in `secrets.json` that no provider reads, such as a misspelt `gorq_api_key`, is kept
+but named (never its value) in a `WARNING` log record. Keys starting with `_` are comments
+and are not reported.
+
 ### Missing credentials, and the proxy escape hatch
 
 A cloud provider called without its key raises `ValueError` naming the key it wants, rather
@@ -185,18 +189,21 @@ These are merged last, so `{"think": "high"}` overrides the `True` that `thinkin
 produces, and a JSON schema in `format` replaces the plain `"json"` of `format_json=True`.
 A completion-only field (`raw`, `suffix`, `template`, `context`) on a chat request raises
 `NonRetryableError`, since dropping a `suffix` would change the answer rather than degrade
-it. Embedding fields on a chat request, and the reverse, are simply not sent.
+it. Embedding fields on a chat request, and the reverse, are not sent, and are named in a
+`DEBUG` log record.
 
 The options above are the reverse case: the library owns their meaning, and the
 `Providers` column says which adapter reads each one. An adapter that does not own an
 option drops it rather than forwarding it, because a name this library defined is not a
 field any endpoint has. Setting `context_size` on `groq`, for instance, changes nothing
-instead of putting an unknown field in the request body.
+instead of putting an unknown field in the request body. Every dropped key is named in a
+`DEBUG` log record, so a configuration shared between providers stays quiet by default.
 
 `google` is the one exception to the passthrough. Its SDK takes a typed configuration
 object that rejects unrecognised fields, so instead of forwarding anything it accepts a
 named list: `response_schema`, `stop_sequences`, `presence_penalty`, `frequency_penalty`
-and `seed`. An option outside that list and outside the table above does not reach Gemini.
+and `seed`. An option outside that list and outside the table above does not reach Gemini,
+and is named in a `WARNING` log record on every call.
 
 ## Sharing the library between projects
 
@@ -247,4 +254,6 @@ Resolution order, highest first:
 
 [`config.json.example`](../config.json.example) documents the shape with example values;
 they are not the built-in defaults, which are the ones listed above. An explicit `url` in
-it is not neutral either: it disables the missing-key check described at the top.
+it is not neutral either: it disables the missing-key check described at the top. A file
+or a section that is not a JSON object falls back to the defaults with a `WARNING` log
+record, like a file that does not parse.

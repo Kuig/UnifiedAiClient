@@ -23,6 +23,25 @@ _ENV_VAR_MAP: dict[str, str] = {
 }
 
 
+def _warn_unknown_secret_keys(data: dict[Any, Any], json_path: str) -> None:
+    """Name the keys of a secrets file that no provider reads.
+
+    They are kept, so a consumer reading its own entries out of the same file
+    still finds them, but a misspelt credential would otherwise fail later as
+    a missing key with nothing pointing at the file. Keys starting with ``_``
+    are comments, as in ``secrets.json.example``. Only names are logged, never
+    values.
+    """
+    known = set(_ENV_VAR_MAP.values())
+    unknown = sorted(
+        str(k) for k in data if str(k) not in known and not str(k).startswith("_")
+    )
+    if unknown:
+        _log.warning(
+            "%s holds key(s) no provider reads: %s", json_path, ", ".join(unknown)
+        )
+
+
 def load_secrets(project_root: str, filename: str = "secrets.json") -> dict[str, str]:
     """Load API credentials from environment variables and/or a secrets.json file.
 
@@ -75,6 +94,9 @@ def load_secrets(project_root: str, filename: str = "secrets.json") -> dict[str,
             if isinstance(data, dict):
                 for k, v in data.items():
                     merged[str(k)] = str(v)
+                _warn_unknown_secret_keys(data, json_path)
+            else:
+                _log.warning("Ignoring %s: expected a JSON object", json_path)
         except Exception as exc:
             _log.warning("Ignoring malformed %s: %s", json_path, exc)
 
@@ -114,12 +136,19 @@ def load_config(
             data = json.load(f)
 
         if not isinstance(data, dict):
+            _log.warning(
+                "Ignoring %s: expected a JSON object, falling back to %s defaults",
+                config_path, dataclass_type.__name__,
+            )
             return dataclass_type()
 
-        # If a section is specified, extract it first
         if section is not None:
             data = data.get(section, {})
             if not isinstance(data, dict):
+                _log.warning(
+                    "Ignoring section '%s' of %s: expected a JSON object, falling "
+                    "back to %s defaults", section, config_path, dataclass_type.__name__,
+                )
                 return dataclass_type()
 
         # Extract only the keys that match the dataclass fields
