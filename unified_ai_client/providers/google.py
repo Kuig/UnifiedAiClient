@@ -11,6 +11,7 @@ from typing import Any
 from google import genai
 from google.genai import types
 
+from unified_ai_client.exceptions import NonRetryableError
 from unified_ai_client.file_utils import normalize_file_paths
 from unified_ai_client.models import (
     AiRequest,
@@ -368,12 +369,18 @@ class GoogleProvider(BaseProvider):
 
         Args:
             msg: Source message dict. May contain ``files`` and, on an assistant
-                message, ``tool_calls``.
+                message, ``tool_calls``. An assistant entry carrying this
+                provider's ``provider_state`` is replayed from it, thought
+                signatures included.
             upload_poll_timeout: Seconds to wait for each upload to turn ACTIVE.
 
         Returns:
             The ``types.Content`` for this turn.
         """
+        native = self._native_message(msg)
+        if isinstance(native, dict):
+            return types.Content.model_validate(native)
+
         role = msg.get("role", "user")
         if role == "assistant":
             role = "model"
@@ -385,11 +392,8 @@ class GoogleProvider(BaseProvider):
         # Google links a function_response to the function_call Part before it.
         if role == "model" and msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
-                fn = tc.get("function", tc)
-                parts.append(types.Part.from_function_call(
-                    name=fn.get("name", ""),
-                    args=fn.get("arguments", {}),
-                ))
+                _, name, arguments = self._tool_call_fields(tc)
+                parts.append(types.Part.from_function_call(name=name, args=arguments))
         content_text = msg.get("content", "")
         if content_text or not parts:
             parts.append(types.Part.from_text(text=content_text))
@@ -398,16 +402,39 @@ class GoogleProvider(BaseProvider):
     def _build_contents(self, request: AiRequest, upload_poll_timeout: int) -> list[Any]:
         """History, the current turn and any tool results, in order.
 
-        A tool-result continuation has its user turn in the history already, so
-        the prompt is not appended a second time. On a fresh turn an empty text
-        Part is skipped when a file already fills it: ``prompt=""`` with only an
-        image is a legitimate "describe this" call.
-        """
-        contents: list[Any] = [
-            self._build_message(msg, upload_poll_timeout) for msg in request.messages or []
-        ]
+        The current turn follows ``_wants_current_turn()``; an empty text Part
+        is skipped when a file already fills it, since ``prompt=""`` with only
+        an image is a legitimate "describe this" call. A ``role: "tool"`` entry
+        becomes a ``function_response`` Part, named after the entry or, failing
+        that, after the call its ``tool_call_id`` points to. Consecutive
+        responses share one user turn, as parallel calls require.
 
-        if not request.tool_results:
+        Raises:
+            NonRetryableError: If a tool entry's function name cannot be found,
+                which Gemini needs to route the response.
+        """
+        contents: list[Any] = []
+        call_names: dict[str, str] = {}
+        for msg in request.messages or []:
+            for tc in msg.get("tool_calls") or []:
+                call_id, name, _ = self._tool_call_fields(tc)
+                if call_id:
+                    call_names[call_id] = name
+            if msg.get("role") == "tool":
+                name = msg.get("name") or call_names.get(msg.get("tool_call_id") or "")
+                if not name:
+                    raise NonRetryableError(
+                        "A history entry with role 'tool' needs the 'name' of the "
+                        "function it answers, or a 'tool_call_id' matching an "
+                        "earlier tool call; ToolResult.to_message() includes both."
+                    )
+                self._append_function_responses(
+                    contents, [self._function_response_part(name, msg.get("content", ""))]
+                )
+                continue
+            contents.append(self._build_message(msg, upload_poll_timeout))
+
+        if self._wants_current_turn(request):
             current_parts: list[Any] = []
             file_paths = normalize_file_paths(request.file_path)
             if file_paths:
@@ -415,14 +442,36 @@ class GoogleProvider(BaseProvider):
             if request.prompt or not current_parts:
                 current_parts.append(types.Part.from_text(text=request.prompt))
             contents.append(types.Content(role="user", parts=current_parts))
-        else:
-            contents.append(types.Content(role="user", parts=[
-                types.Part.from_function_response(
-                    name=tr.name, response={"result": tr.content}
-                )
+        if request.tool_results:
+            self._append_function_responses(contents, [
+                self._function_response_part(tr.name, tr.content)
                 for tr in request.tool_results
-            ]))
+            ])
         return contents
+
+    @staticmethod
+    def _function_response_part(name: str, content: str) -> Any:
+        """One tool result as a ``function_response`` Part.
+
+        Matched to its call by name, not by id: when Gemini returns a call
+        without an id the ``ToolCall`` carries a generated one, and sending that
+        back would not match anything.
+        """
+        return types.Part.from_function_response(name=name, response={"result": content})
+
+    @staticmethod
+    def _append_function_responses(contents: list[Any], parts: list[Any]) -> None:
+        """Add response Parts to the previous turn if it holds only responses."""
+        last = contents[-1] if contents else None
+        if (
+            last is not None
+            and last.role == "user"
+            and last.parts
+            and all(getattr(p, "function_response", None) is not None for p in last.parts)
+        ):
+            last.parts.extend(parts)
+        else:
+            contents.append(types.Content(role="user", parts=parts))
 
     def _build_config(
         self, request: AiRequest, opts: dict[str, Any]
@@ -507,8 +556,12 @@ class GoogleProvider(BaseProvider):
         response_text = ""
         reasoning_text = ""
         tool_calls: list[ToolCall] = []
+        native: dict[str, Any] | None = None
         try:
-            for part in response.candidates[0].content.parts:
+            candidate_content = response.candidates[0].content
+            dumped = candidate_content.model_dump(mode="json", exclude_none=True)
+            native = dumped if isinstance(dumped, dict) else None
+            for part in candidate_content.parts:
                 if getattr(part, "thought", False):
                     reasoning_text += part.text or ""
                 elif getattr(part, "function_call", None) is not None:
@@ -543,6 +596,7 @@ class GoogleProvider(BaseProvider):
             reasoning_text=reasoning_text,
             reasoning_is_summary=bool(reasoning_text),
             tool_calls=tool_calls,
+            message=self._assistant_message(response_text, tool_calls, native),
         )
 
     def warm_up(

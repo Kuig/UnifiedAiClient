@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
         AiResponse,
         EmbeddingRequest,
         ModelInfo,
+        ToolCall,
     )
 
 _log = logging.getLogger("unified_ai_client.providers.base")
@@ -306,6 +308,81 @@ class BaseProvider(ABC):
         if keep_alive is not None:
             return keep_alive
         return (self.config.extra_options or {}).get("keep_alive")
+
+    @staticmethod
+    def _wants_current_turn(request: AiRequest) -> bool:
+        """Whether this request appends a user turn after its history.
+
+        Not with ``tool_results``: the consumer has already placed that user
+        turn in ``messages``. Not either when there is nothing to say (no
+        prompt, no file) and the history carries the conversation on its own,
+        as it does when it ends with ``role: "tool"`` entries: an empty user
+        turn is a 400 on some providers and noise on the rest. A request with
+        no history always gets its turn, empty or not.
+        """
+        if request.tool_results:
+            return False
+        return bool(request.prompt or request.file_path or not request.messages)
+
+    @staticmethod
+    def _tool_call_fields(tc: dict[str, Any]) -> tuple[str | None, str, dict[str, Any]]:
+        """Read one history tool call, flat or nested under ``function``.
+
+        Accepts the canonical ``{"id", "name", "arguments"}`` of
+        ``AiResponse.message`` and the OpenAI-style ``{"id", "function": {...}}``
+        alike. Arguments arriving as a JSON string are decoded.
+
+        Returns:
+            ``(id, name, arguments)``, the id None when the entry has none.
+        """
+        fn = tc.get("function", tc)
+        arguments = fn.get("arguments") or {}
+        if isinstance(arguments, str):
+            arguments = json.loads(arguments) if arguments.strip() else {}
+        return tc.get("id"), fn.get("name", ""), arguments
+
+    def _assistant_message(
+        self, text: str, tool_calls: list[ToolCall], native: Any = None
+    ) -> dict[str, Any]:
+        """Build ``AiResponse.message``, the history entry for this turn.
+
+        Args:
+            text: The answer text.
+            tool_calls: The tool calls the model requested.
+            native: The provider's own message, JSON-serialisable, replayed by
+                ``_native_message()`` on a later call to this same provider.
+                None when there is nothing the canonical fields lose.
+
+        Returns:
+            The canonical assistant entry, with ``provider_state`` when
+            ``native`` is given.
+        """
+        message: dict[str, Any] = {"role": "assistant", "content": text}
+        if tool_calls:
+            message["tool_calls"] = [
+                {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                for tc in tool_calls
+            ]
+        if native is not None:
+            message["provider_state"] = {"provider": self.provider_name, "data": native}
+        return message
+
+    def _native_message(self, msg: dict[str, Any]) -> Any:
+        """The provider's own message stored on a history entry, if it is ours.
+
+        State written by another provider is ignored, so a history built on
+        one provider can be sent to another through the canonical fields.
+
+        Returns:
+            The stored ``data``, or None when the entry carries no state for
+            this provider.
+        """
+        state = msg.get("provider_state")
+        if msg.get("role") != "assistant" or not isinstance(state, dict):
+            return None
+        if state.get("provider") != self.provider_name:
+            return None
+        return state.get("data")
 
     @staticmethod
     def _estimate_reasoning_tokens(

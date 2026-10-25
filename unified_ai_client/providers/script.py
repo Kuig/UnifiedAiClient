@@ -207,6 +207,7 @@ class ScriptProvider(BaseProvider):
             reasoning_tokens=data.get("reasoning_tokens", 0),
             reasoning_text=data.get("reasoning_text", ""),
             tool_calls=tool_calls,
+            message=self._assistant_message(data["text"], tool_calls),
         )
 
     def preload_model(

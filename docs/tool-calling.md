@@ -27,101 +27,59 @@ tools = [
 ]
 ```
 
-## The two-turn exchange
+## The tool loop
+
+Every response carries `message`, the turn the model just produced as a history entry, and
+every `ToolResult` has `to_message()`. Appending both to `messages` is the whole loop, for
+as many rounds as the model needs:
 
 ```python
+from unified_ai_client import call_ai, ToolResult
+
 prompt = "What is the weather in Rome right now? Use the get_weather tool."
+history = [{"role": "user", "content": prompt}]
 
-# Turn 1: model may respond with tool calls
-response = call_ai(
-    provider="ollama",
-    model="gemma4:12b",
-    prompt=prompt,
-    tools=tools,
-    temperature=0.0,
-)
+response = call_ai(provider="ollama", model="gemma4:12b", prompt=prompt, tools=tools)
 
-if response.tool_calls:
-    # Execute the tool (consumer's responsibility)
-    results = []
-    for tc in response.tool_calls:
-        if tc.name == "get_weather":
-            content = f"The weather in {tc.arguments['location']} is 22°C and sunny."
-        else:
-            content = "Tool not found."
-        results.append(ToolResult(call_id=tc.id, name=tc.name, content=content))
+while response.tool_calls:
+    # Running the tools is the consumer's responsibility.
+    results = [
+        ToolResult(call_id=tc.id, name=tc.name, content=f"22°C and sunny in {tc.arguments['location']}.")
+        for tc in response.tool_calls
+    ]
+    history += [response.message, *(r.to_message() for r in results)]
 
-    # Build the conversation history for turn 2.
-    # The assistant's intermediate message (with tool_calls) must be included
-    # so the model can link the tool result back to its own request.
-    #
-    # IMPORTANT: this format is always the same regardless of the provider.
-    # The library converts it internally to each provider's native format:
-    #   - Anthropic  →  tool_use content blocks
-    #   - Google     →  function_call Parts
-    #   - Ollama / OpenAI-compat  →  OpenAI-style tool_calls (passed through)
-    assistant_msg = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [{"function": {"name": tc.name, "arguments": tc.arguments}} for tc in response.tool_calls],
-    }
-
-    # Turn 2: pass full history in messages + tool_results.
-    # When tool_results are provided, the library does NOT re-append the
-    # current prompt as a new user message; the consumer controls the history.
-    final = call_ai(
-        provider="ollama",
-        model="gemma4:12b",
-        prompt=prompt,           # passed for reference but not re-appended
-        messages=[
-            {"role": "user", "content": prompt},
-            assistant_msg,
-        ],
-        tools=tools,
-        tool_results=results,
-        temperature=0.0,
+    # Nothing new to say: the history carries the turn, so prompt stays empty.
+    response = call_ai(
+        provider="ollama", model="gemma4:12b", prompt="", messages=history, tools=tools
     )
-    print(final.text)  # "The weather in Rome is 22°C and sunny."
-else:
-    print(response.text)  # Model answered directly without tools
+
+print(response.text)  # "The weather in Rome is 22°C and sunny."
 ```
 
-## A third turn: continuing after a tool result
+The entries are plain dictionaries, JSON-serialisable, so a history can be stored and
+resumed. Their shape is the same on every provider:
 
-A `tool_results` argument only ever applies to the turn it is passed on. Sending a further
-message after that needs the full history rebuilt in `messages`, including the `role:
-"tool"` entry the previous turn produced, with its `tool_call_id` intact so the model can
-still link the answer to its own request:
+| Entry | Shape |
+|---|---|
+| Assistant turn (`response.message`) | `{"role": "assistant", "content": ..., "tool_calls": [{"id", "name", "arguments"}], "provider_state": {...}}` |
+| Tool result (`ToolResult.to_message()`) | `{"role": "tool", "tool_call_id": ..., "name": ..., "content": ...}` |
 
-```python
-history = [
-    {"role": "user", "content": prompt},
-    assistant_msg,
-    {
-        "role": "tool",
-        "content": results[0].content,
-        "tool_call_id": results[0].call_id,
-    },
-]
+`provider_state` holds the provider's own reply, unmodified. Some providers require parts
+of it back on the next request: Claude's signed thinking blocks (on by default from the 5.5
+models) and Gemini 3's thought signatures, without which a replayed function call is a
+400. The same provider replays the state as it is; any other provider ignores it and
+builds its request from the canonical fields, so one history can move between providers.
+Edit a turn by dropping its `provider_state` along with the change: while the state is
+there, it is what gets sent.
 
-follow_up = call_ai(
-    provider="ollama",
-    model="gemma4:12b",
-    prompt="Should I bring an umbrella?",
-    messages=history,
-    temperature=0.0,
-)
-```
+A new user message after a tool result is an ordinary entry with `prompt` set: the
+library appends the current turn only when there is a prompt or a file to send, or no
+history at all.
 
-Where this works today:
-
-- the OpenAI-compatible providers forward the entry's `tool_call_id`, which their API
-  requires to link the result to the call;
-- `ollama` forwards the entry without an id, which `/api/chat` does not use;
-- `anthropic` and `google` do **not** support a third turn yet: a `role: "tool"` history
-  entry is passed on as it is, and neither API has that role (Anthropic wants a `user`
-  message with `tool_result` blocks, Google a `function_response` part). Use the two-turn
-  exchange above on those two.
+`tool_results` still works for a single follow-up, as before: pass the results through it
+and keep the user turn and `response.message` in `messages`. With `tool_results` present
+the prompt is never appended again.
 
 `content`, `files` and `tool_calls` on the same history entry are all preserved together on
 every provider: a message that carries an attachment alongside its `tool_calls` does not

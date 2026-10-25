@@ -550,6 +550,61 @@ class TestDispatch(ProviderRegistryIsolation):
 # 6. Live tests: Ollama (most likely available locally)
 # ---------------------------------------------------------------------------
 
+_LOOP_PROMPT = (
+    "First call get_weather for Rome. After you have its result, call get_time "
+    "for Rome. Then answer in one short sentence."
+)
+
+
+def _loop_tools() -> list:
+    from unified_ai_client import ToolDefinition
+
+    city = {
+        "type": "object",
+        "properties": {"city": {"type": "string", "description": "The city, e.g. Rome"}},
+        "required": ["city"],
+    }
+    return [
+        ToolDefinition(name="get_weather", description="Current weather in a city.",
+                       parameters=city),
+        ToolDefinition(name="get_time", description="Current local time in a city.",
+                       parameters=city),
+    ]
+
+
+def _run_tool_loop(test: unittest.TestCase, call, max_rounds: int = 4):
+    """Drive a tool loop through AiResponse.message and ToolResult.to_message().
+
+    Args:
+        test: The running test, for skipping.
+        call: ``call(**kwargs) -> AiResponse`` bound to one provider and model.
+        max_rounds: Tool rounds allowed before giving up on a final answer.
+
+    Returns:
+        ``(final_response, rounds)``, where rounds counts the tool round trips.
+    """
+    from unified_ai_client import ToolResult
+
+    tools = _loop_tools()
+    history: list[dict] = [{"role": "user", "content": _LOOP_PROMPT}]
+    response = call(prompt=_LOOP_PROMPT, tools=tools)
+    if not response.tool_calls:
+        test.skipTest("the model answered without calling a tool")
+
+    rounds = 0
+    while response.tool_calls and rounds < max_rounds:
+        rounds += 1
+        results = [
+            ToolResult(call_id=tc.id, name=tc.name,
+                       content="22C and sunny" if tc.name == "get_weather" else "14:00")
+            for tc in response.tool_calls
+        ]
+        history += [response.message, *(r.to_message() for r in results)]
+        json.dumps(history)  # the history a consumer would persist
+        response = call(prompt="", messages=history, tools=tools)
+    return response, rounds
+
+
 class TestOllamaLive(ProviderRegistryIsolation):
     """End-to-end calls against a local Ollama server.
 
@@ -824,6 +879,16 @@ class TestOllamaLive(ProviderRegistryIsolation):
 
         self.assertIsInstance(final.text, str)
         self.assertGreater(len(final.text), 0, "Final response must contain text")
+
+
+    def test_ollama_live_tool_loop_over_several_turns(self) -> None:
+        """A loop driven only by AiResponse.message and ToolResult.to_message()."""
+        model = self._require_model()
+        final, rounds = _run_tool_loop(
+            self, lambda **kw: self._live_call(model, max_tokens=256, **kw)
+        )
+        self.assertGreaterEqual(rounds, 1)
+        self.assertIsInstance(final.text, str)
 
 
 # ---------------------------------------------------------------------------
@@ -1509,6 +1574,40 @@ class TestLivePongSmoke(RequiresCredential, unittest.TestCase):
 # ---------------------------------------------------------------------------
 # 10. Google (skip if no API key)
 # ---------------------------------------------------------------------------
+
+class TestToolLoopLive(RequiresCredential, unittest.TestCase):
+    """The tool loop on the two providers whose replies carry signed state.
+
+    Claude 5.5 thinks by default and wants its thinking blocks back with the
+    tool results; Gemini 3 answers 400 to a function call replayed without its
+    thought signature. A model id the account cannot reach skips.
+    """
+
+    def _loop(self, provider: str, model: str, secrets_key: str) -> None:
+        from unified_ai_client import call_ai
+
+        self._require_credential(secrets_key)
+
+        def call(**kwargs):
+            try:
+                return call_ai(provider=provider, model=model, max_retries=0,
+                               timeout=120, **kwargs)
+            except Exception as exc:
+                # NonRetryableHttpError and genai's ClientError both carry .code.
+                if getattr(exc, "code", None) == 404:
+                    self.skipTest(f"model '{model}' is not available: {exc}")
+                raise
+
+        final, rounds = _run_tool_loop(self, call)
+        self.assertGreaterEqual(rounds, 1)
+        self.assertGreater(len(final.text), 0)
+
+    def test_anthropic_tool_loop_with_default_thinking(self) -> None:
+        self._loop("anthropic", "claude-sonnet-5-5", "anthropic_api_key")
+
+    def test_google_tool_loop_on_gemini_3(self) -> None:
+        self._loop("google", "gemini-3.5-flash", "google_api_key")
+
 
 class TestGoogleLive(RequiresCredential, unittest.TestCase):
     """End-to-end calls against the Google AI API."""

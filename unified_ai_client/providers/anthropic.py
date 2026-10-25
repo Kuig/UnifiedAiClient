@@ -476,26 +476,50 @@ class AnthropicProvider(BaseProvider):
         Args:
             msg: Source message dict. May contain 'files' (list of file paths)
                  or 'tool_calls' (for assistant messages that requested tool
-                 execution, converted to Anthropic ``tool_use`` blocks).
+                 execution, converted to Anthropic ``tool_use`` blocks). A
+                 ``role: "tool"`` entry becomes a user message with one
+                 ``tool_result`` block. An assistant entry carrying this
+                 provider's ``provider_state`` is replayed from it, signed
+                 thinking blocks included.
 
         Returns:
             Anthropic-format message dict.
+
+        Raises:
+            NonRetryableError: If a ``role: "tool"`` entry has no
+                ``tool_call_id``, which is the only link to its ``tool_use``.
         """
+        native = self._native_message(msg)
+        if isinstance(native, list):
+            return {"role": "assistant", "content": native}
+
         role = msg.get("role", "user")
         text = msg.get("content", "")
         file_paths = normalize_file_paths(msg.get("files"))
+
+        if role == "tool":
+            if not msg.get("tool_call_id"):
+                raise NonRetryableError(
+                    "A history entry with role 'tool' needs the 'tool_call_id' of "
+                    "the call it answers; ToolResult.to_message() includes it."
+                )
+            return {"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": msg["tool_call_id"],
+                "content": text,
+            }]}
 
         if role == "assistant" and msg.get("tool_calls"):
             # Same builder as any other message, so a file on this entry is
             # kept; the tool_use blocks below make padding unnecessary.
             content = self._build_content_blocks(text, file_paths, pad_if_empty=False)
             for i, tc in enumerate(msg["tool_calls"]):
-                fn = tc.get("function", tc)
+                call_id, name, arguments = self._tool_call_fields(tc)
                 content.append({
                     "type": "tool_use",
-                    "id": tc.get("id", f"tool_{i}"),
-                    "name": fn.get("name", ""),
-                    "input": fn.get("arguments", {}),
+                    "id": call_id or f"tool_{i}",
+                    "name": name,
+                    "input": arguments,
                 })
             return {"role": role, "content": content}
 
@@ -537,21 +561,24 @@ class AnthropicProvider(BaseProvider):
     def _build_messages(self, request: AiRequest) -> list[dict[str, Any]]:
         """History, the current turn and any tool results, in order.
 
-        A tool-result continuation has its user turn in the history already, so
-        the prompt is not appended a second time. Tool results travel as one
-        user message of ``tool_result`` blocks, right after the assistant
-        message holding the matching ``tool_use`` blocks.
+        The current turn follows ``_wants_current_turn()``. Tool results travel
+        as ``tool_result`` blocks in the user message right after the assistant
+        message holding the matching ``tool_use`` blocks. Consecutive user
+        messages are merged into one, so several ``role: "tool"`` entries, or a
+        tool result followed by a new prompt, form a single valid turn.
         """
-        messages = [self._build_message(msg) for msg in request.messages or []]
+        messages: list[dict[str, Any]] = []
+        for msg in request.messages or []:
+            self._append_merged(messages, self._build_message(msg))
 
-        if not request.tool_results:
+        if self._wants_current_turn(request):
             file_paths = normalize_file_paths(request.file_path)
-            messages.append({
+            self._append_merged(messages, {
                 "role": "user",
                 "content": self._build_user_content(request.prompt, file_paths),
             })
-        else:
-            messages.append({
+        if request.tool_results:
+            self._append_merged(messages, {
                 "role": "user",
                 "content": [
                     {
@@ -563,6 +590,17 @@ class AnthropicProvider(BaseProvider):
                 ],
             })
         return messages
+
+    @staticmethod
+    def _append_merged(messages: list[dict[str, Any]], message: dict[str, Any]) -> None:
+        """Append a message, folding it into the previous one when both are user turns."""
+        if messages and message["role"] == "user" and messages[-1]["role"] == "user":
+            messages[-1] = {
+                "role": "user",
+                "content": list(messages[-1]["content"]) + list(message["content"]),
+            }
+        else:
+            messages.append(message)
 
     def _build_payload(
         self,
@@ -671,6 +709,7 @@ class AnthropicProvider(BaseProvider):
         )
         version = self._model_version(model)
         summarised = version is None or version >= self._SUMMARISED_SINCE
+        native = resp.get("content", [])
 
         return AiResponse(
             text=response_text,
@@ -680,4 +719,5 @@ class AnthropicProvider(BaseProvider):
             reasoning_text=raw_reasoning,
             reasoning_is_summary=bool(raw_reasoning) and summarised,
             tool_calls=tool_calls,
+            message=self._assistant_message(response_text, tool_calls, native),
         )

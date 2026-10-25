@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `AiResponse.message`: the turn as a `messages` entry, with `tool_calls` as
+  `{"id", "name", "arguments"}` and a JSON-serialisable `provider_state` the same provider
+  replays as it is. `ToolResult.to_message()` returns the matching `role: "tool"` entry.
+  Appending both runs a tool loop of any length on every provider, including Claude with
+  thinking on (signed thinking blocks travel back) and Gemini 3 (thought signatures travel
+  back; without them the API answers 400). Verified live on `gemini-3.5-flash`.
+
+### Fixed
+
+- `role: "tool"` history entries are converted on `anthropic` (a `tool_result` block, with
+  parallel results and a following prompt merged into one user turn) and `google` (a
+  `function_response` Part, named from the entry or from the call its `tool_call_id`
+  points to), where they used to be passed through unconverted. `ollama` now sends
+  `tool_name` and `tool_call_id` with each tool result.
+- The OpenAI-compatible providers send history `tool_calls` arguments as the JSON string
+  the API requires, not as an object.
+- A call with an empty prompt, no file and a history no longer appends an empty user turn.
+
 ### Changed
 
 - An option key an adapter drops is now named in a log record instead of vanishing: `DEBUG`

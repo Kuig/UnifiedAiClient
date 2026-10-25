@@ -40,7 +40,7 @@ def call_ai(
 | `model` | `str` | required | Model identifier, or the script path for the `script` provider. |
 | `prompt` | `str` | required | The user prompt. |
 | `system_prompt` | `str \| None` | `None` | System instructions. |
-| `messages` | `list[dict] \| None` | `None` | Chat history as `[{"role": "user" \| "assistant", "content": "..."}]`. An entry may also carry a `"files"` key with local file paths to attach to that turn. |
+| `messages` | `list[dict] \| None` | `None` | Chat history as `[{"role": "user" \| "assistant", "content": "..."}]`. An entry may also carry a `"files"` key with local file paths to attach to that turn. `AiResponse.message` and `ToolResult.to_message()` are entries in this shape, see [Tool Calling](tool-calling.md#the-tool-loop). |
 | `file_path` | `str \| list[str] \| None` | `None` | Local file path(s) to attach to the current turn. See [Multimodal Input](multimodal.md). |
 | `temperature` | `float \| None` | `None` | Sampling temperature. `None` falls back to the configured value; when there is none, nothing is sent and the provider's own default applies. |
 | `thinking` | `bool \| str` | `"default"` | `True` / `False` to force reasoning on or off, `"default"` to leave it to the provider. See [Thinking and Reasoning](reasoning.md). |
@@ -510,6 +510,7 @@ The standard response object returned by `call_ai()`.
 | `reasoning_text` | `str` | `""` | The reasoning transcript, when the model returned one. Populated whatever `thinking` was set to. |
 | `reasoning_is_summary` | `bool` | `False` | `True` when `reasoning_text` is a provider-generated summary of the chain of thought rather than the raw trace. Google summarises, and so does Anthropic from Claude 4 on; the others return the raw trace. |
 | `tool_calls` | `list[ToolCall]` | `[]` | Tool calls the model requested. Empty when it answered with text. |
+| `message` | `dict \| None` | `None` | This turn as a `messages` entry, ready to append: `role`, `content`, `tool_calls` (`id`, `name`, `arguments`) and an opaque, JSON-serialisable `provider_state` that the same provider replays as it is. Every built-in adapter sets it. |
 
 ### `ToolDefinition`
 
@@ -533,13 +534,17 @@ A tool call requested by the model, found in `AiResponse.tool_calls`.
 
 ### `ToolResult`
 
-The result of a tool execution, passed back through `call_ai(tool_results=...)`.
+The result of a tool execution, passed back through `call_ai(tool_results=...)`, or
+appended to `messages` as `to_message()`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `call_id` | `str` | required | The `id` of the `ToolCall` this answers. |
 | `name` | `str` | required | Name of the tool function that ran. Some providers need it to route the result. |
 | `content` | `str` | required | String result of the execution. |
+
+`to_message()` returns `{"role": "tool", "tool_call_id", "name", "content"}`, the history
+entry every adapter converts into its own tool-result format.
 
 ### `ProviderConfig`
 

@@ -43,6 +43,11 @@ _GENERATE_FIELDS: frozenset[str] = _CHAT_FIELDS | {"raw", "suffix", "template", 
 _EMBED_FIELDS: frozenset[str] = frozenset({"truncate", "dimensions"})
 _TOP_LEVEL_FIELDS: frozenset[str] = _GENERATE_FIELDS | _EMBED_FIELDS
 
+_MESSAGE_FIELDS: tuple[str, ...] = (
+    "role", "content", "thinking", "images", "tool_calls", "tool_name", "tool_call_id",
+)
+"""The fields of ``Message`` in ollama's api/types.go, the ones a replayed reply keeps."""
+
 
 def _fold_options(opts: dict[str, Any], options: dict[str, Any]) -> None:
     """Fold merged options into an Ollama model ``options`` dict, in place.
@@ -77,6 +82,16 @@ def _fold_options(opts: dict[str, Any], options: dict[str, Any]) -> None:
             continue
         else:
             options[k] = v
+
+
+def _tool_link(name: str | None, call_id: str | None) -> dict[str, str]:
+    """The fields that tie a ``role: "tool"`` message to the call it answers."""
+    link: dict[str, str] = {}
+    if name:
+        link["tool_name"] = name
+    if call_id:
+        link["tool_call_id"] = call_id
+    return link
 
 
 def _request_fields(opts: dict[str, Any], allowed: frozenset[str]) -> dict[str, Any]:
@@ -419,11 +434,18 @@ class OllamaProvider(BaseProvider):
 
         Args:
             msg: Source message dict. May contain ``files`` and, on an assistant
-                message, ``tool_calls``.
+                message, ``tool_calls``; a ``role: "tool"`` entry may carry
+                ``name`` and ``tool_call_id``. An assistant entry carrying this
+                provider's ``provider_state`` is replayed from it, thinking
+                trace included.
 
         Returns:
             Ollama-format message dict.
         """
+        native = self._native_message(msg)
+        if isinstance(native, dict):
+            return {k: native[k] for k in _MESSAGE_FIELDS if k in native}
+
         role = msg.get("role", "user")
         content = msg.get("content", "")
         msg_files = normalize_file_paths(msg.get("files"))
@@ -435,7 +457,15 @@ class OllamaProvider(BaseProvider):
         if images:
             entry["images"] = images
         if role == "assistant" and msg.get("tool_calls"):
-            entry["tool_calls"] = msg["tool_calls"]
+            entry["tool_calls"] = []
+            for tc in msg["tool_calls"]:
+                call_id, name, arguments = self._tool_call_fields(tc)
+                call: dict[str, Any] = {"function": {"name": name, "arguments": arguments}}
+                if call_id:
+                    call["id"] = call_id
+                entry["tool_calls"].append(call)
+        if role == "tool":
+            entry.update(_tool_link(msg.get("name"), msg.get("tool_call_id")))
         return entry
 
     def _chat(self, request: AiRequest, opts: dict[str, Any]) -> AiResponse:
@@ -446,9 +476,9 @@ class OllamaProvider(BaseProvider):
         for msg in request.messages or []:
             messages.append(self._build_message(msg))
 
-        # A tool-result continuation has its user turn in the history already,
-        # so the prompt and its attachments are neither re-sent nor encoded.
-        if not request.tool_results:
+        # Skipped turns are not encoded either: a tool-result continuation's
+        # attachments would be read for nothing.
+        if self._wants_current_turn(request):
             prompt, images = self._process_files_for_message(
                 normalize_file_paths(request.file_path), request.prompt
             )
@@ -458,7 +488,9 @@ class OllamaProvider(BaseProvider):
             messages.append(user_message)
 
         for tr in request.tool_results or []:
-            messages.append({"role": "tool", "content": tr.content})
+            messages.append(
+                {"role": "tool", "content": tr.content, **_tool_link(tr.name, tr.call_id)}
+            )
 
         payload = self._base_payload(request, opts)
         payload["messages"] = messages
@@ -485,6 +517,7 @@ class OllamaProvider(BaseProvider):
             message.get("content", "") or "",
             message.get("thinking", "") or "",
             self._parse_tool_calls(message),
+            native={"role": "assistant", **message},
         )
 
     def _generate(self, request: AiRequest, opts: dict[str, Any]) -> AiResponse:
@@ -534,8 +567,13 @@ class OllamaProvider(BaseProvider):
         text: str,
         thinking: str,
         tool_calls: list[ToolCall],
+        native: dict[str, Any] | None = None,
     ) -> AiResponse:
-        """Assemble the ``AiResponse``, splitting ``eval_count`` between trace and answer."""
+        """Assemble the ``AiResponse``, splitting ``eval_count`` between trace and answer.
+
+        ``native`` is the reply message ``/api/chat`` returned, kept for replay;
+        ``/api/generate`` has no message to keep.
+        """
         eval_count = resp.get("eval_count", 0)
         reasoning_tokens = self._estimate_reasoning_tokens(text, thinking, eval_count)
         return AiResponse(
@@ -545,6 +583,7 @@ class OllamaProvider(BaseProvider):
             reasoning_tokens=reasoning_tokens,
             reasoning_text=thinking,
             tool_calls=tool_calls,
+            message=self._assistant_message(text, tool_calls, native),
         )
 
     def preload_model(

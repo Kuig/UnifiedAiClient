@@ -88,6 +88,13 @@ class OpenAiCompatProvider(BaseProvider):
     # Probed only on the two local subclasses; cloud ones are judged by credential.
     PROBE_PATH: str | None = "/v1/models"
 
+    _REPLAYED_MESSAGE_FIELDS: tuple[str, ...] = ("role", "content", "tool_calls")
+    """Fields of a reply message sent back as they are on the next turn.
+
+    The rest (``refusal``, ``annotations``, ``reasoning_content``) are response
+    fields that not every endpoint accepts in a request.
+    """
+
     LAZY_MODEL_LOAD: bool = False
     """Whether this endpoint defers loading the model until first inference.
 
@@ -332,25 +339,31 @@ class OpenAiCompatProvider(BaseProvider):
                  May also contain 'files': list[str], 'tool_calls' (for
                  assistant messages that requested tool execution), or
                  'tool_call_id' (required on a 'tool' message, to link it
-                 back to the call it answers).
+                 back to the call it answers). An assistant entry carrying
+                 this provider's ``provider_state`` is replayed from it.
 
         Returns:
             OpenAI-format message dict.
         """
+        native = self._native_message(msg)
+        if isinstance(native, dict):
+            return {k: native[k] for k in self._REPLAYED_MESSAGE_FIELDS if k in native}
+
         role = msg.get("role", "user")
         text = msg.get("content", "")
         file_paths = normalize_file_paths(msg.get("files"))
         content = self._build_user_content(text, file_paths)
         entry: dict[str, Any] = {"role": role, "content": content}
         if role == "assistant" and msg.get("tool_calls"):
-            entry["tool_calls"] = [
-                {
-                    "id": tc.get("id", f"call_{i}"),
+            entry["tool_calls"] = []
+            for i, tc in enumerate(msg["tool_calls"]):
+                call_id, name, arguments = self._tool_call_fields(tc)
+                entry["tool_calls"].append({
+                    "id": call_id or f"call_{i}",
                     "type": "function",
-                    "function": tc.get("function", tc),
-                }
-                for i, tc in enumerate(msg["tool_calls"])
-            ]
+                    # The API takes arguments as a JSON string, not an object.
+                    "function": {"name": name, "arguments": json.dumps(arguments)},
+                })
         # Read from the entry, never invented: a fallback id would link the
         # result to the wrong call as readily as to the right one.
         if role == "tool" and msg.get("tool_call_id"):
@@ -374,8 +387,7 @@ class OpenAiCompatProvider(BaseProvider):
     def _build_messages(self, request: AiRequest) -> list[dict[str, Any]]:
         """System prompt, history, the current turn and any tool results, in order.
 
-        A tool-result continuation has its user turn in the history already, so
-        the prompt is not appended a second time.
+        The current turn follows ``_wants_current_turn()``.
         """
         messages: list[dict[str, Any]] = []
         if request.system_prompt:
@@ -383,7 +395,7 @@ class OpenAiCompatProvider(BaseProvider):
         for msg in request.messages or []:
             messages.append(self._build_message(msg))
 
-        if not request.tool_results:
+        if self._wants_current_turn(request):
             file_paths = normalize_file_paths(request.file_path)
             user_content = self._build_user_content(request.prompt, file_paths)
             messages.append({"role": "user", "content": user_content})
@@ -481,13 +493,18 @@ class OpenAiCompatProvider(BaseProvider):
         )
         total_output = usage.get("completion_tokens", 0)
 
+        text = choice.get("content") or ""
+        native = {k: choice[k] for k in self._REPLAYED_MESSAGE_FIELDS if k in choice}
+        native.setdefault("role", "assistant")
+
         return AiResponse(
-            text=choice.get("content") or "",
+            text=text,
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=max(0, total_output - reasoning_tokens),
             reasoning_tokens=reasoning_tokens,
             reasoning_text=choice.get("reasoning_content") or "",
             tool_calls=tool_calls,
+            message=self._assistant_message(text, tool_calls, native),
         )
 
     def list_models(self, *, timeout: int | None = None) -> list[ModelInfo]:

@@ -259,8 +259,15 @@ error the caller needs to see.
 
 **When `tool_results` are present, the prompt is not re-appended.** The consumer is
 expected to have placed the original user turn in `messages` already, so appending it
-again would duplicate it. Every adapter honours this, and message assembly must keep
-honouring it.
+again would duplicate it. Nor is an empty one appended after a history that carries the
+conversation on its own. Every adapter decides this through the same base-class rule,
+and message assembly must keep going through it.
+
+**A provider's own reply survives the round trip.** `AiResponse.message` keeps the
+provider-native message under `provider_state`, and the same adapter replays it untouched
+on the next call: Claude's signed thinking blocks and Gemini 3's thought signatures are
+required back on a tool loop, and no canonical field can carry them. Another adapter
+ignores the state and reads the canonical fields, so a history stays portable.
 
 **Only the Google adapter imports an SDK.** Every other provider uses `urllib`. The
 absence of a dependency tree is the library's main selling point, so a new provider that

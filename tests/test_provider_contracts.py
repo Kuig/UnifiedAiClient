@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import importlib
 import io
+import json
 import os
 import shutil
 import sys
@@ -22,6 +23,7 @@ import time
 import unittest
 import urllib.error
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 _TESTS_DIR = Path(__file__).resolve().parent
@@ -1581,10 +1583,9 @@ class TestEmptyPromptWithAnAttachment(FileFixtureCase):
 class TestToolMessageKeepsItsCallId(ProviderRegistryIsolation):
     """A history 'tool' message without tool_call_id is a 400 waiting to happen.
 
-    docs/tool-calling.md only documents the two-turn exchange, where
-    tool_results carries the id for the library. A consumer building a third
-    turn has to reconstruct the 'tool' message itself, and until now that id
-    was read from the history dict and then silently dropped.
+    With tool_results the library supplies the id itself; a history entry
+    built by ToolResult.to_message() or by hand carries it, and it must reach
+    the payload rather than be read and dropped.
     """
 
     def test_the_id_reaches_the_payload(self) -> None:
@@ -2975,6 +2976,218 @@ class TestToolResultsDoNotReappendThePrompt(ProviderRegistryIsolation):
 
         contents = fake_client.models.generate_content.call_args.kwargs["contents"]
         self.assertEqual(str(contents).count(self._PROMPT), 1)
+
+
+class TestToolHistoryAcrossTurns(ProviderRegistryIsolation):
+    """A tool loop of any length, built from the canonical history shape.
+
+    Until this shape existed only the two-turn exchange worked, and only on
+    some adapters: anthropic and google passed a `role: "tool"` entry through
+    unconverted, openai_compat sent `arguments` as an object where the API
+    wants a JSON string, and nothing carried the signed thinking blocks or
+    thought signatures that Claude and Gemini 3 require back on a tool loop.
+    """
+
+    _HISTORY = [
+        {"role": "user", "content": "Weather and time in Rome?"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_1", "name": "get_weather", "arguments": {"city": "Rome"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_1", "name": "get_weather", "content": "22C"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_2", "name": "get_time", "arguments": {"tz": "CET"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_2", "name": "get_time", "content": "14:00"},
+    ]
+
+    def _payload(self, name: str, history: list, **kwargs) -> dict:
+        kwargs.setdefault("prompt", "")
+        return _capture_http_payload(name, ProviderConfig(), messages=history, **kwargs)
+
+    def _google_contents(self, history: list, response: Any = None, **kwargs) -> list:
+        from unified_ai_client.providers.google import GoogleProvider
+
+        provider = GoogleProvider(ProviderConfig(), api_key="fake-key")
+        if response is None:
+            response = MagicMock()
+            response.candidates = []
+            response.prompt_feedback = None
+            response.text = "ok"
+        fake_client = MagicMock()
+        fake_client.models.generate_content.return_value = response
+        kwargs.setdefault("prompt", "")
+        request = AiRequest(
+            provider="google", model="gemini-3-flash", messages=history, timeout=30,
+            **kwargs,
+        )
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client):
+            result = provider.call(request)
+        self._google_result = result
+        return fake_client.models.generate_content.call_args.kwargs["contents"]
+
+    def test_to_message_is_the_canonical_tool_entry(self) -> None:
+        from unified_ai_client.models import ToolResult
+
+        self.assertEqual(
+            ToolResult(call_id="c", name="f", content="done").to_message(),
+            {"role": "tool", "tool_call_id": "c", "name": "f", "content": "done"},
+        )
+
+    def test_openai_compat_sends_string_arguments_and_linked_results(self) -> None:
+        messages = self._payload("openai", self._HISTORY)["messages"]
+
+        self.assertEqual([m["role"] for m in messages],
+                         ["user", "assistant", "tool", "assistant", "tool"])
+        call = messages[1]["tool_calls"][0]
+        self.assertEqual(call["id"], "call_1")
+        self.assertEqual(json.loads(call["function"]["arguments"]), {"city": "Rome"})
+        self.assertIsInstance(call["function"]["arguments"], str)
+        self.assertEqual(messages[4]["tool_call_id"], "call_2")
+
+    def test_anthropic_turns_tool_entries_into_tool_result_blocks(self) -> None:
+        messages = self._payload("anthropic", self._HISTORY)["messages"]
+
+        self.assertEqual([m["role"] for m in messages],
+                         ["user", "assistant", "user", "assistant", "user"])
+        self.assertEqual(messages[1]["content"][-1]["id"], "call_1")
+        self.assertEqual(messages[1]["content"][-1]["input"], {"city": "Rome"})
+        self.assertEqual(
+            messages[4]["content"],
+            [{"type": "tool_result", "tool_use_id": "call_2", "content": "14:00"}],
+        )
+
+    def test_anthropic_merges_parallel_results_and_a_following_prompt(self) -> None:
+        history = [
+            {"role": "user", "content": "Both, please."},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "a", "name": "f", "arguments": {}},
+                {"id": "b", "name": "g", "arguments": {}},
+            ]},
+            {"role": "tool", "tool_call_id": "a", "name": "f", "content": "1"},
+            {"role": "tool", "tool_call_id": "b", "name": "g", "content": "2"},
+        ]
+        messages = self._payload("anthropic", history, prompt="And now?")["messages"]
+
+        self.assertEqual([m["role"] for m in messages], ["user", "assistant", "user"])
+        self.assertEqual(
+            [block["type"] for block in messages[2]["content"]],
+            ["tool_result", "tool_result", "text"],
+        )
+
+    def test_anthropic_refuses_a_tool_entry_without_its_call_id(self) -> None:
+        from unified_ai_client.exceptions import NonRetryableError
+
+        with self.assertRaises(NonRetryableError):
+            self._payload("anthropic", [{"role": "tool", "content": "x"}])
+
+    def test_ollama_names_each_tool_result(self) -> None:
+        messages = self._payload("ollama", self._HISTORY)["messages"]
+
+        self.assertEqual(messages[1]["tool_calls"][0]["function"],
+                         {"name": "get_weather", "arguments": {"city": "Rome"}})
+        self.assertEqual(messages[2]["tool_name"], "get_weather")
+        self.assertEqual(messages[2]["tool_call_id"], "call_1")
+        self.assertEqual(messages[-1]["role"], "tool")
+
+    def test_google_turns_tool_entries_into_function_responses(self) -> None:
+        history = [dict(m) for m in self._HISTORY]
+        del history[4]["name"]  # resolved through tool_call_id instead
+        contents = self._google_contents(history)
+
+        self.assertEqual([c.role for c in contents],
+                         ["user", "model", "user", "model", "user"])
+        self.assertEqual(contents[2].parts[0].function_response.name, "get_weather")
+        self.assertEqual(contents[4].parts[0].function_response.name, "get_time")
+
+    def test_google_refuses_a_tool_entry_it_cannot_name(self) -> None:
+        from unified_ai_client.exceptions import NonRetryableError
+
+        with self.assertRaises(NonRetryableError):
+            self._google_contents([{"role": "tool", "tool_call_id": "nope", "content": "x"}])
+
+    def test_a_continuation_with_nothing_to_say_adds_no_user_turn(self) -> None:
+        for name in ("openai", "ollama"):
+            with self.subTest(provider=name):
+                messages = self._payload(name, self._HISTORY)["messages"]
+                self.assertEqual(messages[-1]["role"], "tool")
+        last = self._payload("anthropic", self._HISTORY)["messages"][-1]
+        self.assertEqual([b["type"] for b in last["content"]], ["tool_result"])
+        self.assertEqual(self._google_contents(self._HISTORY)[-1].parts[0].text, None)
+
+    def test_anthropic_replays_its_own_signed_thinking_blocks(self) -> None:
+        from unified_ai_client.providers.anthropic import AnthropicProvider
+
+        native = [
+            {"type": "thinking", "thinking": "plan", "signature": "SIG"},
+            {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {"x": 1}},
+        ]
+        provider = AnthropicProvider(ProviderConfig(), api_key="k")
+        with patch.object(provider, "_post", return_value={
+            "content": native, "stop_reason": "tool_use", "usage": {},
+        }):
+            first = provider.call(AiRequest(
+                provider="anthropic", model="claude-sonnet-5-5", prompt="go", timeout=10,
+            ))
+
+        self.assertEqual(first.message["tool_calls"],
+                         [{"id": "toolu_1", "name": "f", "arguments": {"x": 1}}])
+        json.dumps(first.message)  # a consumer must be able to persist it
+
+        history = [{"role": "user", "content": "go"}, first.message,
+                   {"role": "tool", "tool_call_id": "toolu_1", "name": "f", "content": "ok"}]
+        messages = self._payload("anthropic", history)["messages"]
+        self.assertEqual(messages[1], {"role": "assistant", "content": native})
+
+    def test_state_from_another_provider_is_ignored(self) -> None:
+        message = {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "toolu_1", "name": "f", "arguments": {"x": 1}}],
+            "provider_state": {"provider": "anthropic", "data": [{"type": "thinking"}]},
+        }
+        messages = self._payload("openai", [{"role": "user", "content": "go"}, message,
+                                            {"role": "tool", "tool_call_id": "toolu_1",
+                                             "content": "ok"}])["messages"]
+        self.assertEqual(messages[1]["tool_calls"][0]["function"]["name"], "f")
+        self.assertNotIn("provider_state", messages[1])
+
+    def test_openai_compat_replays_its_reply_verbatim(self) -> None:
+        from unified_ai_client.providers.openai import OpenAiProvider
+
+        reply = {
+            "role": "assistant", "content": None, "refusal": None,
+            "tool_calls": [{"id": "call_9", "type": "function",
+                            "function": {"name": "f", "arguments": "{\"x\": 1}"}}],
+        }
+        provider = OpenAiProvider(ProviderConfig(), api_key="k")
+        with patch.object(provider, "_post", return_value={
+            "choices": [{"message": reply}], "usage": {},
+        }):
+            first = provider.call(AiRequest(provider="openai", model="m", prompt="go", timeout=10))
+
+        messages = self._payload("openai", [{"role": "user", "content": "go"}, first.message])[
+            "messages"]
+        self.assertEqual(messages[1], {k: reply[k] for k in ("role", "content", "tool_calls")})
+
+    def test_google_replays_thought_signatures(self) -> None:
+        from google.genai import types
+
+        response = MagicMock()
+        response.usage_metadata = None
+        candidate = MagicMock()
+        candidate.content = types.Content(role="model", parts=[types.Part(
+            function_call=types.FunctionCall(name="f", args={"x": 1}),
+            thought_signature=b"\xffsig",
+        )])
+        response.candidates = [candidate]
+        self._google_contents([], response=response, prompt="go")
+        first = self._google_result
+        json.dumps(first.message)
+
+        history = [{"role": "user", "content": "go"}, first.message,
+                   {"role": "tool", "tool_call_id": first.tool_calls[0].id, "content": "ok"}]
+        contents = self._google_contents(history)
+        self.assertEqual(contents[1].parts[0].thought_signature, b"\xffsig")
+        self.assertEqual(contents[2].parts[0].function_response.name, "f")
 
 
 class TestAttachmentRefusalIsWordedOnce(FileFixtureCase):

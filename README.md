@@ -27,7 +27,7 @@ Supported providers:
 | [docs/configuration.md](docs/configuration.md) | Key-by-key reference for credentials and provider settings. |
 | [docs/multimodal.md](docs/multimodal.md) | Attaching files, the per-provider support matrix, and how unsupported files are refused. |
 | [docs/reasoning.md](docs/reasoning.md) | The `thinking` parameter, what each provider does with it, and reading the trace back. |
-| [docs/tool-calling.md](docs/tool-calling.md) | Defining tools, the two-turn exchange, provider compatibility. |
+| [docs/tool-calling.md](docs/tool-calling.md) | Defining tools, the tool loop over any number of turns, provider compatibility. |
 | [docs/warm-up.md](docs/warm-up.md) | `warm_up()`, `preload_model()`, `unload_model()` and `cleanup()`: preparing a provider and releasing what it holds. |
 | [docs/script-protocol.md](docs/script-protocol.md) | The JSON stdin/stdout contract any script must satisfy to act as a provider. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Internal design: the codemap, the layer boundaries, and the invariants. |
@@ -173,7 +173,8 @@ deliberately this coarse, is in [docs/reasoning.md](docs/reasoning.md).
 
 The library provides transport-level tool calling: it passes your `ToolDefinition` list to
 the model and returns any `ToolCall` the model requests. The execution loop stays yours.
-All providers support it. The two-turn exchange is worked through in
+All providers support it, over any number of turns: append `response.message` and each
+`ToolResult.to_message()` to `messages`. The loop is worked through in
 [docs/tool-calling.md](docs/tool-calling.md).
 
 ### Discovering Providers and Models

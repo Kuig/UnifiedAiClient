@@ -54,8 +54,8 @@ class ToolResult:
 
     After receiving ``AiResponse.tool_calls``, the consumer executes each
     tool and wraps the output in a ``ToolResult``. Pass the list of results
-    back to ``call_ai()`` via the ``tool_results`` parameter to continue the
-    conversation.
+    back to ``call_ai()`` via the ``tool_results`` parameter, or append
+    ``to_message()`` to the history, to continue the conversation.
 
     Attributes:
         call_id: The ``id`` of the ``ToolCall`` this result corresponds to.
@@ -67,6 +67,20 @@ class ToolResult:
     call_id: str
     name: str
     content: str
+
+    def to_message(self) -> dict[str, Any]:
+        """This result as a history entry, ready to append to ``messages``.
+
+        Returns:
+            ``{"role": "tool", "tool_call_id", "name", "content"}``, the shape
+            every adapter converts into its own tool-result format.
+        """
+        return {
+            "role": "tool",
+            "tool_call_id": self.call_id,
+            "name": self.name,
+            "content": self.content,
+        }
 
 
 @dataclass
@@ -90,6 +104,14 @@ class AiResponse:
             Consumers that measure the trace (length, composition, self-
             corrections) must not compare a summarised trace against a raw one.
         tool_calls: List of tool calls requested by the model.
+        message: This turn as a history entry, ready to append to ``messages``
+            on the next call: ``{"role": "assistant", "content", "tool_calls"}``
+            plus a ``provider_state`` holding the provider's own message,
+            JSON-serialisable and opaque. The same provider replays that state
+            as it is, which is how the signed thinking blocks and thought
+            signatures a tool loop requires survive the round trip; any other
+            provider ignores it and reads the canonical fields. ``None`` when
+            the adapter built no message.
     """
     text: str
     input_tokens: int = 0
@@ -98,6 +120,7 @@ class AiResponse:
     reasoning_text: str = ""
     reasoning_is_summary: bool = False
     tool_calls: list[ToolCall] = field(default_factory=list)
+    message: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
