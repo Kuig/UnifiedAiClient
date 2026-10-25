@@ -19,6 +19,9 @@ class LlamaCppProvider(OpenAiCompatProvider):
 
     DEFAULT_URL: str = "http://localhost:8080"
 
+    # top_logprobs maps onto n_probs in llama-server's OpenAI-compatible layer.
+    SUPPORTS_LOGPROBS: bool = True
+
     # llama-server routes an input_audio block through miniaudio (mp3, wav,
     # flac) and an input_video block through ffmpeg. Both need a model, and an
     # mmproj, that handle the modality; the server refuses the request otherwise.

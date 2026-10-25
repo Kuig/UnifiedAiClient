@@ -105,7 +105,8 @@ asserts that the flag and the two overrides agree. Set `LAZY_MODEL_LOAD` only fo
 server that defers the model load until first inference, since warming those up costs a
 one-token completion rather than a free metadata GET. Set `SUPPORTS_EMBEDDINGS` if
 `embed()` is implemented, and `SUPPORTED_EMBEDDING_FILE_TYPES` to the media its embeddings
-endpoint has been verified to take. For a local server, set `PROBE_PATH` to a cheap GET path,
+endpoint has been verified to take. Set `SUPPORTS_LOGPROBS` only when the documentation or a
+live test confirms the endpoint returns token log probabilities. For a local server, set `PROBE_PATH` to a cheap GET path,
 which is how `list_providers()` tells that it is running. Override `list_models()` if the
 endpoint can enumerate its models, setting a `ModelInfo` capability only when the endpoint
 reports it and leaving it `None` otherwise.
@@ -118,13 +119,14 @@ Then wire it in and document it:
 - the entry in the environment-variable map in `config.py`;
 - `config.json.example`, `secrets.json.example` and `.env.example`;
 - the provider tables in `README.md`, `COMPARISON.md`, `docs/multimodal.md`,
-  `docs/reasoning.md`, `docs/tool-calling.md`, `docs/warm-up.md`, the default-URL table in
+  `docs/reasoning.md`, `docs/tool-calling.md`, `docs/warm-up.md`, `docs/logprobs.md`, the default-URL table in
   `docs/configuration.md`, and the embeddings and `list_models` tables in `docs/api.md`;
 - an entry under `## [Unreleased]` in `CHANGELOG.md`;
 - a row in every hand-written table in `tests/test_provider_contracts.py`. Those tables are
   keyed by provider name, and `TestFileSupportMatrix._SUPPORT`,
   `TestUnloadSupportMatrix._SUPPORTS_UNLOAD`,
-  `TestEmbeddingsSupportMatrix._SUPPORTS_EMBEDDINGS` and
+  `TestEmbeddingsSupportMatrix._SUPPORTS_EMBEDDINGS`,
+  `TestLogprobsSupportMatrix._SUPPORTS_LOGPROBS` and
   `TestEmbeddingFileSupportMatrix._SUPPORT` assert the declared capabilities against an
   explicit list, so a provider added without a row there fails the suite. `TestDispatch` and
   the import tests need no new entry: they loop over `_PROVIDER_CLASSES`, itself derived from

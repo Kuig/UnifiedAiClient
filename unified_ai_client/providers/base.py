@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         AiResponse,
         EmbeddingRequest,
         ModelInfo,
+        TokenLogprob,
         ToolCall,
     )
 
@@ -74,6 +75,14 @@ class BaseProvider(ABC):
     False is the safe default, matching the other capability flags. Read by
     ``list_providers()``, and asserted against a hand-written table so a
     provider cannot drift away from what it reports.
+    """
+
+    SUPPORTS_LOGPROBS: bool = False
+    """Whether ``call_ai(logprobs=...)`` can be honoured.
+
+    ``call_ai()`` refuses the request before sending it where this is False, so
+    set it only for an endpoint whose documentation or a live test confirms it
+    returns log probabilities, and asserted against a hand-written table.
     """
 
     SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset()
@@ -391,6 +400,41 @@ class BaseProvider(ABC):
         if state.get("provider") != self.provider_name:
             return None
         return state.get("data")
+
+    def _collect_logprobs(
+        self, request: AiRequest, entries: list[dict[str, Any]] | None
+    ) -> list[TokenLogprob] | None:
+        """Turn a provider's per-token entries into ``AiResponse.logprobs``.
+
+        Reads the shape OpenAI, llama-server, Ollama and the script protocol
+        share: ``{"token", "logprob", "top_logprobs": [{"token", "logprob"}]}``.
+
+        Returns:
+            None when the request asked for no log probabilities. Otherwise one
+            ``TokenLogprob`` per entry, or an empty list, with a warning, when
+            the provider returned none despite being asked.
+        """
+        if request.logprobs is None:
+            return None
+        from unified_ai_client.models import TokenLogprob
+
+        if not entries:
+            _log.warning(
+                "%s returned no log probabilities for model '%s'",
+                self.provider_name, request.model,
+            )
+            return []
+        return [
+            TokenLogprob(
+                token=entry.get("token", ""),
+                logprob=float(entry.get("logprob", 0.0)),
+                top_logprobs=[
+                    TokenLogprob(token=alt.get("token", ""), logprob=float(alt.get("logprob", 0.0)))
+                    for alt in entry.get("top_logprobs") or []
+                ],
+            )
+            for entry in entries
+        ]
 
     @staticmethod
     def _estimate_reasoning_tokens(

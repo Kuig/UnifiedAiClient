@@ -5,6 +5,9 @@ from typing import Any
 DEFAULT_TIMEOUT = 300
 """Seconds a request may take when neither the call nor the configuration sets one."""
 
+MAX_TOP_LOGPROBS = 20
+"""The most alternatives per token ``call_ai(logprobs=...)`` accepts, the common ceiling."""
+
 
 @dataclass
 class ToolDefinition:
@@ -84,6 +87,22 @@ class ToolResult:
 
 
 @dataclass
+class TokenLogprob:
+    """The log probability of one generated token, as found in ``AiResponse.logprobs``.
+
+    Attributes:
+        token: The token's text.
+        logprob: Its natural-log probability, at most 0.
+        top_logprobs: The most likely tokens at this position, the generated one
+            usually among them, most likely first. Empty when the call asked
+            for ``logprobs=0``.
+    """
+    token: str
+    logprob: float
+    top_logprobs: list[TokenLogprob] = field(default_factory=list)
+
+
+@dataclass
 class AiResponse:
     """Standardized response from any AI provider.
 
@@ -112,6 +131,9 @@ class AiResponse:
             signatures a tool loop requires survive the round trip; any other
             provider ignores it and reads the canonical fields. ``None`` when
             the adapter built no message.
+        logprobs: One entry per generated token when the call asked for
+            ``logprobs``, ``None`` otherwise. An empty list means they were
+            asked for and the provider returned none.
     """
     text: str
     input_tokens: int = 0
@@ -121,6 +143,7 @@ class AiResponse:
     reasoning_is_summary: bool = False
     tool_calls: list[ToolCall] = field(default_factory=list)
     message: dict[str, Any] | None = None
+    logprobs: list[TokenLogprob] | None = None
 
 
 @dataclass(frozen=True)
@@ -225,6 +248,9 @@ class AiRequest:
             merged into the API payload. Keys and values are provider-dependent
             (e.g. {'visual_token_budget': 1120} for Ollama/Gemma4). These
             override any config-level defaults for the same key.
+        logprobs: ``None`` for no log probabilities, otherwise how many
+            alternatives to return per token, from 0 to ``MAX_TOP_LOGPROBS``.
+            Already validated by ``call_ai()``.
     """
     provider: str
     model: str
@@ -243,6 +269,7 @@ class AiRequest:
     tools: list[ToolDefinition] | None = None
     tool_results: list[ToolResult] | None = None
     extra_options: dict | None = None
+    logprobs: int | None = None
 
 
 @dataclass

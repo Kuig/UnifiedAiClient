@@ -121,6 +121,7 @@ The script reads **one JSON object** from stdin. The object contains the followi
 | `extra_options` | `dict \| null` | ✅ Yes | Every option registered through `configure_provider("script", ...)` merged with the call's own `extra_options` (the call wins on the same key), or null when both are empty. Passed whole, library-defined keys included. |
 | `tools` | `array \| null` | ✅ Yes | List of tool definitions the model may call, or null if no tools are provided. |
 | `tool_results` | `array \| null` | ✅ Yes | List of tool execution results to inject into the conversation, or null. |
+| `logprobs` | `int \| null` | ✅ Yes | Null when no token log probabilities were asked for; otherwise how many alternatives to return per token, from 0 to 20. |
 
 All fields are always present. Fields that are not applicable to a given call are sent
 as `null` or their zero/empty value (never omitted). The script must handle `null`
@@ -333,6 +334,7 @@ contain the following fields:
 | `reasoning_tokens` | `int` | ❌ No | Number of reasoning tokens used. Defaults to 0 if absent. |
 | `reasoning_text` | `string` | ❌ No | Reasoning/thinking transcript. Defaults to `""` if absent. |
 | `tool_calls` | `array \| null` | ❌ No | List of tool calls requested by the script's model. Omit or set to null/empty if the model replied with text. |
+| `logprobs` | `array \| null` | ❌ No | One `{"token", "logprob", "top_logprobs": [{"token", "logprob"}]}` object per generated token, when `logprobs` was requested. Omitted, the caller receives an empty list and a warning. |
 
 The `text` field is the only mandatory field. Scripts that do not track token usage
 or reasoning may omit those fields entirely. If tool calls are returned, `text` may
@@ -581,6 +583,8 @@ The following fields are passed for completeness but many scripts will not use t
 - `thinking`: A hint that the caller wants extended reasoning. The script may implement
   a more thorough reasoning process when this is `true` (or decide by default when `"default"`), or ignore it entirely.
   If implemented, put the reasoning transcript in `reasoning_text` in the output.
+- `logprobs`: Scripts without access to token probabilities may ignore it; the caller is
+  told by an empty `AiResponse.logprobs` and a warning.
 - `format_json`: A hint that the caller wants JSON-formatted output in `text`. The
   script should produce valid JSON in the `text` field when this is `true`. If the
   script cannot guarantee JSON output, it may ignore this flag.

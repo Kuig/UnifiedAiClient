@@ -382,7 +382,7 @@ class OpenAiCompatProvider(BaseProvider):
         opts = self._merge_options(request)
         payload = self._build_payload(request, opts, self._build_messages(request))
         resp = self._post(f"{self.API_PREFIX}/chat/completions", payload, request.timeout)
-        return self._parse_response(resp)
+        return self._parse_response(resp, request)
 
     def _build_messages(self, request: AiRequest) -> list[dict[str, Any]]:
         """System prompt, history, the current turn and any tool results, in order.
@@ -454,6 +454,11 @@ class OpenAiCompatProvider(BaseProvider):
             if resolved is not None:
                 payload[key] = resolved
 
+        if request.logprobs is not None:
+            payload["logprobs"] = True
+            # Always explicit: llama-server defaults a missing top_logprobs to 20.
+            payload["top_logprobs"] = request.logprobs
+
         reasoning: dict[str, Any] = {}
         if request.thinking != "default" and request.thinking is not None:
             reasoning = self._reasoning_payload(request.thinking)
@@ -469,14 +474,17 @@ class OpenAiCompatProvider(BaseProvider):
         payload.update(passthrough)
         return payload
 
-    def _parse_response(self, resp: dict[str, Any]) -> AiResponse:
-        """Read text, tool calls, the reasoning trace and token counts.
+    def _parse_response(self, resp: dict[str, Any], request: AiRequest) -> AiResponse:
+        """Read text, tool calls, the reasoning trace, logprobs and token counts.
 
         ``reasoning_content`` is read even when thinking was not requested,
         since a model may produce it anyway.
         """
         choice = resp["choices"][0]["message"]
         usage = resp.get("usage", {})
+        logprobs = self._collect_logprobs(
+            request, (resp["choices"][0].get("logprobs") or {}).get("content")
+        )
 
         tool_calls: list[ToolCall] = [
             ToolCall(
@@ -505,6 +513,7 @@ class OpenAiCompatProvider(BaseProvider):
             reasoning_text=choice.get("reasoning_content") or "",
             tool_calls=tool_calls,
             message=self._assistant_message(text, tool_calls, native),
+            logprobs=logprobs,
         )
 
     def list_models(self, *, timeout: int | None = None) -> list[ModelInfo]:

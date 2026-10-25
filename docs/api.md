@@ -55,6 +55,7 @@ def call_ai(
 | `extra_options` | `dict \| None` | `None` | Arbitrary provider-specific options merged into the payload last, overriding config-level values for the same key. |
 | `tools` | `list[ToolDefinition] \| None` | `None` | Tools the model may call. See [Tool Calling](tool-calling.md). |
 | `tool_results` | `list[ToolResult] \| None` | `None` | Results of previously requested tool calls, for the follow-up turn. When present, `prompt` is **not** re-appended to `messages`. |
+| `logprobs` | `int \| None` | `None` | Token log probabilities: `0` for each generated token, `1` to `20` for that many alternatives as well. Refused before sending (`ValueError` out of range, `UnsupportedOperationError` on a provider without them). See [Token Log Probabilities](logprobs.md). |
 
 A timeout is a retryable failure like any other, so the same request is sent again up to
 `max_retries` times with exponential backoff. A call that keeps timing out therefore occupies
@@ -511,6 +512,7 @@ The standard response object returned by `call_ai()`.
 | `reasoning_text` | `str` | `""` | The reasoning transcript, when the model returned one. Populated whatever `thinking` was set to. |
 | `reasoning_is_summary` | `bool` | `False` | `True` when `reasoning_text` is a provider-generated summary of the chain of thought rather than the raw trace. Google summarises, and so does Anthropic from Claude 4 on; the others return the raw trace. |
 | `tool_calls` | `list[ToolCall]` | `[]` | Tool calls the model requested. Empty when it answered with text. |
+| `logprobs` | `list[TokenLogprob] \| None` | `None` | One entry per generated token when `logprobs` was set, `None` otherwise. An empty list means the provider returned none. |
 | `message` | `dict \| None` | `None` | This turn as a `messages` entry, ready to append: `role`, `content`, `tool_calls` (`id`, `name`, `arguments`) and an opaque, JSON-serialisable `provider_state` that the same provider replays as it is. Every built-in adapter sets it. |
 
 ### `ToolDefinition`
@@ -546,6 +548,16 @@ appended to `messages` as `to_message()`.
 
 `to_message()` returns `{"role": "tool", "tool_call_id", "name", "content"}`, the history
 entry every adapter converts into its own tool-result format.
+
+### `TokenLogprob`
+
+The log probability of one generated token, found in `AiResponse.logprobs`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `token` | `str` | required | The token's text. |
+| `logprob` | `float` | required | Its natural-log probability, at most `0`. |
+| `top_logprobs` | `list[TokenLogprob]` | `[]` | The most likely tokens at this position, most likely first. Empty for `logprobs=0`. |
 
 ### `ProviderConfig`
 
@@ -604,7 +616,8 @@ The abstract base every adapter subclasses. Exported for consumers that call a p
 directly through `get_provider()`, and for anyone implementing an adapter out of tree. Its
 class-level `SUPPORTED_FILE_TYPES` declares which file classes the adapter accepts,
 `SUPPORTED_EMBEDDING_FILE_TYPES` which ones it can embed, `SUPPORTED_EXTENSIONS` which
-extensions of a class its endpoint decodes (empty: all of them), `SUPPORTS_UNLOAD` whether it holds
+extensions of a class its endpoint decodes (empty: all of them), `SUPPORTS_LOGPROBS` whether
+`call_ai(logprobs=...)` can be honoured, `SUPPORTS_UNLOAD` whether it holds
 a model resident at all, and `SUPPORTS_EMBEDDINGS` whether `embed()` is implemented.
 
 `call()` is the only abstract method. `preload_model()`, `warm_up()`, `unload_model()`,

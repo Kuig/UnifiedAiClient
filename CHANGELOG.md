@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `call_ai(logprobs=N)` returns the log probability of each generated token in
+  `AiResponse.logprobs`, a list of the new `TokenLogprob`, with the `N` most likely
+  alternatives per position (`0` to `20`). Supported on `ollama` (verified live on
+  `/api/chat` and `/api/generate`), `openai`, `mistral`, `llamacpp` and `script`, where the
+  protocol gains a `logprobs` field in and out. `BaseProvider.SUPPORTS_LOGPROBS` says which;
+  every other provider refuses the request before sending. `google` is among them: its
+  Developer API enables log probabilities on no current Gemini model.
+
 ### Fixed
 
 - `None` resets a provider option to its default instead of being registered.

@@ -23,6 +23,9 @@ class OpenAiProvider(OpenAiCompatProvider):
 
     DEFAULT_URL: str = "https://api.openai.com"
 
+    # Not on the reasoning models, which answer a logprobs request with a 400.
+    SUPPORTS_LOGPROBS: bool = True
+
     REQUIRES_API_KEY: bool = True
     SECRETS_KEY: str = "openai_api_key"
     REASONING_PARAM: str | None = "reasoning_effort"

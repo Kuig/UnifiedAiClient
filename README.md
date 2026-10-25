@@ -28,6 +28,7 @@ Supported providers:
 | [docs/multimodal.md](docs/multimodal.md) | Attaching files, the per-provider support matrix, and how unsupported files are refused. |
 | [docs/reasoning.md](docs/reasoning.md) | The `thinking` parameter, what each provider does with it, and reading the trace back. |
 | [docs/tool-calling.md](docs/tool-calling.md) | Defining tools, the tool loop over any number of turns, provider compatibility. |
+| [docs/logprobs.md](docs/logprobs.md) | Token log probabilities: the `logprobs` parameter and which providers return them. |
 | [docs/warm-up.md](docs/warm-up.md) | `warm_up()`, `preload_model()`, `unload_model()` and `cleanup()`: preparing a provider and releasing what it holds. |
 | [docs/script-protocol.md](docs/script-protocol.md) | The JSON stdin/stdout contract any script must satisfy to act as a provider. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Internal design: the codemap, the layer boundaries, and the invariants. |

@@ -4,8 +4,10 @@ import logging
 import time
 from typing import Any
 
+from unified_ai_client.exceptions import UnsupportedOperationError
 from unified_ai_client.models import (
     DEFAULT_TIMEOUT,
+    MAX_TOP_LOGPROBS,
     AiRequest,
     AiResponse,
     EmbeddingRequest,
@@ -44,6 +46,7 @@ def call_ai(
     extra_options: dict | None = None,
     tools: list[ToolDefinition] | None = None,
     tool_results: list[ToolResult] | None = None,
+    logprobs: int | None = None,
 ) -> AiResponse:
     """Main routing function for all unified AI text generation requests.
 
@@ -96,10 +99,19 @@ def call_ai(
         tool_results: Optional list of ``ToolResult`` objects containing the
             outputs of previously requested tool calls. Pass these on the
             follow-up call after executing the tools requested by the model.
+        logprobs: ``None`` (the default) asks for no log probabilities. ``0``
+            asks for the log probability of each generated token, and ``N`` up
+            to 20 adds the ``N`` most likely alternatives at each position.
+            They come back in ``AiResponse.logprobs``.
 
     Returns:
         ``AiResponse`` dataclass containing response text, token metrics,
         optional reasoning text, and any tool calls requested by the model.
+
+    Raises:
+        ValueError: If ``logprobs`` is not an integer from 0 to 20.
+        UnsupportedOperationError: If ``logprobs`` is set and the provider
+            offers no log probabilities. Raised before anything is sent.
     """
     _register_cleanup()
 
@@ -109,6 +121,7 @@ def call_ai(
     )
 
     prov = get_provider(provider)
+    _check_logprobs(prov, logprobs)
     # Recorded before the call, not after: a model that loaded and then timed
     # out is resident all the same, and still has to be released at exit.
     _record_loaded(provider, prov, model)
@@ -134,6 +147,7 @@ def call_ai(
         extra_options=extra_options,
         tools=tools,
         tool_results=tool_results,
+        logprobs=logprobs,
     )
 
     if file_path and tool_results:
@@ -153,6 +167,31 @@ def call_ai(
         provider, model, elapsed, response.input_tokens, response.output_tokens,
     )
     return response
+
+
+def _check_logprobs(prov: Any, logprobs: int | None) -> None:
+    """Refuse a ``logprobs`` request that cannot be honoured, before sending it.
+
+    A bool is refused too: ``True`` is the integer 1 and would silently ask for
+    one alternative per token.
+
+    Raises:
+        ValueError: If ``logprobs`` is not an integer from 0 to 20.
+        UnsupportedOperationError: If the provider offers no log probabilities.
+    """
+    if logprobs is None:
+        return
+    if isinstance(logprobs, bool) or not isinstance(logprobs, int) \
+            or not 0 <= logprobs <= MAX_TOP_LOGPROBS:
+        raise ValueError(
+            f"logprobs takes an integer from 0 to {MAX_TOP_LOGPROBS}, the number of "
+            f"alternatives per token (0 for none), not {logprobs!r}."
+        )
+    if not getattr(prov, "SUPPORTS_LOGPROBS", False):
+        raise UnsupportedOperationError(
+            f"Provider '{prov.provider_name}' returns no token log probabilities. "
+            "Leave logprobs unset, or use a provider that offers them."
+        )
 
 
 def _rate_limit(prov: Any, sleep_time: int | None) -> None:

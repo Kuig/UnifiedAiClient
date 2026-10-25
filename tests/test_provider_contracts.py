@@ -3222,6 +3222,149 @@ class TestToolHistoryAcrossTurns(ProviderRegistryIsolation):
         self.assertEqual(contents[2].parts[0].function_response.name, "f")
 
 
+class TestLogprobsSupportMatrix(unittest.TestCase):
+    """Which providers honour logprobs, against an explicit table.
+
+    The sources: Ollama and Google probed live (Google's Developer API answers
+    "Logprobs is not enabled for this model" on every current Gemini), OpenAI,
+    Mistral and llama-server from their documentation or source, and Groq,
+    Cohere and xAI documented as unsupported (xAI ignores the field silently
+    from grok-4.20 on, which is worse than a refusal).
+    """
+
+    _SUPPORTS_LOGPROBS = {
+        "ollama": True, "openai": True, "mistral": True, "llamacpp": True, "script": True,
+        "google": False, "anthropic": False, "groq": False, "cohere": False,
+        "xai": False, "lmstudio": False, "meta": False,
+    }
+
+    def test_table_covers_every_registered_provider(self) -> None:
+        self.assertEqual(set(self._SUPPORTS_LOGPROBS), set(_PROVIDER_CLASSES))
+
+    def test_declared_support_matches_the_table(self) -> None:
+        for name, expected in self._SUPPORTS_LOGPROBS.items():
+            with self.subTest(provider=name):
+                self.assertIs(_provider_class_by_name(name).SUPPORTS_LOGPROBS, expected)
+
+
+class TestLogprobs(ProviderRegistryIsolation):
+    """call_ai(logprobs=...) on the wire and back, per adapter."""
+
+    _OPENAI_REPLY = {
+        "choices": [{
+            "message": {"content": "Hi"},
+            "logprobs": {"content": [{
+                "token": "Hi", "logprob": -0.1, "bytes": [72, 105],
+                "top_logprobs": [{"token": "Hi", "logprob": -0.1},
+                                 {"token": "Hello", "logprob": -2.4}],
+            }]},
+        }],
+        "usage": {},
+    }
+
+    def _call(self, name: str, reply: dict, **request_kwargs):
+        cls = _provider_class_by_name(name)
+        provider = cls(ProviderConfig()) if name == "ollama" else cls(
+            ProviderConfig(), api_key="k"
+        )
+        captured: dict = {}
+
+        def fake_post(*args):
+            captured.update(args[1])
+            return reply
+
+        fields = {"provider": name, "model": "m", "prompt": "hi", "timeout": 10}
+        fields.update(request_kwargs)
+        with patch.object(provider, "_post", side_effect=fake_post):
+            response = provider.call(AiRequest(**fields))
+        return captured, response
+
+    def test_nothing_is_sent_or_returned_by_default(self) -> None:
+        payload, response = self._call("openai", self._OPENAI_REPLY)
+        self.assertNotIn("logprobs", payload)
+        self.assertNotIn("top_logprobs", payload)
+        self.assertIsNone(response.logprobs)
+
+    def test_openai_compat_sends_an_explicit_top_logprobs(self) -> None:
+        """llama-server defaults a missing top_logprobs to 20, so 0 is sent."""
+        for name in ("openai", "mistral", "llamacpp"):
+            for value in (0, 5):
+                with self.subTest(provider=name, logprobs=value):
+                    payload, _ = self._call(name, self._OPENAI_REPLY, logprobs=value)
+                    self.assertIs(payload["logprobs"], True)
+                    self.assertEqual(payload["top_logprobs"], value)
+
+    def test_openai_compat_parses_tokens_and_alternatives(self) -> None:
+        from unified_ai_client.models import TokenLogprob
+
+        _, response = self._call("openai", self._OPENAI_REPLY, logprobs=2)
+        self.assertEqual(response.logprobs, [TokenLogprob(
+            token="Hi", logprob=-0.1,
+            top_logprobs=[TokenLogprob("Hi", -0.1), TokenLogprob("Hello", -2.4)],
+        )])
+
+    def test_ollama_chat_and_generate_carry_logprobs(self) -> None:
+        entries = [{"token": "Hi", "logprob": -0.05, "bytes": [72, 105],
+                    "top_logprobs": [{"token": "Hi", "logprob": -0.05}]}]
+        chat_reply = {"message": {"content": "Hi"}, "eval_count": 1, "logprobs": entries}
+        payload, response = self._call("ollama", chat_reply, logprobs=1)
+        self.assertEqual((payload["logprobs"], payload["top_logprobs"]), (True, 1))
+        self.assertEqual(response.logprobs[0].top_logprobs[0].token, "Hi")
+
+        generate_reply = {"response": "Hi", "eval_count": 1, "logprobs": entries}
+        payload, response = self._call(
+            "ollama", generate_reply, logprobs=0, extra_options={"use_generate": True}
+        )
+        self.assertEqual(payload["top_logprobs"], 0)
+        self.assertEqual(response.logprobs[0].logprob, -0.05)
+
+    def test_asked_for_but_missing_is_an_empty_list_and_a_warning(self) -> None:
+        reply = {"choices": [{"message": {"content": "Hi"}}], "usage": {}}
+        with self.assertLogs("unified_ai_client.providers.base", "WARNING"):
+            _, response = self._call("openai", reply, logprobs=0)
+        self.assertEqual(response.logprobs, [])
+
+    def test_an_unsupported_provider_is_refused_before_sending(self) -> None:
+        from unified_ai_client import call_ai
+        from unified_ai_client.exceptions import UnsupportedOperationError
+        from unified_ai_client.providers.anthropic import AnthropicProvider
+
+        with patch.object(AnthropicProvider, "_post") as post, \
+                self.assertRaises(UnsupportedOperationError):
+            call_ai(provider="anthropic", model="claude-sonnet-5-5", prompt="hi",
+                    logprobs=0, max_retries=0)
+        post.assert_not_called()
+
+    def test_out_of_range_and_bool_values_are_refused(self) -> None:
+        from unified_ai_client import call_ai
+        from unified_ai_client.providers.ollama import OllamaProvider
+
+        for value in (-1, 21, True, 1.5):
+            with self.subTest(logprobs=value), \
+                    patch.object(OllamaProvider, "_post") as post, \
+                    self.assertRaises(ValueError):
+                call_ai(provider="ollama", model="m", prompt="hi",
+                        logprobs=value, max_retries=0)
+            post.assert_not_called()
+
+    def test_the_script_receives_and_returns_logprobs(self) -> None:
+        from unified_ai_client.providers import script as script_module
+        from unified_ai_client.providers.script import ScriptProvider
+
+        captured: dict = {}
+
+        def fake_run(cmd, payload, timeout):
+            captured.update(payload)
+            return {"text": "Hi", "logprobs": [{"token": "Hi", "logprob": -0.2}]}
+
+        with patch.object(script_module, "_run_script", side_effect=fake_run):
+            response = ScriptProvider(ProviderConfig()).call(AiRequest(
+                provider="script", model="s.py", prompt="hi", timeout=10, logprobs=0,
+            ))
+        self.assertEqual(captured["logprobs"], 0)
+        self.assertEqual(response.logprobs[0].logprob, -0.2)
+
+
 class TestAttachmentRefusalIsWordedOnce(FileFixtureCase):
     """A provider that promises a file class it cannot build says so one way.
 

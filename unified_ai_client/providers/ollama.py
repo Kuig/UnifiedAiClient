@@ -14,6 +14,7 @@ from unified_ai_client.models import (
     EmbeddingRequest,
     ModelInfo,
     ProviderConfig,
+    TokenLogprob,
     ToolCall,
 )
 from unified_ai_client.providers.base import BaseProvider
@@ -143,6 +144,10 @@ class OllamaProvider(BaseProvider):
     SUPPORTS_UNLOAD: bool = True
 
     SUPPORTS_EMBEDDINGS: bool = True
+
+    # Verified on 0.40.11; the entries cover the whole generation, thinking
+    # trace and its template markers included.
+    SUPPORTS_LOGPROBS: bool = True
 
     # /api/embed takes an input object with an image and an audio track; which
     # tags can read them is up to the model.
@@ -439,6 +444,9 @@ class OllamaProvider(BaseProvider):
             payload["think"] = True
         elif request.thinking is False:
             payload["think"] = False
+        if request.logprobs is not None:
+            payload["logprobs"] = True
+            payload["top_logprobs"] = request.logprobs
         return payload
 
     def _build_message(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -530,6 +538,7 @@ class OllamaProvider(BaseProvider):
             message.get("thinking", "") or "",
             self._parse_tool_calls(message),
             native={"role": "assistant", **message},
+            logprobs=self._collect_logprobs(request, resp.get("logprobs")),
         )
 
     def _generate(self, request: AiRequest, opts: dict[str, Any]) -> AiResponse:
@@ -552,7 +561,8 @@ class OllamaProvider(BaseProvider):
 
         resp = self._post("/api/generate", payload, request.timeout)
         return self._build_response(
-            resp, resp.get("response", "") or "", resp.get("thinking", "") or "", []
+            resp, resp.get("response", "") or "", resp.get("thinking", "") or "", [],
+            logprobs=self._collect_logprobs(request, resp.get("logprobs")),
         )
 
     @staticmethod
@@ -580,6 +590,7 @@ class OllamaProvider(BaseProvider):
         thinking: str,
         tool_calls: list[ToolCall],
         native: dict[str, Any] | None = None,
+        logprobs: list[TokenLogprob] | None = None,
     ) -> AiResponse:
         """Assemble the ``AiResponse``, splitting ``eval_count`` between trace and answer.
 
@@ -596,6 +607,7 @@ class OllamaProvider(BaseProvider):
             reasoning_text=thinking,
             tool_calls=tool_calls,
             message=self._assistant_message(text, tool_calls, native),
+            logprobs=logprobs,
         )
 
     def preload_model(

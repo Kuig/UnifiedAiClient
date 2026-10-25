@@ -126,6 +126,7 @@ class ScriptProvider(BaseProvider):
     # list_models: the "model" is the script's own path.
     SUPPORTS_UNLOAD: bool = True
     SUPPORTS_EMBEDDINGS: bool = True
+    SUPPORTS_LOGPROBS: bool = True
 
     # Empty on purpose: the whole merged extra_options dict reaches the script,
     # library keys included, since only the script knows what it understands.
@@ -192,6 +193,7 @@ class ScriptProvider(BaseProvider):
                 }
                 for tr in request.tool_results
             ] if request.tool_results else None,
+            "logprobs": request.logprobs,
         }
 
         data = _run_script(cmd, payload, request.timeout)
@@ -214,6 +216,7 @@ class ScriptProvider(BaseProvider):
             reasoning_text=data.get("reasoning_text", ""),
             tool_calls=tool_calls,
             message=self._assistant_message(data["text"], tool_calls),
+            logprobs=self._collect_logprobs(request, data.get("logprobs")),
         )
 
     def preload_model(

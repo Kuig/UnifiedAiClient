@@ -930,6 +930,17 @@ class TestOllamaLive(ProviderRegistryIsolation):
         self.assertGreater(heard.input_tokens, control.input_tokens)
 
 
+    def test_ollama_live_logprobs(self) -> None:
+        """With thinking off, the tokens spell out the answer, two alternatives each."""
+        model = self._require_model()
+        response = self._live_call(model, prompt="Say hi in two words.", logprobs=2)
+        self.assertTrue(response.logprobs)
+        self.assertEqual("".join(t.token for t in response.logprobs), response.text)
+        for entry in response.logprobs:
+            self.assertLessEqual(entry.logprob, 0.0)
+            self.assertEqual(len(entry.top_logprobs), 2)
+
+
 # ---------------------------------------------------------------------------
 # 7. Script provider
 # ---------------------------------------------------------------------------
