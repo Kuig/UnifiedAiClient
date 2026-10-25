@@ -182,7 +182,8 @@ read out of the body. Classifying which statuses are worth retrying lives there 
 there, so the answer cannot differ between adapters. `retry.py` implements the exponential
 backoff. `exceptions.py` holds the deterministic failures.
 `silence.py` quiets third-party SDK loggers; `verbosity.py` attaches or removes the
-library's own console handler and is deliberately decoupled from it, see CLAUDE.md.
+library's own console handler and is deliberately decoupled from it: raising the library's
+verbosity must not undo the SDK silence a caller asked for explicitly.
 
 ## Boundaries
 
