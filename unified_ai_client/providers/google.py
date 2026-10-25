@@ -45,7 +45,6 @@ behaviour this cache has always had. Serialising the upload window would mean
 holding a lock across tens of seconds of network I/O.
 """
 
-
 _DEFAULT_UPLOAD_POLL_TIMEOUT = 15
 """Seconds to wait for an upload to turn ACTIVE when ``upload_poll_timeout`` is unset."""
 
@@ -74,26 +73,23 @@ class GoogleProvider(BaseProvider):
     variants, and rigorous file cleanup on termination.
     """
 
-    # The Files API takes every class the library can classify natively, so only
-    # a file classify_file() cannot place at all is refused before upload.
-    # Everything this adapter reads out of extra_options. Google is the one
-    # provider with no verbatim passthrough: GenerateContentConfig is a typed
-    # model, so unrecognised fields go through the explicit allowlist in call()
-    # rather than straight into the payload.
+    # No verbatim passthrough here: anything else reaches GenerateContentConfig
+    # only through _FORWARDED_CONFIG_FIELDS.
     _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset({
         "temperature", "max_tokens", "max_output_tokens", "top_k", "top_p",
         "disable_safety", "upload_poll_timeout",
         "task_type", "output_dimensionality",
     })
 
+    # The Files API takes every class the library classifies, so only a file
+    # classify_file() cannot place at all is refused before upload.
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({
         "image", "audio", "video", "document",
     })
 
     SUPPORTS_EMBEDDINGS: bool = True
 
-    # gemini-embedding-2 embeds text, images, audio, video and PDFs; the parts
-    # are uploaded like any other attachment. A text-only model such as
+    # gemini-embedding-2 takes them all; a text-only model such as
     # gemini-embedding-001 refuses them with an error of its own.
     SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset({
         "image", "audio", "video", "document",
@@ -130,7 +126,9 @@ class GoogleProvider(BaseProvider):
                     self._client = genai.Client(api_key=self.api_key)
         return self._client
 
-    def _upload_file(self, file_path: str, upload_poll_timeout: int = _DEFAULT_UPLOAD_POLL_TIMEOUT) -> Any:
+    def _upload_file(
+        self, file_path: str, upload_poll_timeout: int = _DEFAULT_UPLOAD_POLL_TIMEOUT
+    ) -> Any:
         """Upload a file to Google Cloud or return the cached reference.
 
         If the same local file path has already been uploaded in this
@@ -346,79 +344,95 @@ class GoogleProvider(BaseProvider):
             Standardized AiResponse.
         """
         client = self._get_client()
-
         opts = self._merge_options(request)
-
         upload_poll_timeout = opts.get("upload_poll_timeout", _DEFAULT_UPLOAD_POLL_TIMEOUT)
 
-        # --- Build contents list ---
-        contents: list[Any] = []
+        contents = self._build_contents(request, upload_poll_timeout)
+        gen_config = self._build_config(request, opts)
+        response = self._with_deadline(
+            lambda: client.models.generate_content(
+                model=request.model,
+                contents=contents,
+                config=gen_config,
+            ),
+            request.timeout,
+        )
+        return self._parse_response(response, request.model)
 
-        # Previous conversation history (with optional file attachments)
-        if request.messages:
-            for msg in request.messages:
-                role = msg.get("role", "user")
-                if role == "assistant":
-                    role = "model"
-                parts: list[Any] = []
-                # Attach files from message history
-                msg_files = normalize_file_paths(msg.get("files"))
-                if msg_files:
-                    parts.extend(self._build_parts_for_files(msg_files, upload_poll_timeout))
+    def _build_message(self, msg: dict[str, Any], upload_poll_timeout: int) -> types.Content:
+        """Convert one history entry, keeping its files, tool calls and text.
 
-                # Preserve tool_calls on assistant/model messages by converting
-                # them to function_call Parts — required by Google to link
-                # subsequent function_response Parts.
-                if role == "model" and msg.get("tool_calls"):
-                    for tc in msg["tool_calls"]:
-                        fn = tc.get("function", tc)
-                        parts.append(types.Part.from_function_call(
-                            name=fn.get("name", ""),
-                            args=fn.get("arguments", {}),
-                        ))
-                # Text is appended independently of tool_calls, not as its
-                # alternative: a message that carries both must not lose one
-                # for having the other. "not parts" is the same safety valve
-                # anthropic.py uses — only reached when this message had no
-                # files, no tool_calls and no text, where Content(parts=[])
-                # would otherwise be sent.
-                content_text = msg.get("content", "")
-                if content_text or not parts:
-                    parts.append(types.Part.from_text(text=content_text))
-                contents.append(types.Content(role=role, parts=parts))
+        The three are independent: a message carrying several of them keeps
+        all. An entry with none of them still gets an empty text Part, since
+        ``Content(parts=[])`` is not a valid turn.
 
-        # Current turn: files + prompt
-        # Only add when NOT in a tool result continuation. When tool_results
-        # are provided, the consumer has already placed the user message in
-        # `messages` and the prompt should not be re-appended.
+        Args:
+            msg: Source message dict. May contain ``files`` and, on an assistant
+                message, ``tool_calls``.
+            upload_poll_timeout: Seconds to wait for each upload to turn ACTIVE.
+
+        Returns:
+            The ``types.Content`` for this turn.
+        """
+        role = msg.get("role", "user")
+        if role == "assistant":
+            role = "model"
+        parts: list[Any] = []
+        msg_files = normalize_file_paths(msg.get("files"))
+        if msg_files:
+            parts.extend(self._build_parts_for_files(msg_files, upload_poll_timeout))
+
+        # Google links a function_response to the function_call Part before it.
+        if role == "model" and msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", tc)
+                parts.append(types.Part.from_function_call(
+                    name=fn.get("name", ""),
+                    args=fn.get("arguments", {}),
+                ))
+        content_text = msg.get("content", "")
+        if content_text or not parts:
+            parts.append(types.Part.from_text(text=content_text))
+        return types.Content(role=role, parts=parts)
+
+    def _build_contents(self, request: AiRequest, upload_poll_timeout: int) -> list[Any]:
+        """History, the current turn and any tool results, in order.
+
+        A tool-result continuation has its user turn in the history already, so
+        the prompt is not appended a second time. On a fresh turn an empty text
+        Part is skipped when a file already fills it: ``prompt=""`` with only an
+        image is a legitimate "describe this" call.
+        """
+        contents: list[Any] = [
+            self._build_message(msg, upload_poll_timeout) for msg in request.messages or []
+        ]
+
         if not request.tool_results:
             current_parts: list[Any] = []
             file_paths = normalize_file_paths(request.file_path)
             if file_paths:
                 current_parts.extend(self._build_parts_for_files(file_paths, upload_poll_timeout))
-            # Skip an empty text Part when a file already made this turn
-            # non-empty: prompt="" with only an image attached is a
-            # legitimate "describe this" call. "not current_parts" is the
-            # safety valve for the genuinely empty case (no prompt, no
-            # files), where an empty Part is still sent rather than nothing.
             if request.prompt or not current_parts:
                 current_parts.append(types.Part.from_text(text=request.prompt))
             contents.append(types.Content(role="user", parts=current_parts))
-
-        # Tool results: append function_response Parts in a user turn
-        if request.tool_results:
-            function_response_parts: list[Any] = [
+        else:
+            contents.append(types.Content(role="user", parts=[
                 types.Part.from_function_response(
                     name=tr.name, response={"result": tr.content}
                 )
                 for tr in request.tool_results
-            ]
-            contents.append(types.Content(role="user", parts=function_response_parts))
+            ]))
+        return contents
 
-        # --- Build generation config ---
-        # A None here is dropped by the SDK's own serialisation, which leaves
-        # the model's default temperature in charge.
-        config_kwargs = {
+    def _build_config(
+        self, request: AiRequest, opts: dict[str, Any]
+    ) -> types.GenerateContentConfig:
+        """Build the generation config, logging the options it cannot carry.
+
+        A None value is dropped by the SDK's own serialisation, which leaves the
+        model's default in charge.
+        """
+        config_kwargs: dict[str, Any] = {
             "temperature": self._prefer_request(request.temperature, opts, "temperature"),
             "system_instruction": request.system_prompt,
             "safety_settings": self._build_safety_settings(opts.get("disable_safety", False)),
@@ -460,7 +474,6 @@ class GoogleProvider(BaseProvider):
             logging.WARNING,
         )
 
-        # Tool definitions
         if request.tools:
             declarations = [
                 types.FunctionDeclaration(
@@ -472,18 +485,16 @@ class GoogleProvider(BaseProvider):
             ]
             config_kwargs["tools"] = [types.Tool(function_declarations=declarations)]
 
-        gen_config = types.GenerateContentConfig(**config_kwargs)
+        return types.GenerateContentConfig(**config_kwargs)
 
-        response = self._with_deadline(
-            lambda: client.models.generate_content(
-                model=request.model,
-                contents=contents,
-                config=gen_config,
-            ),
-            request.timeout,
-        )
+    def _parse_response(self, response: Any, model: str) -> AiResponse:
+        """Read text, thought parts, tool calls and token counts.
 
-        # --- Parse token usage ---
+        Thought parts are read whatever ``thinking`` was, since a model may
+        think anyway (on Gemini 3, ``thinking=False`` only minimises it). They
+        are always a summary the model wrote of its own reasoning, never the
+        chain of thought, hence ``reasoning_is_summary``.
+        """
         input_tokens = 0
         output_tokens = 0
         reasoning_tokens = 0
@@ -493,16 +504,6 @@ class GoogleProvider(BaseProvider):
             output_tokens = getattr(usage, "candidates_token_count", 0) or 0
             reasoning_tokens = getattr(usage, "thoughts_token_count", 0) or 0
 
-        # --- Extract text, reasoning, and tool calls ---
-        # Always collect thought parts regardless of request.thinking: a model
-        # may produce thinking output even when thinking was not explicitly
-        # requested (e.g., thinking=False only minimises thinking, not prevents
-        # it entirely).
-        #
-        # Gemini never exposes the raw chain of thought: every thought part it
-        # returns is a summary the model wrote about its own reasoning, and it
-        # is typically far shorter than thoughts_token_count implies. Callers
-        # are told so via AiResponse.reasoning_is_summary below.
         response_text = ""
         reasoning_text = ""
         tool_calls: list[ToolCall] = []
@@ -521,21 +522,16 @@ class GoogleProvider(BaseProvider):
                 else:
                     response_text += part.text or ""
         except (IndexError, AttributeError):
-            # candidates is empty when the prompt itself was blocked (safety,
-            # prohibited content, recitation): there is no candidate to read a
-            # finish_reason from, only prompt_feedback on the response itself.
-            # The empty text this falls back to is indistinguishable from "the
-            # model said nothing", so the reason is logged rather than lost,
-            # the same failure shape CLAUDE.md documents for the old
-            # "[File could not be read as text]" placeholder, moved from the
-            # file layer to the response layer.
+            # No candidate at all means the prompt itself was blocked. The empty
+            # text that follows reads as "the model said nothing", so the block
+            # reason is logged rather than lost.
             block_reason = getattr(
                 getattr(response, "prompt_feedback", None), "block_reason", None
             )
             if block_reason:
                 _log.warning(
                     "Google blocked the prompt for model '%s': %s",
-                    request.model, block_reason,
+                    model, block_reason,
                 )
             response_text = getattr(response, "text", "") or ""
 
@@ -587,9 +583,8 @@ class GoogleProvider(BaseProvider):
         client = self._get_client()
         client.models.get(model=model)
 
-        # Validated for the same reason call() validates: an unusable file would
-        # otherwise be uploaded, counted against quota and held in the cache
-        # until cleanup(), for a request that will refuse it anyway.
+        # Validated first: an unusable file would otherwise be uploaded and held
+        # against quota until cleanup(), for a request that refuses it anyway.
         for path, _ in self._validate_files(normalize_file_paths(file_paths)):
             self._upload_file(path, upload_poll_timeout)
 
@@ -726,10 +721,8 @@ class GoogleProvider(BaseProvider):
             try:
                 client.files.delete(name=ref.name)
             except Exception as exc:
-                # Swallowed by design (see docstring), but silent until now:
-                # a failed delete leaves the file on Google's quota, which is
-                # the exact leak cleanup() exists to prevent, so it is worth
-                # a trace even though it must not stop the other deletes.
+                # Swallowed so the other deletes still run, but a file left on
+                # the quota is the leak cleanup() exists to prevent.
                 _log.debug("Failed to delete uploaded file '%s': %s", ref.name, exc)
         with _UPLOADED_FILES_LOCK:
             _UPLOADED_FILES.clear()

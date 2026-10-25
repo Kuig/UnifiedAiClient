@@ -33,12 +33,9 @@ _TRANSLATED_OPTIONS: dict[str, str] = {
 _MODEL_PARAM_OPTIONS: frozenset[str] = frozenset({"temperature", "top_k", "top_p"})
 """Library options Ollama accepts under the very same name."""
 
-# Request-level fields, as opposed to the model parameters that live inside
-# `options`, per endpoint (ollama api/types.go: ChatRequest, GenerateRequest,
-# EmbedRequest). A key in extra_options that names one of these goes into the
-# request body itself: inside `options` Ollama would discard it with no more
-# than a server-side warning. `system` is absent on purpose, because it is
-# filled from system_prompt.
+# Request-body fields per endpoint, copied from ChatRequest, GenerateRequest and
+# EmbedRequest in ollama's api/types.go. Inside `options` Ollama would discard
+# them with only a server-side warning. `system` is left out: system_prompt fills it.
 _CHAT_FIELDS: frozenset[str] = frozenset({
     "format", "think", "truncate", "shift", "logprobs", "top_logprobs",
 })
@@ -113,8 +110,7 @@ class OllamaProvider(BaseProvider):
 
     DEFAULT_URL: str = "http://localhost:11434"
 
-    # /api/chat carries attachments in images[] and nothing else. Audio-capable
-    # models exist, but reaching them needs the OpenAI-compatible endpoint.
+    # /api/chat carries attachments in images[] and nothing else.
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image"})
 
     # Ollama keeps a model in VRAM between requests and can be told to drop it.
@@ -122,9 +118,8 @@ class OllamaProvider(BaseProvider):
 
     SUPPORTS_EMBEDDINGS: bool = True
 
-    # /api/embed takes an input object with an image and an audio track since
-    # Ollama's multimodal embeddings (2026-09). Unlike /api/chat, audio is
-    # carried there; which tags can read it is up to the model.
+    # /api/embed takes an input object with an image and an audio track; which
+    # tags can read them is up to the model.
     SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset({"image", "audio"})
 
     # Lists the installed models, so it answers "is the server up" for free.
@@ -304,64 +299,39 @@ class OllamaProvider(BaseProvider):
     def call(self, request: AiRequest) -> AiResponse:
         """Execute an AI inference call to Ollama.
 
-        Token counting notes:
-        - ``output_tokens`` maps to ``eval_count``, which Ollama reports as the
-          total generated tokens (thinking trace + final response combined).
-        - ``reasoning_tokens`` is estimated when ``message.thinking`` is present
-          in the response. The estimation uses the exact chars-per-token ratio
-          of this response (``eval_count / (len(content) + len(thinking))``),
-          which is self-consistent and avoids a fixed global ratio.
-        - Both ``reasoning_tokens`` and ``raw_thinking`` are always processed
-          — a model may produce thinking output even when not explicitly requested.
+        Routes to ``/api/chat``, or to ``/api/generate`` when ``use_generate``
+        is set. ``output_tokens`` and ``reasoning_tokens`` split Ollama's single
+        ``eval_count``, see ``_estimate_reasoning_tokens()``; the thinking trace
+        is harvested whether or not it was asked for, since a model may produce
+        one anyway.
 
         Args:
             request: The request containing parameters.
 
         Returns:
             Standardized response.
+
+        Raises:
+            NonRetryableError: If the request needs a field the chosen endpoint
+                does not have.
         """
-        messages: list[dict[str, Any]] = []
-
-        # 1. System Prompt
-        if request.system_prompt:
-            messages.append({"role": "system", "content": request.system_prompt})
-
-        # 2. Chat History (with optional file attachments per message)
-        if request.messages:
-            for msg in request.messages:
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                msg_files = normalize_file_paths(msg.get("files"))
-                multimodal: list[str] = []
-                if msg_files:
-                    content, multimodal = self._process_files_for_message(
-                        msg_files, content
-                    )
-
-                entry: dict[str, Any] = {"role": role, "content": content}
-                if multimodal:
-                    entry["images"] = multimodal
-                # Preserve tool_calls on assistant messages so Ollama can
-                # correctly link subsequent tool results back to the call,
-                # regardless of whether this same message also carries a file:
-                # the two used to be on an if/else, so a message with both
-                # silently lost its tool_calls.
-                if role == "assistant" and msg.get("tool_calls"):
-                    entry["tool_calls"] = msg["tool_calls"]
-                messages.append(entry)
-
-        # 3. Resolve options early: the file-processing step below needs to
-        # know use_generate before it can decide whether its result is used.
         opts = self._merge_options(request)
-        use_generate = opts.get("use_generate", False)
+        use_generate = bool(opts.get("use_generate", False))
+        self._check_endpoint_fields(request, opts, use_generate)
+        if use_generate:
+            return self._generate(request, opts)
+        return self._chat(request, opts)
 
-        # /api/generate has no place for any of these: no message history, no
-        # tool schema, no way to append a tool result. Until this check
-        # existed, use_generate silently dropped them instead of refusing, the
-        # same class of silent data loss the file-attachment and
-        # history-message invariants elsewhere in this adapter already guard
-        # against. A system prompt is not on the list: /api/generate carries
-        # it in its own `system` field.
+    def _check_endpoint_fields(
+        self, request: AiRequest, opts: dict[str, Any], use_generate: bool
+    ) -> None:
+        """Refuse what the chosen endpoint cannot carry, and log what it drops.
+
+        Raises:
+            NonRetryableError: If ``/api/generate`` is asked for history, tools
+                or tool results, or ``/api/chat`` for a completion-only field.
+                Dropping either would change the answer rather than degrade it.
+        """
         if use_generate:
             unsupported = [
                 name for name, value in (
@@ -378,9 +348,6 @@ class OllamaProvider(BaseProvider):
                     "/api/chat instead."
                 )
         else:
-            # The reverse case: a completion-only field asked for on the chat
-            # endpoint would be dropped, and a `suffix` silently ignored is a
-            # wrong answer, not a degraded one.
             generate_only = sorted(
                 k for k in opts if k in _GENERATE_FIELDS - _CHAT_FIELDS
             )
@@ -397,48 +364,21 @@ class OllamaProvider(BaseProvider):
             "owned by another provider, or not a field of this endpoint",
         )
 
-        # 4. Current User Message — only add when NOT in a tool result continuation.
-        # When tool_results are provided, the consumer has already placed the user
-        # message in `messages` (history) and the prompt should not be re-appended.
-        #
-        # File processing runs whenever its result is actually used: always
-        # for /api/generate below, whose payload has no other place to carry
-        # the prompt or attachments, and only for a fresh /api/chat turn
-        # otherwise — encoding an attachment a tool-result continuation will
-        # never send used to run unconditionally, which is wasted work.
-        if use_generate or not request.tool_results:
-            file_paths = normalize_file_paths(request.file_path)
-            effective_prompt, multimodal_data = self._process_files_for_message(
-                file_paths, request.prompt
-            )
-        else:
-            effective_prompt, multimodal_data = request.prompt, []
+    def _build_options(self, request: AiRequest, opts: dict[str, Any]) -> dict[str, Any]:
+        """Build the model ``options`` block.
 
-        if not request.tool_results:
-            user_message: dict[str, Any] = {
-                "role": "user",
-                "content": effective_prompt,
-            }
-            if multimodal_data:
-                user_message["images"] = multimodal_data
-            messages.append(user_message)
+        ``extra_options`` are folded first, config below call-time, and an
+        explicit request argument wins over both. A lever nobody set is left
+        out, so the Modelfile's ``PARAMETER`` lines and the server defaults stay
+        in charge.
 
-        # 5. Build the model options.
-        #
-        # Fold extra_options first, config below call-time so the latter
-        # overrides the former for the same key (docs/configuration.md), then
-        # let an explicit named parameter win over both — it is the more
-        # specific signal the caller gave for this exact call. Only when
-        # neither an explicit parameter nor any extra_options set a value
-        # does Ollama's own default apply, and it applies because the key is
-        # left out: the Modelfile's PARAMETER lines and the server defaults
-        # are what the model's author tuned, and this library has no better
-        # value to substitute for them.
-        #
-        # This used to run in the opposite order: temperature/top_k/top_p
-        # were set from the request first, and _fold_options(opts, options)
-        # ran last, so a top_k registered via configure_provider() silently
-        # overrode an explicit call_ai(top_k=...) every time.
+        Args:
+            request: The request whose arguments take precedence.
+            opts: Merged options from ``_merge_options()``.
+
+        Returns:
+            The ``options`` dict for the payload.
+        """
         options: dict[str, Any] = {}
         _fold_options(self.config.extra_options or {}, options)
         _fold_options(request.extra_options or {}, options)
@@ -452,130 +392,158 @@ class OllamaProvider(BaseProvider):
             if resolved is not None:
                 options[key] = resolved
 
-        # Call-time max_tokens takes precedence
         if request.max_tokens is not None:
             options["num_predict"] = request.max_tokens
+        return options
 
+    def _base_payload(self, request: AiRequest, opts: dict[str, Any]) -> dict[str, Any]:
+        """The fields ``/api/chat`` and ``/api/generate`` share."""
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "stream": False,
+            "options": self._build_options(request, opts),
+        }
         keep_alive = opts.get("keep_alive")
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
+        if request.format_json:
+            payload["format"] = "json"
+        if request.thinking is True:
+            payload["think"] = True
+        elif request.thinking is False:
+            payload["think"] = False
+        return payload
 
-        if use_generate:
-            # /api/generate takes one prompt, its attachments, a system prompt
-            # and the same think flag /api/chat does; history and tools were
-            # refused above.
-            payload: dict[str, Any] = {
-                "model": request.model,
-                "prompt": effective_prompt,
-                "stream": False,
-                "options": options,
-            }
-            if request.system_prompt:
-                payload["system"] = request.system_prompt
-            if keep_alive is not None:
-                payload["keep_alive"] = keep_alive
-            if multimodal_data:
-                payload["images"] = multimodal_data
+    def _build_message(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Convert one history entry, keeping its text, files and tool calls.
 
-            if request.format_json:
-                payload["format"] = "json"
+        Args:
+            msg: Source message dict. May contain ``files`` and, on an assistant
+                message, ``tool_calls``.
 
-            if request.thinking is True:
-                payload["think"] = True
-            elif request.thinking is False:
-                payload["think"] = False
+        Returns:
+            Ollama-format message dict.
+        """
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        msg_files = normalize_file_paths(msg.get("files"))
+        images: list[str] = []
+        if msg_files:
+            content, images = self._process_files_for_message(msg_files, content)
 
-            payload.update(_request_fields(opts, _GENERATE_FIELDS))
+        entry: dict[str, Any] = {"role": role, "content": content}
+        if images:
+            entry["images"] = images
+        if role == "assistant" and msg.get("tool_calls"):
+            entry["tool_calls"] = msg["tool_calls"]
+        return entry
 
-            resp = self._post("/api/generate", payload, request.timeout)
+    def _chat(self, request: AiRequest, opts: dict[str, Any]) -> AiResponse:
+        """Send the request to ``/api/chat`` and parse the reply."""
+        messages: list[dict[str, Any]] = []
+        if request.system_prompt:
+            messages.append({"role": "system", "content": request.system_prompt})
+        for msg in request.messages or []:
+            messages.append(self._build_message(msg))
 
-            content_text = resp.get("response", "") or ""
-            eval_count = resp.get("eval_count", 0)
-            # The trace comes back in its own top-level field, separate from
-            # the answer, exactly as message.thinking does on /api/chat.
-            raw_thinking = resp.get("thinking", "") or ""
-            reasoning_text = raw_thinking
-            tool_calls: list[ToolCall] = []  # refused above
-        else:
-            payload: dict[str, Any] = {
-                "model": request.model,
-                "messages": messages,
-                "stream": False,
-                "options": options,
-            }
-            if keep_alive is not None:
-                payload["keep_alive"] = keep_alive
+        # A tool-result continuation has its user turn in the history already,
+        # so the prompt and its attachments are neither re-sent nor encoded.
+        if not request.tool_results:
+            prompt, images = self._process_files_for_message(
+                normalize_file_paths(request.file_path), request.prompt
+            )
+            user_message: dict[str, Any] = {"role": "user", "content": prompt}
+            if images:
+                user_message["images"] = images
+            messages.append(user_message)
 
-            if request.format_json:
-                payload["format"] = "json"
+        for tr in request.tool_results or []:
+            messages.append({"role": "tool", "content": tr.content})
 
-            # Tool definitions — Ollama uses OpenAI-compatible format
-            if request.tools:
-                payload["tools"] = [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        },
-                    }
-                    for t in request.tools
-                ]
+        payload = self._base_payload(request, opts)
+        payload["messages"] = messages
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    },
+                }
+                for t in request.tools
+            ]
+        # Last, so a `think` level such as "high" or a JSON-schema `format`
+        # overrides what the tri-state flags derived.
+        payload.update(_request_fields(opts, _CHAT_FIELDS))
 
-            # Tool results — appended as role:"tool" messages
-            if request.tool_results:
-                for tr in request.tool_results:
-                    messages.append({
-                        "role": "tool",
-                        "content": tr.content,
-                    })
-
-            payload["messages"] = messages
-
-            if request.thinking is True:
-                payload["think"] = True
-            elif request.thinking is False:
-                payload["think"] = False
-
-            # Request-level fields from extra_options go last, so a `think`
-            # level such as "high" or a JSON-schema `format` overrides what
-            # the tri-state flags above derived.
-            payload.update(_request_fields(opts, _CHAT_FIELDS))
-
-            # 5. Make request
-            resp = self._post("/api/chat", payload, request.timeout)
-
-            # 6. Parse output
-            message = resp.get("message", {})
-            content_text = message.get("content", "") or ""
-            eval_count = resp.get("eval_count", 0)
-
-            raw_thinking = message.get("thinking", "") or ""
-            reasoning_text = raw_thinking
-
-            # Parse tool calls
-            raw_tool_calls = message.get("tool_calls") or []
-            tool_calls: list[ToolCall] = []
-            for tc in raw_tool_calls:
-                fn = tc.get("function", {})
-                tc_id = tc.get("id") or f"{fn.get('name', 'tool')}_{len(tool_calls)}"
-                tool_calls.append(ToolCall(
-                    id=tc_id,
-                    name=fn.get("name", ""),
-                    arguments=fn.get("arguments") or {},
-                ))
-
-        # Ollama reports one aggregate eval_count, so the split between the
-        # thinking trace and the answer has to be estimated.
-        reasoning_tokens = self._estimate_reasoning_tokens(
-            content_text, raw_thinking, eval_count
+        resp = self._post("/api/chat", payload, request.timeout)
+        message = resp.get("message", {})
+        return self._build_response(
+            resp,
+            message.get("content", "") or "",
+            message.get("thinking", "") or "",
+            self._parse_tool_calls(message),
         )
 
+    def _generate(self, request: AiRequest, opts: dict[str, Any]) -> AiResponse:
+        """Send the request to ``/api/generate`` and parse the reply.
+
+        The endpoint takes one prompt with its attachments, a system prompt and
+        the same ``think`` flag as ``/api/chat``; history and tools were refused
+        by ``_check_endpoint_fields()``.
+        """
+        prompt, images = self._process_files_for_message(
+            normalize_file_paths(request.file_path), request.prompt
+        )
+        payload = self._base_payload(request, opts)
+        payload["prompt"] = prompt
+        if request.system_prompt:
+            payload["system"] = request.system_prompt
+        if images:
+            payload["images"] = images
+        payload.update(_request_fields(opts, _GENERATE_FIELDS))
+
+        resp = self._post("/api/generate", payload, request.timeout)
+        return self._build_response(
+            resp, resp.get("response", "") or "", resp.get("thinking", "") or "", []
+        )
+
+    @staticmethod
+    def _parse_tool_calls(message: dict[str, Any]) -> list[ToolCall]:
+        """Read the tool calls of a chat reply, giving each an id.
+
+        Ollama does not always return one, so a missing id is derived from the
+        tool name and position.
+        """
+        tool_calls: list[ToolCall] = []
+        for tc in message.get("tool_calls") or []:
+            fn = tc.get("function", {})
+            tc_id = tc.get("id") or f"{fn.get('name', 'tool')}_{len(tool_calls)}"
+            tool_calls.append(ToolCall(
+                id=tc_id,
+                name=fn.get("name", ""),
+                arguments=fn.get("arguments") or {},
+            ))
+        return tool_calls
+
+    def _build_response(
+        self,
+        resp: dict[str, Any],
+        text: str,
+        thinking: str,
+        tool_calls: list[ToolCall],
+    ) -> AiResponse:
+        """Assemble the ``AiResponse``, splitting ``eval_count`` between trace and answer."""
+        eval_count = resp.get("eval_count", 0)
+        reasoning_tokens = self._estimate_reasoning_tokens(text, thinking, eval_count)
         return AiResponse(
-            text=content_text,
+            text=text,
             input_tokens=resp.get("prompt_eval_count", 0),
             output_tokens=max(0, eval_count - reasoning_tokens),
             reasoning_tokens=reasoning_tokens,
-            reasoning_text=reasoning_text,
+            reasoning_text=thinking,
             tool_calls=tool_calls,
         )
 
@@ -610,14 +578,8 @@ class OllamaProvider(BaseProvider):
                 registered for this provider.
         """
         options: dict[str, Any] = {}
-
-        # 1. Config-level extra_options (from configure_provider / previous preload)
         _fold_options(self.config.extra_options or {}, options)
-
-        # 2. Call-time extra_options (override config)
         _fold_options(extra_options or {}, options)
-
-        # 3. Explicit context_size parameter (highest priority)
         if context_size is not None:
             options["num_ctx"] = context_size
 

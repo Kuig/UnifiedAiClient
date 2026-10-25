@@ -30,7 +30,7 @@ _ANTHROPIC_VERSION = "2023-06-01"
 class AnthropicProvider(BaseProvider):
     """Anthropic Claude API provider.
 
-    Uses the /v1/messages endpoint directly via urllib — no SDK required.
+    Uses the /v1/messages endpoint directly via urllib, with no SDK.
 
     File handling:
     - Images: base64 image content block.
@@ -54,21 +54,17 @@ class AnthropicProvider(BaseProvider):
 
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "document"})
 
-    # Sent only when neither the caller nor the config set max_tokens. Unlike
-    # the sampling parameters, which are left to the server when unset, this
-    # field is mandatory on /v1/messages, so some value has to be chosen. It
-    # also sizes the thinking budget on models older than 4.6.
+    # Mandatory on /v1/messages, so used when nobody set max_tokens. Also sizes
+    # the thinking budget on models older than 4.6.
     DEFAULT_MAX_TOKENS: int = 8192
 
-    # The four common levers, each mapped onto its own field in call(). The rest
-    # of the library's namespace belongs to other adapters and is dropped rather
-    # than forwarded: /v1/messages rejects an unknown top-level field.
+    # The rest of the library namespace is dropped, not forwarded:
+    # /v1/messages rejects an unknown top-level field.
     _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset(
         {"temperature", "max_tokens", "top_k", "top_p"}
     )
 
-    # Claude 4.6 is where adaptive thinking was introduced. Below it only the
-    # fixed-budget form is accepted; from 4.7 on only the adaptive one is.
+    # Below 4.6 only the fixed-budget form is accepted; from 4.7 only adaptive.
     _ADAPTIVE_SINCE: tuple[int, int] = (4, 6)
     # Claude 3.7 is where extended thinking was introduced.
     _THINKING_SINCE: tuple[int, int] = (3, 7)
@@ -80,9 +76,8 @@ class AnthropicProvider(BaseProvider):
     # From 4.7 on thinking.display defaults to "omitted", which returns thinking
     # blocks with empty text; "summarized" has to be asked for.
     _DISPLAY_SINCE: tuple[int, int] = (4, 7)
-    # Models on which thinking cannot be turned off: {"type": "disabled"} is a
-    # 400, so thinking=False lowers the effort instead. Keyed by family, with
-    # the first version the rule applies to.
+    # Family to first version where {"type": "disabled"} is a 400, so
+    # thinking=False lowers the effort instead.
     _NO_DISABLE_SINCE: dict[str, tuple[int, int]] = {
         "opus": (5, 5), "fable": (0, 0), "mythos": (0, 0),
     }
@@ -208,24 +203,19 @@ class AnthropicProvider(BaseProvider):
         if thinking:
             if adaptive:
                 payload: dict[str, Any] = {"type": "adaptive"}
-                # From 4.7 the trace comes back empty unless asked for. The
-                # setting changes what is returned, not what is computed or
-                # billed, and this adapter harvests reasoning wherever a model
-                # produces it.
+                # From 4.7 the trace comes back empty unless asked for; this
+                # changes what is returned, not what is computed or billed.
                 version = self._model_version(model)
                 if version is None or version >= self._DISPLAY_SINCE:
                     payload["display"] = "summarized"
                 return payload
-            # budget_tokens must stay under max_tokens, and above the floor.
             budget = max(self._MIN_THINKING_BUDGET, max_tokens // 2)
             return {"type": "enabled", "budget_tokens": budget}
 
-        # thinking=False. Older models have no 'disabled' form: for them
-        # thinking is off unless explicitly enabled, so omitting is correct.
+        # Older models have no 'disabled' form: their thinking is off unless enabled.
         if not adaptive:
             return None
-        # Models that cannot switch it off get no thinking field at all; the
-        # effort is lowered instead, see _minimal_effort().
+        # These cannot switch it off; _minimal_effort() lowers the effort instead.
         if self._matches(model, self._NO_DISABLE_SINCE):
             return None
         if self._matches(model, self._BETWEEN_TOOLS_SINCE):
@@ -438,8 +428,6 @@ class AnthropicProvider(BaseProvider):
 
         content: list[dict[str, Any]] = []
         for fp, ft in native:
-            # Both native classes share the same block shape; only the
-            # discriminator and the media type differ.
             if ft not in ("image", "document"):
                 raise self._unsupported_native_error(fp, ft)
             _log.debug("Anthropic: '%s' → %s base64 block", os.path.basename(fp), ft)
@@ -454,10 +442,8 @@ class AnthropicProvider(BaseProvider):
                 },
             })
 
-        # Skip an empty text block rather than sending {"type": "text",
-        # "text": ""}, which the Messages API rejects. A prompt="" call with
-        # only a file attached (a "describe this" call with the instruction
-        # in the system prompt) is a legitimate use that used to fail on this.
+        # An empty text block is a 400, and prompt="" with only a file attached
+        # is a legitimate "describe this" call.
         if effective_prompt or (pad_if_empty and not content):
             content.append({"type": "text", "text": effective_prompt})
         return content
@@ -490,7 +476,7 @@ class AnthropicProvider(BaseProvider):
         Args:
             msg: Source message dict. May contain 'files' (list of file paths)
                  or 'tool_calls' (for assistant messages that requested tool
-                 execution — converted to Anthropic ``tool_use`` blocks).
+                 execution, converted to Anthropic ``tool_use`` blocks).
 
         Returns:
             Anthropic-format message dict.
@@ -500,12 +486,8 @@ class AnthropicProvider(BaseProvider):
         file_paths = normalize_file_paths(msg.get("files"))
 
         if role == "assistant" and msg.get("tool_calls"):
-            # Text and files go through the same builder as any other
-            # message, pad_if_empty=False because the tool_use blocks below
-            # guarantee content is non-empty on their own. Building it this
-            # way, instead of only checking `text`, is what keeps a file
-            # attached to this same history message from disappearing just
-            # because tool_calls are also present.
+            # Same builder as any other message, so a file on this entry is
+            # kept; the tool_use blocks below make padding unnecessary.
             content = self._build_content_blocks(text, file_paths, pad_if_empty=False)
             for i, tc in enumerate(msg["tool_calls"]):
                 fn = tc.get("function", tc)
@@ -531,14 +513,15 @@ class AnthropicProvider(BaseProvider):
 
         Returns:
             Standardized AiResponse.
+
+        Raises:
+            NonRetryableError: If ``format_json`` is set without a schema.
+            ModelRefusalError: If the model declined on policy grounds.
         """
         opts = self._merge_options(request)
 
-        # The Messages API has no schema-less JSON mode: structured output
-        # takes a schema (output_config.format), and the prefill trick the
-        # older docs suggested is a 400 from Claude 4.6 on. With no way to
-        # honour a bare format_json, refusing beats the silence that used to
-        # follow, when the flag was simply never read.
+        # No schema-less JSON mode exists: structured output takes a schema, and
+        # the prefill trick is a 400 from Claude 4.6 on. Refusing beats ignoring.
         if request.format_json and "format" not in (opts.get("output_config") or {}):
             raise NonRetryableError(
                 "Anthropic has no schema-less JSON mode, so format_json=True "
@@ -547,65 +530,27 @@ class AnthropicProvider(BaseProvider):
                 '"json_schema", "schema": {...}}}}.'
             )
 
-        messages: list[dict[str, Any]] = []
+        payload = self._build_payload(request, opts, self._build_messages(request))
+        resp = self._post(payload, request.timeout)
+        return self._parse_response(resp, request.model)
 
-        if request.messages:
-            for msg in request.messages:
-                messages.append(self._build_message(msg))
+    def _build_messages(self, request: AiRequest) -> list[dict[str, Any]]:
+        """History, the current turn and any tool results, in order.
 
-        # Current user message — only add when NOT in a tool result continuation.
+        A tool-result continuation has its user turn in the history already, so
+        the prompt is not appended a second time. Tool results travel as one
+        user message of ``tool_result`` blocks, right after the assistant
+        message holding the matching ``tool_use`` blocks.
+        """
+        messages = [self._build_message(msg) for msg in request.messages or []]
+
         if not request.tool_results:
             file_paths = normalize_file_paths(request.file_path)
-            user_content = self._build_user_content(request.prompt, file_paths)
-            messages.append({"role": "user", "content": user_content})
-
-        # The one default this adapter still has to supply: the Messages API
-        # rejects a request without max_tokens, so leaving it to the server is
-        # not an option here the way it is for the sampling parameters below.
-        max_tokens = self._prefer_request(
-            request.max_tokens, opts, "max_tokens", self.DEFAULT_MAX_TOKENS
-        )
-
-        payload: dict[str, Any] = {
-            "model": request.model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-        }
-
-        temperature = self._prefer_request(request.temperature, opts, "temperature")
-        if temperature is not None:
-            payload["temperature"] = temperature
-
-        top_k = self._prefer_request(request.top_k, opts, "top_k")
-        if top_k is not None:
-            payload["top_k"] = top_k
-
-        top_p = self._prefer_request(request.top_p, opts, "top_p")
-        if top_p is not None:
-            payload["top_p"] = top_p
-
-        # Provider-specific options, forwarded verbatim. Anything the library
-        # owns was consumed above or belongs to another adapter.
-        payload.update(self._passthrough_options(opts))
-
-        if request.system_prompt:
-            payload["system"] = request.system_prompt
-
-        # Tool definitions
-        if request.tools:
-            payload["tools"] = [
-                {
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": t.parameters,
-                }
-                for t in request.tools
-            ]
-
-        # Tool results — Anthropic expects them as a user message with
-        # tool_result content blocks, immediately following the assistant
-        # message that contained the tool_use blocks.
-        if request.tool_results:
+            messages.append({
+                "role": "user",
+                "content": self._build_user_content(request.prompt, file_paths),
+            })
+        else:
             messages.append({
                 "role": "user",
                 "content": [
@@ -617,6 +562,51 @@ class AnthropicProvider(BaseProvider):
                     for tr in request.tool_results
                 ],
             })
+        return messages
+
+    def _build_payload(
+        self,
+        request: AiRequest,
+        opts: dict[str, Any],
+        messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Assemble the request body around the built messages.
+
+        ``max_tokens`` is the one value this adapter still supplies when nobody
+        set it, because the Messages API rejects a request without it.
+        """
+        max_tokens = self._prefer_request(
+            request.max_tokens, opts, "max_tokens", self.DEFAULT_MAX_TOKENS
+        )
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+
+        for key, value in (
+            ("temperature", request.temperature),
+            ("top_k", request.top_k),
+            ("top_p", request.top_p),
+        ):
+            resolved = self._prefer_request(value, opts, key)
+            if resolved is not None:
+                payload[key] = resolved
+
+        payload.update(self._passthrough_options(opts))
+
+        if request.system_prompt:
+            payload["system"] = request.system_prompt
+
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                }
+                for t in request.tools
+            ]
 
         thinking_payload = self._build_thinking_payload(
             request.thinking, request.model, max_tokens
@@ -627,16 +617,26 @@ class AnthropicProvider(BaseProvider):
 
         effort = self._minimal_effort(request.thinking, request.model)
         if effort is not None:
-            # Copied rather than updated in place: an output_config from
-            # extra_options is the caller's own dict. An effort they set
-            # there is the more specific request and is left alone.
+            # Copied, not updated in place: an output_config from extra_options
+            # is the caller's own dict, and an effort set there wins.
             output_config = dict(payload.get("output_config") or {})
             output_config.setdefault("effort", effort)
             payload["output_config"] = output_config
+        return payload
 
-        resp = self._post(payload, request.timeout)
+    def _parse_response(self, resp: dict[str, Any], model: str) -> AiResponse:
+        """Read text, thinking and tool calls out of the content blocks.
 
-        # Parse content blocks — always collect text, thinking, and tool_use.
+        Thinking blocks are read even when thinking was not requested.
+        ``output_tokens`` covers trace and answer together, so the split is
+        estimated from the character ratio. From Claude 4 on the trace is a
+        summary, never the chain of thought itself; an unreadable model name is
+        taken to be a current model.
+
+        Raises:
+            ModelRefusalError: On ``stop_reason: "refusal"``, which arrives as a
+                200 with content empty or cut off where a classifier stopped it.
+        """
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_calls: list[ToolCall] = []
@@ -655,10 +655,6 @@ class AnthropicProvider(BaseProvider):
         raw_reasoning = "".join(reasoning_parts)
         response_text = "".join(text_parts)
 
-        # A policy decline arrives as a 200 with stop_reason "refusal" and
-        # content that is empty or cut off where a classifier stopped it.
-        # Handing that back as an answer is exactly the silently wrong result
-        # this library refuses to produce.
         if resp.get("stop_reason") == "refusal":
             details = resp.get("stop_details") or {}
             raise ModelRefusalError(
@@ -670,17 +666,10 @@ class AnthropicProvider(BaseProvider):
 
         usage = resp.get("usage", {})
         output_tokens = usage.get("output_tokens", 0)
-
-        # Anthropic's output_tokens aggregates thinking + response tokens, so
-        # the split has to be estimated from the character ratio.
         reasoning_tokens = self._estimate_reasoning_tokens(
             response_text, raw_reasoning, output_tokens
         )
-
-        # Claude 4 and later return a summary of their reasoning, never the
-        # chain of thought itself; only 3.7 returned the full trace. An
-        # unreadable name is taken to be a current model.
-        version = self._model_version(request.model)
+        version = self._model_version(model)
         summarised = version is None or version >= self._SUMMARISED_SINCE
 
         return AiResponse(

@@ -58,22 +58,18 @@ class OpenAiCompatProvider(BaseProvider):
     changes the prefix sets both.
     """
 
-    # REQUIRES_API_KEY and SECRETS_KEY are declared on BaseProvider; the eight
-    # cloud subclasses set them, the two local ones leave the defaults.
-    # Payload field this provider uses to control reasoning, or None when it
-    # has no such control. Only sent when the caller sets `thinking` to True
-    # or False: a non-reasoning model rejects the parameter outright, so
-    # "default" must leave it out.
     REASONING_PARAM: str | None = None
+    """Payload field that controls reasoning, or None when there is none.
 
-    # The OpenAI-compatible baseline: an image_url block is the only attachment
-    # every one of these endpoints understands. Subclasses widen this.
+    Sent only when ``thinking`` is True or False: a non-reasoning model rejects
+    the parameter outright, so ``"default"`` must leave it out.
+    """
+
+    # image_url is the only block every one of these endpoints understands.
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image"})
 
-    # The four common levers, each mapped onto its own field below. Everything
-    # else in the library's namespace belongs to another adapter and is dropped
-    # rather than forwarded: /v1/chat/completions has no context_size and no
-    # use_generate, and a strict endpoint answers an unknown field with a 400.
+    # The rest of the library namespace is dropped, not forwarded: a strict
+    # endpoint answers an unknown field such as context_size with a 400.
     _CONSUMED_OPTION_KEYS: frozenset[str] = frozenset(
         {"temperature", "max_tokens", "top_k", "top_p"}
     )
@@ -89,8 +85,7 @@ class OpenAiCompatProvider(BaseProvider):
     index it is written to.
     """
 
-    # Meaningful only for the two local subclasses: the cloud ones are judged by
-    # their credential and never probed.
+    # Probed only on the two local subclasses; cloud ones are judged by credential.
     PROBE_PATH: str | None = "/v1/models"
 
     LAZY_MODEL_LOAD: bool = False
@@ -113,10 +108,6 @@ class OpenAiCompatProvider(BaseProvider):
         """
         self.config = config
         self.api_key = api_key or ""
-        # An unset url means "use this provider's own endpoint". An explicit
-        # one is honoured as given, even if it matches another provider's
-        # default: pointing this adapter at a local OpenAI-compatible server
-        # is a legitimate thing to do.
         self.base_url = (config.url or self.DEFAULT_URL).rstrip("/")
 
     def _auth_headers(self) -> dict[str, str]:
@@ -288,9 +279,8 @@ class OpenAiCompatProvider(BaseProvider):
             }
 
         if file_type == "video":
-            # Not an OpenAI block: llama-server's own extension, taking raw
-            # base64 and decoding the container with ffmpeg. Only a provider
-            # that declares 'video' ever reaches this.
+            # llama-server's own extension, not an OpenAI block: only a
+            # provider declaring 'video' reaches this.
             _log.debug("File '%s' → input_video block", name)
             return {
                 "type": "input_video",
@@ -352,8 +342,6 @@ class OpenAiCompatProvider(BaseProvider):
         file_paths = normalize_file_paths(msg.get("files"))
         content = self._build_user_content(text, file_paths)
         entry: dict[str, Any] = {"role": role, "content": content}
-        # Preserve tool_calls on assistant messages so the API can link
-        # subsequent tool results back to the model's original request.
         if role == "assistant" and msg.get("tool_calls"):
             entry["tool_calls"] = [
                 {
@@ -363,10 +351,8 @@ class OpenAiCompatProvider(BaseProvider):
                 }
                 for i, tc in enumerate(msg["tool_calls"])
             ]
-        # A 'tool' message the API rejects without this: it is how the
-        # response gets linked back to the call it answers. Read from the
-        # history entry rather than invented, since a fallback here would
-        # link the result to the wrong call as readily as to the right one.
+        # Read from the entry, never invented: a fallback id would link the
+        # result to the wrong call as readily as to the right one.
         if role == "tool" and msg.get("tool_call_id"):
             entry["tool_call_id"] = msg["tool_call_id"]
         return entry
@@ -381,24 +367,47 @@ class OpenAiCompatProvider(BaseProvider):
             Standardized AiResponse.
         """
         opts = self._merge_options(request)
+        payload = self._build_payload(request, opts, self._build_messages(request))
+        resp = self._post(f"{self.API_PREFIX}/chat/completions", payload, request.timeout)
+        return self._parse_response(resp)
 
+    def _build_messages(self, request: AiRequest) -> list[dict[str, Any]]:
+        """System prompt, history, the current turn and any tool results, in order.
+
+        A tool-result continuation has its user turn in the history already, so
+        the prompt is not appended a second time.
+        """
         messages: list[dict[str, Any]] = []
-
         if request.system_prompt:
             messages.append({"role": "system", "content": request.system_prompt})
+        for msg in request.messages or []:
+            messages.append(self._build_message(msg))
 
-        if request.messages:
-            for msg in request.messages:
-                messages.append(self._build_message(msg))
-
-        # Current user message — only add when NOT in a tool result continuation.
-        # When tool_results are provided, the consumer has already placed the user
-        # message in `messages` and the prompt should not be re-appended.
         if not request.tool_results:
             file_paths = normalize_file_paths(request.file_path)
             user_content = self._build_user_content(request.prompt, file_paths)
             messages.append({"role": "user", "content": user_content})
 
+        for tr in request.tool_results or []:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tr.call_id,
+                "content": tr.content,
+            })
+        return messages
+
+    def _build_payload(
+        self,
+        request: AiRequest,
+        opts: dict[str, Any],
+        messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Assemble the request body around the built messages.
+
+        A sampling lever that resolves to None is left out, so the server's own
+        default applies: the reasoning models reject any temperature but their
+        own, and a local server's preset is what the model's author tuned.
+        """
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
@@ -407,7 +416,6 @@ class OpenAiCompatProvider(BaseProvider):
         if request.format_json:
             payload["response_format"] = {"type": "json_object"}
 
-        # Tool definitions
         if request.tools:
             payload["tools"] = [
                 {
@@ -421,69 +429,51 @@ class OpenAiCompatProvider(BaseProvider):
                 for t in request.tools
             ]
 
-        # Tool results — appended as role:"tool" messages after the last user message
-        if request.tool_results:
-            for tr in request.tool_results:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tr.call_id,
-                    "content": tr.content,
-                })
-
         max_tokens = self._prefer_request(request.max_tokens, opts, "max_tokens")
         if max_tokens is not None and max_tokens > 0:
             payload["max_tokens"] = max_tokens
 
-        # Unset means the server's own default, never one invented here: the
-        # reasoning models reject any temperature but their own, and a local
-        # server's preset is what the model's author tuned.
-        temperature = self._prefer_request(request.temperature, opts, "temperature")
-        if temperature is not None:
-            payload["temperature"] = temperature
+        for key, value in (
+            ("temperature", request.temperature),
+            ("top_k", request.top_k),
+            ("top_p", request.top_p),
+        ):
+            resolved = self._prefer_request(value, opts, key)
+            if resolved is not None:
+                payload[key] = resolved
 
-        top_k = self._prefer_request(request.top_k, opts, "top_k")
-        if top_k is not None:
-            payload["top_k"] = top_k
-
-        top_p = self._prefer_request(request.top_p, opts, "top_p")
-        if top_p is not None:
-            payload["top_p"] = top_p
-
-        # Reasoning control, only when the caller asked for it explicitly.
         reasoning: dict[str, Any] = {}
         if request.thinking != "default" and request.thinking is not None:
             reasoning = self._reasoning_payload(request.thinking)
 
-        # Provider-specific options, forwarded verbatim. They go last so a
-        # caller can override the mapping above with an endpoint-specific value;
-        # where both carry a dict under the same key the two are merged instead,
-        # the caller's keys winning. Anything the library owns has been consumed
-        # above or belongs to another adapter, and must not travel as a raw key.
+        # Provider-specific options go last so a caller can override the mapping
+        # above; where both carry a dict under the same key the two are merged,
+        # the caller's keys winning.
         passthrough = self._passthrough_options(opts)
         for key, value in reasoning.items():
             if isinstance(value, dict) and isinstance(passthrough.get(key), dict):
                 passthrough[key] = {**value, **passthrough[key]}
         payload.update(reasoning)
         payload.update(passthrough)
+        return payload
 
-        resp = self._post(f"{self.API_PREFIX}/chat/completions", payload, request.timeout)
+    def _parse_response(self, resp: dict[str, Any]) -> AiResponse:
+        """Read text, tool calls, the reasoning trace and token counts.
+
+        ``reasoning_content`` is read even when thinking was not requested,
+        since a model may produce it anyway.
+        """
         choice = resp["choices"][0]["message"]
         usage = resp.get("usage", {})
 
-        # Parse tool calls if present
-        raw_tool_calls = choice.get("tool_calls") or []
         tool_calls: list[ToolCall] = [
             ToolCall(
                 id=tc["id"],
                 name=tc["function"]["name"],
                 arguments=json.loads(tc["function"].get("arguments", "{}")),
             )
-            for tc in raw_tool_calls
+            for tc in choice.get("tool_calls") or []
         ]
-
-        # Always read reasoning_content from the response: the model may
-        # produce reasoning output even when not explicitly requested.
-        raw_reasoning = choice.get("reasoning_content") or ""
 
         reasoning_tokens = (
             usage.get("completion_tokens_details", {})
@@ -496,7 +486,7 @@ class OpenAiCompatProvider(BaseProvider):
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=max(0, total_output - reasoning_tokens),
             reasoning_tokens=reasoning_tokens,
-            reasoning_text=raw_reasoning,
+            reasoning_text=choice.get("reasoning_content") or "",
             tool_calls=tool_calls,
         )
 
