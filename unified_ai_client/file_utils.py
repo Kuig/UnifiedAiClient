@@ -107,6 +107,7 @@ def validate_files(
     paths: list[str],
     provider_name: str,
     supported: frozenset[str],
+    *,
     extensions: dict[str, frozenset[str]] | None = None,
 ) -> list[tuple[str, str]]:
     """Reject attachments a provider cannot transmit, before the request is built.
@@ -120,6 +121,11 @@ def validate_files(
     other class must be one the provider declares, otherwise the file would be
     silently dropped or fed through as unreadable text, and the model would
     answer as though it had received it.
+
+    Public so a consumer can check attachments before ``call_ai()``, reading
+    ``supported`` and ``extensions`` from ``get_provider(name)``. ``script`` is
+    the one provider never checked this way: its empty ``SUPPORTED_FILE_TYPES``
+    would refuse files that ``call_ai()`` hands to the script unchanged.
 
     Args:
         paths: Local file paths to check.

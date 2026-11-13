@@ -497,6 +497,85 @@ def load_config(
 
 **Returns:** an instance of `dataclass_type`.
 
+### `classify_file`
+
+Classifies a file by its name and extension, the same way every adapter does before
+deciding how a file reaches the model. No file is opened: the classification is a fixed
+extension allow-list, not content sniffing.
+
+```python
+def classify_file(path: str) -> str:
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `path` | `str` | required | Path to the file. It does not have to exist. |
+
+**Returns:** one of `"image"`, `"audio"`, `"video"`, `"text"`, `"document"` (PDF) or
+`"unknown"`. Well-known extensionless names (`Dockerfile`, `Makefile`, `.gitignore`) are
+recognised case-insensitively and classify as `"text"`; a suffixed variant such as
+`Dockerfile.dev` is `"unknown"`. The extension lists are in
+[Multimodal Input](multimodal.md#what-counts-as-a-text-file).
+
+```python
+from unified_ai_client import classify_file
+
+classify_file("talk.mp3")     # "audio"
+classify_file("Dockerfile")   # "text"
+classify_file("data.bin")     # "unknown"
+```
+
+### `validate_files`
+
+Checks a list of attachments against what a provider can transmit, with the rules
+`call_ai()` and `get_embedding()` apply: text is always accepted, every other class must
+be one the provider declares, an unknown file is refused. Every path is checked before
+any is read, so the check costs nothing beyond a file-existence test per path.
+
+```python
+def validate_files(
+    paths: list[str],
+    provider_name: str,
+    supported: frozenset[str],
+    *,
+    extensions: dict[str, frozenset[str]] | None = None,
+) -> list[tuple[str, str]]:
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `paths` | `list[str]` | required | Local file paths to check. |
+| `provider_name` | `str` | required | Provider name, used only in the error message. |
+| `supported` | `frozenset[str]` | required | File classes the provider carries natively: its `SUPPORTED_FILE_TYPES`, or `SUPPORTED_EMBEDDING_FILE_TYPES` for embeddings. |
+| `extensions` | `dict[str, frozenset[str]] \| None` | `None` | Narrows a class to the extensions the endpoint decodes: the provider's `SUPPORTED_EXTENSIONS`. A class absent from it takes every extension. |
+
+**Returns:** one `(path, file_type)` pair per path, in the order given.
+
+**Raises:** [`MissingFileError`](#missingfileerror) if a path is not an existing regular
+file; [`UnsupportedFileError`](#unsupportedfileerror) if a file's class is neither text nor
+supported, or its extension is outside the narrowing.
+
+Read both capability attributes from the provider rather than from
+[`ProviderInfo`](#providerinfo), whose `file_types` does not carry the extension
+narrowing:
+
+```python
+from unified_ai_client import UnsupportedFileError, get_provider, validate_files
+
+provider = get_provider("ollama")
+try:
+    validate_files(
+        ["photo.png", "talk.ogg"], "ollama",
+        provider.SUPPORTED_FILE_TYPES, extensions=provider.SUPPORTED_EXTENSIONS,
+    )
+except UnsupportedFileError as exc:
+    print(exc)   # Ollama decodes audio only as WAV, MP3 or FLAC
+```
+
+Do not validate attachments for `script` this way: it declares no file classes and passes
+every path to the script unchecked, so this function would refuse files `call_ai()`
+accepts.
+
 ## Dataclasses
 
 ### `AiResponse`

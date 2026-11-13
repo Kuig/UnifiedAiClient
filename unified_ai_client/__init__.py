@@ -15,6 +15,7 @@ from unified_ai_client.registry import (
     unload_model,
 )
 from unified_ai_client.config import load_secrets, load_config
+from unified_ai_client.file_utils import classify_file, validate_files
 from unified_ai_client.exceptions import (
     NonRetryableError,
     UnsupportedFileError,
@@ -55,6 +56,8 @@ __all__ = [
     "list_models",
     "load_secrets",
     "load_config",
+    "classify_file",
+    "validate_files",
     "silence_sdks",
     "set_verbosity",
     "NonRetryableError",

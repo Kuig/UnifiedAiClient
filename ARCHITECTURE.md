@@ -166,6 +166,8 @@ reference under `docs/`.
 `text`, `document` or `unknown`, validates a list of paths against what a provider declares it
 accepts, encodes to base64, and wraps text attachments in delimited blocks. Every adapter
 branches on the classification it returns, which is why adding a file type starts here.
+The classifier and the validator are also public, so a consumer can apply the same rules
+before a call that the adapters apply during one.
 
 One of those helpers deserves naming here, because it encodes a rule rather than a
 convenience. `_LIBRARY_OPTION_KEYS` lists every option key this library assigns a meaning

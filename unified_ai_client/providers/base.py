@@ -563,7 +563,7 @@ class BaseProvider(ABC):
             paths,
             self.provider_name,
             self.SUPPORTED_FILE_TYPES if supported is None else supported,
-            self.SUPPORTED_EXTENSIONS,
+            extensions=self.SUPPORTED_EXTENSIONS,
         )
 
     @abstractmethod

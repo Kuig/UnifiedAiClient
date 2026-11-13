@@ -113,6 +113,23 @@ The `script` provider is exempt: it receives raw paths and decides for itself, s
 only the script knows what it can open. See
 [the script protocol](script-protocol.md).
 
+### Checking files before a call
+
+The same rules are available before a call, to route a file to another provider or
+convert it instead of catching the error afterwards. `classify_file()` returns a path's
+class, and `validate_files()` raises exactly what `call_ai()` would:
+
+```python
+from unified_ai_client import get_provider, validate_files
+
+provider = get_provider("groq")
+validate_files(["talk.mp3"], "groq", provider.SUPPORTED_FILE_TYPES,
+               extensions=provider.SUPPORTED_EXTENSIONS)
+# UnsupportedFileError: Provider 'groq' cannot accept audio files: 'talk.mp3'. ...
+```
+
+See [`classify_file`](api.md#classify_file) and [`validate_files`](api.md#validate_files).
+
 ## What counts as a text file
 
 Classification is by extension, covering the usual source, markup, data and config

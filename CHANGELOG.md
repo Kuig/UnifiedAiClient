@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `classify_file()` and `validate_files()` are exported from `unified_ai_client`, so a
+  consumer can check attachments against a provider before calling it, with the same
+  rules and the same exceptions `call_ai()` uses.
+
+### Changed
+
+- `validate_files()`'s `extensions` argument is keyword-only, fixed before the function
+  became public.
+
 ## [0.8.0] - 2026-10-25
 
 ### Added

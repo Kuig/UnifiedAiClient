@@ -248,6 +248,22 @@ class TestImports(unittest.TestCase):
         )
         self.assertTrue(classify_file)
 
+    def test_file_helpers_are_exported(self) -> None:
+        """classify_file and validate_files are public, for consumers to pre-check."""
+        import unified_ai_client
+        from unified_ai_client import classify_file, validate_files
+        from unified_ai_client import file_utils
+        self.assertIs(classify_file, file_utils.classify_file)
+        self.assertIs(validate_files, file_utils.validate_files)
+        self.assertIn("classify_file", unified_ai_client.__all__)
+        self.assertIn("validate_files", unified_ai_client.__all__)
+
+    def test_validate_files_extensions_is_keyword_only(self) -> None:
+        import inspect
+        from unified_ai_client import validate_files
+        param = inspect.signature(validate_files).parameters["extensions"]
+        self.assertIs(param.kind, inspect.Parameter.KEYWORD_ONLY)
+
     def test_import_client(self) -> None:
         from unified_ai_client import (
             call_ai, cleanup, preload_model, unload_model, get_embedding,
