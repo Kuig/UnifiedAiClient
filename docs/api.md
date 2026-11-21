@@ -223,7 +223,7 @@ def preload_model(
 | `model` | `str` | required | Model identifier to preload. |
 | `keep_alive` | `str \| int \| None` | `None` | How long the model stays resident. A number is seconds, `0` unloads it once idle, `-1` keeps it resident indefinitely; a string is a Go duration such as `"15m"` or `"1h"`. `None` uses whatever `configure_provider()` registered, the value later calls send too, and when nothing was registered leaves the server's own default in place. Honoured by `ollama` and `script`, ignored elsewhere. Unlike the two below, an explicit value is not persisted via `configure_provider()`, being a property of the request rather than of the provider. |
 | `context_size` | `int \| None` | `None` | Context window in tokens, mapped to `num_ctx`. Registered so it persists across calls. Pass it here rather than per-call to stop Ollama reloading the model with a different window mid-session. |
-| `extra_options` | `dict \| None` | `None` | Further provider-specific settings, for example `{"visual_token_budget": 1120}`. Merged with anything already registered. |
+| `extra_options` | `dict \| None` | `None` | Further provider-specific settings, for example `{"repeat_penalty": 1.2}`. Merged with anything already registered. |
 
 The residency timer is an idle countdown that starts when a request *finishes*, not a
 budget for the request: a model serving a call is never evicted mid-wait.
@@ -289,7 +289,7 @@ configure_provider("ollama",
                    url="http://192.168.1.5:11434",
                    timeout=240,
                    context_size=8000,
-                   visual_token_budget=1120)
+                   repeat_penalty=1.2)
 configure_provider("google", sleep_time=3)
 ```
 

@@ -94,7 +94,7 @@ preload_model(
     model="gemma4:e2b",
     keep_alive="15m",                             # omit to use the configured value
     context_size=8000,                            # allocates VRAM with correct num_ctx
-    extra_options={"visual_token_budget": 1120},  # any other provider-specific setting
+    extra_options={"repeat_penalty": 1.2},        # any other provider-specific setting
 )
 ```
 

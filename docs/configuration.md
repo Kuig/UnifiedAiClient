@@ -89,7 +89,7 @@ call_ai(provider="openai", model="gemma4:12b", prompt="...")  # no OpenAI key ne
 ## Provider settings: `configure_provider()`
 
 Controls server URLs, timeouts, rate-limit delays, and provider-specific options such
-as `context_size` or `visual_token_budget`. Call this once at application startup for
+as `context_size` or `repeat_penalty`. Call this once at application startup for
 any setting that should not change per-call:
 
 ```python
@@ -101,7 +101,7 @@ configure_provider(
     url="http://192.168.1.5:11434",
     timeout=240,
     context_size=8000,
-    visual_token_budget=1120,
+    repeat_penalty=1.2,
 )
 
 # Google with rate-limiting delay
@@ -178,8 +178,8 @@ field still travels, as `null`, because its protocol keeps every field present.
 
 Anything else is passed through verbatim to the provider payload. On Ollama that means it
 lands inside the `options` object, which is how a model-specific knob such as
-`visual_token_budget` reaches Gemma 4, or `repeat_penalty` reaches any model, without the
-library needing to know it exists.
+`repeat_penalty` or `mirostat` reaches the model without the library needing to know it
+exists.
 
 Ollama is the one provider with two places a key can go, because its request has a
 top-level body and a nested `options` object for model parameters. A key that names a

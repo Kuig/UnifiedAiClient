@@ -92,8 +92,8 @@ def call_ai(
         extra_options: Optional dict of provider-specific options merged into
             the API payload at call time. Call-time values override any
             provider-level defaults registered via ``configure_provider()``
-            for the same key. Examples: ``{'visual_token_budget': 1120}`` for
-            Ollama/Gemma4, ``{'disable_safety': True}`` for Google.
+            for the same key. Examples: ``{'repeat_penalty': 1.2}`` for
+            Ollama, ``{'disable_safety': True}`` for Google.
         tools: Optional list of ``ToolDefinition`` objects describing functions
             the model may call. When provided, the model may respond with
             ``AiResponse.tool_calls`` instead of (or in addition to) text.
@@ -343,7 +343,7 @@ def preload_model(
             ``call_ai()`` call prevents Ollama from reloading the model with
             a different context window mid-session.
         extra_options: Optional dict of additional provider-specific settings
-            (e.g. ``{'visual_token_budget': 1120}``). Merged with any
+            (e.g. ``{'repeat_penalty': 1.2}``). Merged with any
             previously registered settings and persisted via
             ``configure_provider()``.
     """
