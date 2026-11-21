@@ -17,6 +17,7 @@ from unified_ai_client.models import (
     AiRequest,
     AiResponse,
     EmbeddingRequest,
+    Grounding,
     ModelInfo,
     ProviderConfig,
     ToolCall,
@@ -89,6 +90,9 @@ class GoogleProvider(BaseProvider):
     })
 
     SUPPORTS_EMBEDDINGS: bool = True
+
+    # Grounding with Google Search, the google_search tool of Gemini 2.0 on.
+    SUPPORTS_WEB_SEARCH: bool = True
 
     # gemini-embedding-2 takes them all; a text-only model such as
     # gemini-embedding-001 refuses them with an error of its own.
@@ -358,7 +362,7 @@ class GoogleProvider(BaseProvider):
             ),
             request.timeout,
         )
-        return self._parse_response(response, request.model)
+        return self._parse_response(response, request)
 
     def _build_message(self, msg: dict[str, Any], upload_poll_timeout: int) -> types.Content:
         """Convert one history entry, keeping its files, tool calls and text.
@@ -523,6 +527,7 @@ class GoogleProvider(BaseProvider):
             logging.WARNING,
         )
 
+        tools: list[Any] = []
         if request.tools:
             declarations = [
                 types.FunctionDeclaration(
@@ -532,18 +537,32 @@ class GoogleProvider(BaseProvider):
                 )
                 for t in request.tools
             ]
-            config_kwargs["tools"] = [types.Tool(function_declarations=declarations)]
+            tools.append(types.Tool(function_declarations=declarations))
+        if request.web_search:
+            # A Tool of its own: one Tool carries one kind.
+            tools.append(types.Tool(google_search=types.GoogleSearch()))
+            if request.tools:
+                # Gemini 3 answers 400 to a built-in tool beside function
+                # declarations unless the server-side invocations are returned
+                # too (verified live on gemini-3.5-flash). They come back as
+                # tool_call/tool_response Parts, kept in provider_state for replay.
+                config_kwargs["tool_config"] = types.ToolConfig(
+                    include_server_side_tool_invocations=True
+                )
+        if tools:
+            config_kwargs["tools"] = tools
 
         return types.GenerateContentConfig(**config_kwargs)
 
-    def _parse_response(self, response: Any, model: str) -> AiResponse:
-        """Read text, thought parts, tool calls and token counts.
+    def _parse_response(self, response: Any, request: AiRequest) -> AiResponse:
+        """Read text, thought parts, tool calls, grounding and token counts.
 
         Thought parts are read whatever ``thinking`` was, since a model may
         think anyway (on Gemini 3, ``thinking=False`` only minimises it). They
         are always a summary the model wrote of its own reasoning, never the
         chain of thought, hence ``reasoning_is_summary``.
         """
+        model = request.model
         input_tokens = 0
         output_tokens = 0
         reasoning_tokens = 0
@@ -597,7 +616,54 @@ class GoogleProvider(BaseProvider):
             reasoning_is_summary=bool(reasoning_text),
             tool_calls=tool_calls,
             message=self._assistant_message(response_text, tool_calls, native),
+            grounding=self._grounding(response, request),
         )
+
+    def _grounding(self, response: Any, request: AiRequest) -> Grounding | None:
+        """Read the first candidate's search, wherever this mode puts it.
+
+        Search alone reports it in ``grounding_metadata``. Beside function
+        declarations, with server-side invocations on, the same search arrives
+        as a ``tool_call`` Part (its ``queries``) and a ``tool_response`` Part
+        (the suggestions), and the metadata may be absent (verified live on
+        gemini-3.5-flash). Both are read.
+
+        The chunk URIs are Google's redirect links and the titles the sites'
+        domains; they are reported as they come, since resolving each link
+        would cost a request of its own.
+        """
+        if not request.web_search:
+            return None
+        try:
+            candidate = response.candidates[0]
+        except (IndexError, AttributeError, TypeError):
+            candidate = None
+        queries: list[str] = []
+        sources: list[tuple[str | None, str | None]] = []
+        suggestions: str | None = None
+
+        parts = getattr(getattr(candidate, "content", None), "parts", None) or []
+        for part in parts:
+            tool_call = getattr(part, "tool_call", None)
+            if tool_call is not None and "SEARCH" in str(getattr(tool_call, "tool_type", "")):
+                queries.extend((getattr(tool_call, "args", None) or {}).get("queries") or [])
+            tool_response = getattr(part, "tool_response", None)
+            if tool_response is not None:
+                body = getattr(tool_response, "response", None) or {}
+                suggestions = body.get("search_suggestions") or suggestions
+
+        meta = getattr(candidate, "grounding_metadata", None)
+        if meta is not None:
+            queries.extend(
+                q for q in getattr(meta, "web_search_queries", None) or [] if q not in queries
+            )
+            for chunk in getattr(meta, "grounding_chunks", None) or []:
+                web = getattr(chunk, "web", None)
+                if web is not None:
+                    sources.append((getattr(web, "uri", None), getattr(web, "title", None)))
+            entry_point = getattr(meta, "search_entry_point", None)
+            suggestions = getattr(entry_point, "rendered_content", None) or suggestions
+        return self._build_grounding(request, queries, sources, suggestions)
 
     def warm_up(
         self,

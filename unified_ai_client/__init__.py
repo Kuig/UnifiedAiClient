@@ -32,6 +32,7 @@ from unified_ai_client.verbosity import set_verbosity
 from unified_ai_client.models import (
     AiResponse,
     AiRequest,
+    Grounding,
     ModelInfo,
     ProviderConfig,
     ProviderInfo,
@@ -39,6 +40,7 @@ from unified_ai_client.models import (
     ToolDefinition,
     ToolCall,
     ToolResult,
+    WebSource,
 )
 from unified_ai_client.providers.base import BaseProvider
 
@@ -76,6 +78,8 @@ __all__ = [
     "ModelInfo",
     "BaseProvider",
     "TokenLogprob",
+    "Grounding",
+    "WebSource",
     "ToolDefinition",
     "ToolCall",
     "ToolResult",

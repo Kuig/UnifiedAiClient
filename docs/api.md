@@ -56,6 +56,7 @@ def call_ai(
 | `tools` | `list[ToolDefinition] \| None` | `None` | Tools the model may call. See [Tool Calling](tool-calling.md). |
 | `tool_results` | `list[ToolResult] \| None` | `None` | Results of previously requested tool calls, for the follow-up turn. When present, `prompt` is **not** re-appended to `messages`. |
 | `logprobs` | `int \| None` | `None` | Token log probabilities: `0` for each generated token, `1` to `20` for that many alternatives as well. Refused before sending (`ValueError` out of range, `UnsupportedOperationError` on a provider without them). See [Token Log Probabilities](logprobs.md). |
+| `web_search` | `bool` | `False` | Lets the model search the web through the provider's own search tool; the searches and sources come back in `AiResponse.grounding`. Refused before sending (`ValueError` for a non-bool, `UnsupportedOperationError` on a provider without one). See [Web Search](web-search.md). |
 
 A timeout is a retryable failure like any other, so the same request is sent again up to
 `max_retries` times with exponential backoff. A call that keeps timing out therefore occupies
@@ -592,6 +593,7 @@ The standard response object returned by `call_ai()`.
 | `reasoning_is_summary` | `bool` | `False` | `True` when `reasoning_text` is a provider-generated summary of the chain of thought rather than the raw trace. Google summarises, and so does Anthropic from Claude 4 on; the others return the raw trace. |
 | `tool_calls` | `list[ToolCall]` | `[]` | Tool calls the model requested. Empty when it answered with text. |
 | `logprobs` | `list[TokenLogprob] \| None` | `None` | One entry per generated token when `logprobs` was set, `None` otherwise. An empty list means the provider returned none. |
+| `grounding` | `Grounding \| None` | `None` | The searches and sources when `web_search=True`, `None` otherwise. Empty when the model answered without searching. |
 | `message` | `dict \| None` | `None` | This turn as a `messages` entry, ready to append: `role`, `content`, `tool_calls` (`id`, `name`, `arguments`) and an opaque, JSON-serialisable `provider_state` that the same provider replays as it is. Every built-in adapter sets it. |
 
 ### `ToolDefinition`
@@ -637,6 +639,26 @@ The log probability of one generated token, found in `AiResponse.logprobs`.
 | `token` | `str` | required | The token's text. |
 | `logprob` | `float` | required | Its natural-log probability, at most `0`. |
 | `top_logprobs` | `list[TokenLogprob]` | `[]` | The most likely tokens at this position, most likely first. Empty for `logprobs=0`. |
+
+### `Grounding`
+
+What a `web_search=True` call searched for and found, in `AiResponse.grounding`. See
+[Web Search](web-search.md).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `queries` | `list[str]` | `[]` | The searches the model ran, in order. Always empty on `openai`, which does not report them. |
+| `sources` | `list[WebSource]` | `[]` | The pages the answer drew on, deduplicated by URL in order of first appearance. |
+| `search_suggestions` | `str \| None` | `None` | On `google`, the HTML snippet of search suggestions that Google's terms require you to display beside a grounded answer. |
+
+### `WebSource`
+
+One page an answer was grounded on, in `Grounding.sources`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `url` | `str` | required | The address as the provider reported it. On `google`, a redirect link that leads to the page. |
+| `title` | `str \| None` | `None` | The page title, or on `google` the site's domain. |
 
 ### `ProviderConfig`
 
@@ -696,7 +718,8 @@ directly through `get_provider()`, and for anyone implementing an adapter out of
 class-level `SUPPORTED_FILE_TYPES` declares which file classes the adapter accepts,
 `SUPPORTED_EMBEDDING_FILE_TYPES` which ones it can embed, `SUPPORTED_EXTENSIONS` which
 extensions of a class its endpoint decodes (empty: all of them), `SUPPORTS_LOGPROBS` whether
-`call_ai(logprobs=...)` can be honoured, `SUPPORTS_UNLOAD` whether it holds
+`call_ai(logprobs=...)` can be honoured, `SUPPORTS_WEB_SEARCH` whether
+`call_ai(web_search=True)` can be, `SUPPORTS_UNLOAD` whether it holds
 a model resident at all, and `SUPPORTS_EMBEDDINGS` whether `embed()` is implemented.
 
 `call()` is the only abstract method. `preload_model()`, `warm_up()`, `unload_model()`,
@@ -776,7 +799,8 @@ embedding model without the encoder.
 
 Raised when a provider is asked for something it does not offer at all: embeddings on
 `anthropic`, `meta`, `groq` or `xai`, a `dimensions` value a provider has no way to
-request, or a mode a `script` declares unsupported (see
+request, `logprobs` or `web_search` on a provider without them, or a mode a `script`
+declares unsupported (see
 [the script protocol](script-protocol.md)). Raised before anything is sent, except for the
 script, which is the one that says so. Subclasses `NonRetryableError` and
 `NotImplementedError`, which is what those cases raised before, so existing handlers keep

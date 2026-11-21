@@ -3365,6 +3365,393 @@ class TestLogprobs(ProviderRegistryIsolation):
         self.assertEqual(response.logprobs[0].logprob, -0.2)
 
 
+class TestWebSearchSupportMatrix(unittest.TestCase):
+    """Which providers honour web_search, against an explicit table.
+
+    True only where the endpoint the adapter already speaks has a search tool a
+    request can switch on: Google's google_search, Anthropic's web_search server
+    tool, OpenAI's web_search_options on its search models, and the script,
+    which receives the flag. xAI and OpenAI's general models search on the
+    Responses API, Mistral on its Agents API, Groq's compound models search on
+    their own with no request lever, and the local servers have no search.
+    """
+
+    _SUPPORTS_WEB_SEARCH = {
+        "google": True, "anthropic": True, "openai": True, "script": True,
+        "mistral": False, "cohere": False, "meta": False, "groq": False,
+        "xai": False, "ollama": False, "lmstudio": False, "llamacpp": False,
+    }
+
+    def test_table_covers_every_registered_provider(self) -> None:
+        self.assertEqual(set(self._SUPPORTS_WEB_SEARCH), set(_PROVIDER_CLASSES))
+
+    def test_declared_support_matches_the_table(self) -> None:
+        for name, expected in self._SUPPORTS_WEB_SEARCH.items():
+            with self.subTest(provider=name):
+                self.assertIs(_provider_class_by_name(name).SUPPORTS_WEB_SEARCH, expected)
+
+
+class TestWebSearch(ProviderRegistryIsolation):
+    """call_ai(web_search=True) on the wire and back, per adapter."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from unified_ai_client.models import ToolDefinition
+
+        self._tool = ToolDefinition(
+            name="lookup", description="Look something up",
+            parameters={"type": "object", "properties": {}},
+        )
+
+    def _http_call(self, name: str, replies: list[dict], **request_kwargs):
+        """Run one call against patched transport; return the payloads and response.
+
+        The payload is the second-to-last positional argument of ``_post`` on
+        both transports: ``(payload, timeout)`` and ``(endpoint, payload, timeout)``.
+        """
+        provider = _provider_class_by_name(name)(ProviderConfig(), api_key="k")
+        payloads: list[dict] = []
+        pending = list(replies)
+
+        def fake_post(*args):
+            payloads.append(json.loads(json.dumps(args[-2])))
+            return pending.pop(0)
+
+        fields = {"provider": name, "model": "m", "prompt": "hi", "timeout": 10}
+        fields.update(request_kwargs)
+        with patch.object(provider, "_post", side_effect=fake_post):
+            response = provider.call(AiRequest(**fields))
+        return payloads, response
+
+    # -- refusals -----------------------------------------------------------
+
+    def test_an_unsupported_provider_is_refused_before_sending(self) -> None:
+        from unified_ai_client import call_ai
+        from unified_ai_client.exceptions import UnsupportedOperationError
+
+        for name in ("groq", "ollama", "xai"):
+            cls = _provider_class_by_name(name)
+            with self.subTest(provider=name), \
+                    patch.object(cls, "_post") as post, \
+                    self.assertRaises(UnsupportedOperationError):
+                call_ai(provider=name, model="m", prompt="hi",
+                        web_search=True, max_retries=0)
+            post.assert_not_called()
+
+    def test_a_value_that_is_not_a_bool_is_refused(self) -> None:
+        from unified_ai_client import call_ai
+        from unified_ai_client.providers.anthropic import AnthropicProvider
+
+        for value in ("yes", 1, None):
+            with self.subTest(web_search=value), \
+                    patch.object(AnthropicProvider, "_post") as post, \
+                    self.assertRaises(ValueError):
+                call_ai(provider="anthropic", model="claude-opus-5-5", prompt="hi",
+                        web_search=value, max_retries=0)
+            post.assert_not_called()
+
+    # -- off by default -----------------------------------------------------
+
+    def test_nothing_is_sent_or_returned_by_default(self) -> None:
+        anthropic_reply = {"content": [{"type": "text", "text": "Hi"}], "usage": {}}
+        payloads, response = self._http_call("anthropic", [anthropic_reply])
+        self.assertNotIn("tools", payloads[0])
+        self.assertIsNone(response.grounding)
+
+        openai_reply = {"choices": [{"message": {"content": "Hi"}}], "usage": {}}
+        payloads, response = self._http_call("openai", [openai_reply])
+        self.assertNotIn("web_search_options", payloads[0])
+        self.assertIsNone(response.grounding)
+
+    # -- anthropic ----------------------------------------------------------
+
+    _ANTHROPIC_SEARCH_REPLY = {
+        "content": [
+            {"type": "server_tool_use", "id": "srv_1", "name": "web_search",
+             "input": {"query": "latest release"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srv_1", "content": [
+                {"type": "web_search_result", "url": "https://a.test/1",
+                 "title": "A one", "encrypted_content": "xyz"},
+                {"type": "web_search_result", "url": "https://b.test/2",
+                 "title": "B two", "encrypted_content": "xyz"},
+            ]},
+            {"type": "text", "text": "It shipped ", "citations": [
+                {"type": "web_search_result_location", "url": "https://a.test/1",
+                 "title": "A one", "cited_text": "shipped", "encrypted_index": "e"},
+                {"type": "web_search_result_location", "url": "https://c.test/3",
+                 "title": "C three", "cited_text": "x", "encrypted_index": "e"},
+            ]},
+            {"type": "text", "text": "yesterday."},
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    def test_anthropic_tool_version_follows_the_model(self) -> None:
+        reply = {"content": [{"type": "text", "text": "Hi"}], "usage": {}}
+        expected = {
+            "claude-opus-5-5": "web_search_20260209",
+            "claude-sonnet-4-6": "web_search_20260209",
+            "claude-fable-5-2": "web_search_20260209",
+            "claude-sonnet-4-5": "web_search_20250305",
+            "claude-haiku-5-5": "web_search_20250305",
+            "some-proxy-alias": "web_search_20250305",
+        }
+        for model, tool_type in expected.items():
+            with self.subTest(model=model):
+                payloads, _ = self._http_call(
+                    "anthropic", [reply], model=model, web_search=True
+                )
+                self.assertEqual(
+                    payloads[0]["tools"], [{"type": tool_type, "name": "web_search"}]
+                )
+
+    def test_anthropic_joins_function_tools_and_caller_tools(self) -> None:
+        """Regression: a tools list from extra_options was overwritten as soon as
+        a function tool was declared, and a caller's own web search tool (with
+        max_uses, say) must not be doubled by the one web_search=True adds."""
+        reply = {"content": [{"type": "text", "text": "Hi"}], "usage": {}}
+        own = {"type": "web_search_20250305", "name": "web_search", "max_uses": 2}
+        payloads, _ = self._http_call(
+            "anthropic", [reply], model="claude-opus-5-5", web_search=True,
+            tools=[self._tool], extra_options={"tools": [own]},
+        )
+        tools = payloads[0]["tools"]
+        self.assertEqual([t.get("name") for t in tools], ["lookup", "web_search"])
+        self.assertEqual(tools[1], own)
+
+    def test_anthropic_reads_queries_sources_and_citations(self) -> None:
+        from unified_ai_client.models import Grounding, WebSource
+
+        _, response = self._http_call(
+            "anthropic", [self._ANTHROPIC_SEARCH_REPLY], model="claude-opus-5-5",
+            web_search=True,
+        )
+        self.assertEqual(response.text, "It shipped yesterday.")
+        self.assertEqual(response.tool_calls, [])
+        self.assertEqual(response.grounding, Grounding(
+            queries=["latest release"],
+            sources=[WebSource("https://a.test/1", "A one"),
+                     WebSource("https://b.test/2", "B two"),
+                     WebSource("https://c.test/3", "C three")],
+        ))
+        # The whole content, encrypted results included, is kept for replay.
+        self.assertEqual(
+            response.message["provider_state"]["data"],
+            self._ANTHROPIC_SEARCH_REPLY["content"],
+        )
+
+    def test_anthropic_logs_a_failed_search(self) -> None:
+        reply = {
+            "content": [
+                {"type": "web_search_tool_result", "tool_use_id": "srv_1",
+                 "content": {"type": "web_search_tool_result_error",
+                             "error_code": "max_uses_exceeded"}},
+                {"type": "text", "text": "I could not search."},
+            ],
+            "usage": {},
+        }
+        with self.assertLogs("unified_ai_client.providers.anthropic", "WARNING") as cm:
+            _, response = self._http_call(
+                "anthropic", [reply], model="claude-opus-5-5", web_search=True
+            )
+        self.assertTrue(any("max_uses_exceeded" in line for line in cm.output))
+        self.assertEqual(response.grounding.sources, [])
+
+    def test_anthropic_resumes_a_paused_turn(self) -> None:
+        first = {
+            "content": [{"type": "server_tool_use", "id": "srv_1", "name": "web_search",
+                         "input": {"query": "q1"}}],
+            "stop_reason": "pause_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 3},
+        }
+        second = dict(self._ANTHROPIC_SEARCH_REPLY)
+        payloads, response = self._http_call(
+            "anthropic", [first, second], model="claude-opus-5-5", web_search=True
+        )
+        self.assertEqual(len(payloads), 2)
+        # Resumed with the paused turn as the assistant message, no new user turn.
+        self.assertEqual(payloads[1]["messages"][:-1], payloads[0]["messages"])
+        self.assertEqual(
+            payloads[1]["messages"][-1], {"role": "assistant", "content": first["content"]}
+        )
+        self.assertEqual(response.grounding.queries, ["q1", "latest release"])
+        self.assertEqual((response.input_tokens, response.output_tokens), (20, 8))
+        self.assertEqual(
+            response.message["provider_state"]["data"],
+            first["content"] + second["content"],
+        )
+
+    def test_anthropic_gives_up_on_a_turn_that_stays_paused(self) -> None:
+        from unified_ai_client.exceptions import NonRetryableError
+        from unified_ai_client.providers.anthropic import AnthropicProvider
+
+        paused = {"content": [], "stop_reason": "pause_turn", "usage": {}}
+        replies = [paused] * (AnthropicProvider._MAX_PAUSE_CONTINUATIONS + 1)
+        with self.assertRaises(NonRetryableError):
+            self._http_call("anthropic", replies, model="claude-opus-5-5", web_search=True)
+
+    # -- openai -------------------------------------------------------------
+
+    def test_openai_merges_web_search_options_with_the_callers(self) -> None:
+        reply = {"choices": [{"message": {"content": "Hi"}}], "usage": {}}
+        payloads, _ = self._http_call("openai", [reply], web_search=True)
+        self.assertEqual(payloads[0]["web_search_options"], {})
+
+        location = {"user_location": {"type": "approximate"}}
+        payloads, _ = self._http_call(
+            "openai", [reply], web_search=True,
+            extra_options={"web_search_options": location},
+        )
+        self.assertEqual(payloads[0]["web_search_options"], location)
+
+    def test_openai_reads_url_citations(self) -> None:
+        from unified_ai_client.models import Grounding, WebSource
+
+        reply = {"choices": [{"message": {"content": "See A and B.", "annotations": [
+            {"type": "url_citation", "url_citation": {
+                "url": "https://a.test", "title": "A", "start_index": 4, "end_index": 5}},
+            {"type": "url_citation", "url_citation": {
+                "url": "https://b.test", "title": "B", "start_index": 10, "end_index": 11}},
+            {"type": "url_citation", "url_citation": {
+                "url": "https://a.test", "title": "A", "start_index": 0, "end_index": 1}},
+        ]}}], "usage": {}}
+        _, response = self._http_call("openai", [reply], web_search=True)
+        self.assertEqual(response.grounding, Grounding(
+            sources=[WebSource("https://a.test", "A"), WebSource("https://b.test", "B")],
+        ))
+
+    def test_asked_for_and_not_used_is_an_empty_grounding(self) -> None:
+        from unified_ai_client.models import Grounding
+
+        reply = {"choices": [{"message": {"content": "Hi"}}], "usage": {}}
+        _, response = self._http_call("openai", [reply], web_search=True)
+        self.assertEqual(response.grounding, Grounding())
+
+    # -- google -------------------------------------------------------------
+
+    def _google(self):
+        from unified_ai_client.providers.google import GoogleProvider
+
+        return GoogleProvider(ProviderConfig(), api_key="fake-key")
+
+    def test_google_adds_a_search_tool_beside_the_function_declarations(self) -> None:
+        provider = self._google()
+        request = AiRequest(provider="google", model="gemini-3.5-flash", prompt="hi",
+                            tools=[self._tool], web_search=True)
+        config = provider._build_config(request, {})
+        self.assertEqual(len(config.tools), 2)
+        self.assertEqual(config.tools[0].function_declarations[0].name, "lookup")
+        self.assertIsNotNone(config.tools[1].google_search)
+        self.assertIsNone(config.tools[1].function_declarations)
+        # Gemini 3 answers 400 to the pair without it (verified live).
+        self.assertIs(config.tool_config.include_server_side_tool_invocations, True)
+
+        search_only = AiRequest(provider="google", model="gemini-3.5-flash", prompt="hi",
+                                web_search=True)
+        config = provider._build_config(search_only, {})
+        self.assertEqual(len(config.tools), 1)
+        self.assertIsNone(config.tool_config)
+
+        plain = AiRequest(provider="google", model="gemini-3.5-flash", prompt="hi")
+        self.assertIsNone(provider._build_config(plain, {}).tools)
+
+    def test_google_reads_server_side_search_parts(self) -> None:
+        """Beside function declarations the search comes back as tool_call and
+        tool_response Parts, with no grounding_metadata (seen live)."""
+        from google.genai import types
+
+        response = types.GenerateContentResponse.model_validate({"candidates": [{
+            "content": {"role": "model", "parts": [
+                {"tool_call": {"id": "c1", "tool_type": "GOOGLE_SEARCH_WEB",
+                               "args": {"queries": ["host city"]}}},
+                {"tool_response": {"id": "c1", "tool_type": "GOOGLE_SEARCH_WEB",
+                                   "response": {"search_suggestions": "<div/>"}}},
+                {"function_call": {"name": "lookup", "args": {}}},
+            ]},
+        }]})
+        request = AiRequest(provider="google", model="gemini-3.5-flash", prompt="hi",
+                            web_search=True)
+        result = self._google()._parse_response(response, request)
+        self.assertEqual(result.text, "")
+        self.assertEqual([c.name for c in result.tool_calls], ["lookup"])
+        self.assertEqual(result.grounding.queries, ["host city"])
+        self.assertEqual(result.grounding.search_suggestions, "<div/>")
+        kinds = [next(iter(p)) for p in result.message["provider_state"]["data"]["parts"]]
+        self.assertEqual(kinds, ["tool_call", "tool_response", "function_call"])
+
+    def test_google_reads_the_grounding_metadata(self) -> None:
+        from google.genai import types
+        from unified_ai_client.models import Grounding, WebSource
+
+        response = types.GenerateContentResponse.model_validate({"candidates": [{
+            "content": {"role": "model", "parts": [{"text": "Grounded answer"}]},
+            "grounding_metadata": {
+                "web_search_queries": ["first query", "second query"],
+                "grounding_chunks": [
+                    {"web": {"uri": "https://redirect.test/1", "title": "a.test"}},
+                    {"web": {"uri": "https://redirect.test/1", "title": "a.test"}},
+                    {"web": {"uri": "https://redirect.test/2", "title": "b.test"}},
+                ],
+                "search_entry_point": {"rendered_content": "<div>chips</div>"},
+            },
+        }]})
+        fake_client = MagicMock()
+        fake_client.models.generate_content.return_value = response
+        provider = self._google()
+        request = AiRequest(provider="google", model="gemini-3.5-flash", prompt="hi",
+                            timeout=30, web_search=True)
+        with patch.object(type(provider), "_get_client", return_value=fake_client):
+            result = provider.call(request)
+        self.assertEqual(result.text, "Grounded answer")
+        self.assertEqual(result.grounding, Grounding(
+            queries=["first query", "second query"],
+            sources=[WebSource("https://redirect.test/1", "a.test"),
+                     WebSource("https://redirect.test/2", "b.test")],
+            search_suggestions="<div>chips</div>",
+        ))
+
+        request.web_search = False
+        with patch.object(type(provider), "_get_client", return_value=fake_client):
+            self.assertIsNone(provider.call(request).grounding)
+
+    # -- script -------------------------------------------------------------
+
+    def test_the_script_receives_the_flag_and_returns_grounding(self) -> None:
+        from unified_ai_client.models import Grounding, WebSource
+        from unified_ai_client.providers import script as script_module
+        from unified_ai_client.providers.script import ScriptProvider
+
+        captured: dict = {}
+
+        def fake_run(cmd, payload, timeout):
+            captured.update(payload)
+            return {"text": "Hi", "grounding": {
+                "queries": ["q"], "sources": [{"url": "https://a.test", "title": "A"}],
+            }}
+
+        request = AiRequest(provider="script", model="s.py", prompt="hi", timeout=10,
+                            web_search=True)
+        with patch.object(script_module, "_run_script", side_effect=fake_run):
+            response = ScriptProvider(ProviderConfig()).call(request)
+        self.assertIs(captured["web_search"], True)
+        self.assertEqual(response.grounding, Grounding(
+            queries=["q"], sources=[WebSource("https://a.test", "A")],
+        ))
+
+    def test_a_script_that_reports_no_grounding_gets_a_warning(self) -> None:
+        from unified_ai_client.models import Grounding
+        from unified_ai_client.providers import script as script_module
+        from unified_ai_client.providers.script import ScriptProvider
+
+        request = AiRequest(provider="script", model="s.py", prompt="hi", timeout=10,
+                            web_search=True)
+        with patch.object(script_module, "_run_script", return_value={"text": "Hi"}), \
+                self.assertLogs("unified_ai_client.providers.script", "WARNING"):
+            response = ScriptProvider(ProviderConfig()).call(request)
+        self.assertEqual(response.grounding, Grounding())
+
+
 class TestAttachmentRefusalIsWordedOnce(FileFixtureCase):
     """A provider that promises a file class it cannot build says so one way.
 

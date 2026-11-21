@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `call_ai(web_search=True)` lets the model search the web through its provider's own
+  search tool and returns what it searched for and found in `AiResponse.grounding`, a new
+  `Grounding` (`queries`, `sources` as a list of the new `WebSource`, and Google's
+  `search_suggestions`). Supported on `google` (the `google_search` tool, verified live,
+  alone and beside function declarations), `anthropic` (the `web_search` server tool, in
+  the version each model takes), `openai` (`web_search_options`, on its search models
+  only) and `script`, where the protocol gains a `web_search` field in and an optional
+  `grounding` field out. `BaseProvider.SUPPORTS_WEB_SEARCH` says which; every other
+  provider refuses the request before sending.
+- `anthropic` resumes a turn its server-side tool loop paused (`stop_reason:
+  "pause_turn"`), up to 5 times, and returns it as one response. A turn still paused
+  after that raises `NonRetryableError` instead of coming back unfinished.
+
+### Fixed
+
+- `anthropic` no longer drops a `tools` list passed in `extra_options` when `call_ai()`
+  also declares `tools`: the two are joined.
+
 ## [0.8.1] - 2026-11-13
 
 ### Added

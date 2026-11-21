@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         AiRequest,
         AiResponse,
         EmbeddingRequest,
+        Grounding,
         ModelInfo,
         TokenLogprob,
         ToolCall,
@@ -83,6 +84,16 @@ class BaseProvider(ABC):
     ``call_ai()`` refuses the request before sending it where this is False, so
     set it only for an endpoint whose documentation or a live test confirms it
     returns log probabilities, and asserted against a hand-written table.
+    """
+
+    SUPPORTS_WEB_SEARCH: bool = False
+    """Whether ``call_ai(web_search=True)`` can be honoured.
+
+    True only where the endpoint this adapter already speaks to has a search
+    tool of its own that a request can switch on. A provider whose search lives
+    on another API (xAI and OpenAI's Responses API, Mistral's Agents API) stays
+    False, and ``call_ai()`` refuses the request before sending it. Asserted
+    against a hand-written table.
     """
 
     SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset()
@@ -435,6 +446,52 @@ class BaseProvider(ABC):
             )
             for entry in entries
         ]
+
+    def _build_grounding(
+        self,
+        request: AiRequest,
+        queries: Iterable[str],
+        sources: Iterable[tuple[str | None, str | None]],
+        search_suggestions: str | None = None,
+    ) -> Grounding | None:
+        """Turn what an adapter found into ``AiResponse.grounding``.
+
+        Args:
+            request: The request, read for ``web_search`` only.
+            queries: The searches run, in order; blanks are skipped.
+            sources: ``(url, title)`` pairs in order of appearance; an entry
+                without a URL is skipped and a repeated URL kept once, with
+                the first title that was not empty.
+            search_suggestions: Google's search suggestions snippet.
+
+        Returns:
+            None when the request did not ask for web search, otherwise a
+            ``Grounding``, empty when the model answered without searching.
+        """
+        if not request.web_search:
+            return None
+        from unified_ai_client.models import Grounding, WebSource
+
+        by_url: dict[str, WebSource] = {}
+        for url, title in sources:
+            if not url:
+                continue
+            known = by_url.get(url)
+            if known is None:
+                by_url[url] = WebSource(url=url, title=title or None)
+            elif known.title is None and title:
+                known.title = title
+        grounding = Grounding(
+            queries=[q for q in queries if q],
+            sources=list(by_url.values()),
+            search_suggestions=search_suggestions or None,
+        )
+        if not grounding.queries and not grounding.sources:
+            _log.debug(
+                "%s/%s answered without searching the web",
+                self.provider_name, request.model,
+            )
+        return grounding
 
     @staticmethod
     def _estimate_reasoning_tokens(

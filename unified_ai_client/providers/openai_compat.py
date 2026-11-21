@@ -247,6 +247,19 @@ class OpenAiCompatProvider(BaseProvider):
             return {}
         return {self.REASONING_PARAM: "high" if thinking else "none"}
 
+    def _web_search_payload(self) -> dict[str, Any]:
+        """The request fields that switch this endpoint's web search on.
+
+        The hook a provider with ``SUPPORTS_WEB_SEARCH`` overrides; called only
+        for ``web_search=True``, which ``call_ai()`` has already refused where
+        the flag is False. Merged with the caller's own fields like
+        ``_reasoning_payload()``, so a caller can add settings under the same key.
+
+        Returns:
+            The fields to add to the request body.
+        """
+        return {}
+
     def _build_native_block(self, file_path: str, file_type: str) -> dict[str, Any]:
         """Build one provider-native content block for a non-text attachment.
 
@@ -459,18 +472,20 @@ class OpenAiCompatProvider(BaseProvider):
             # Always explicit: llama-server defaults a missing top_logprobs to 20.
             payload["top_logprobs"] = request.logprobs
 
-        reasoning: dict[str, Any] = {}
+        mapped: dict[str, Any] = {}
         if request.thinking != "default" and request.thinking is not None:
-            reasoning = self._reasoning_payload(request.thinking)
+            mapped.update(self._reasoning_payload(request.thinking))
+        if request.web_search:
+            mapped.update(self._web_search_payload())
 
         # Provider-specific options go last so a caller can override the mapping
         # above; where both carry a dict under the same key the two are merged,
         # the caller's keys winning.
         passthrough = self._passthrough_options(opts)
-        for key, value in reasoning.items():
+        for key, value in mapped.items():
             if isinstance(value, dict) and isinstance(passthrough.get(key), dict):
                 passthrough[key] = {**value, **passthrough[key]}
-        payload.update(reasoning)
+        payload.update(mapped)
         payload.update(passthrough)
         return payload
 
@@ -478,7 +493,9 @@ class OpenAiCompatProvider(BaseProvider):
         """Read text, tool calls, the reasoning trace, logprobs and token counts.
 
         ``reasoning_content`` is read even when thinking was not requested,
-        since a model may produce it anyway.
+        since a model may produce it anyway. With web search, the sources are
+        the ``url_citation`` annotations; the endpoint does not report the
+        queries it ran.
         """
         choice = resp["choices"][0]["message"]
         usage = resp.get("usage", {})
@@ -514,6 +531,11 @@ class OpenAiCompatProvider(BaseProvider):
             tool_calls=tool_calls,
             message=self._assistant_message(text, tool_calls, native),
             logprobs=logprobs,
+            grounding=self._build_grounding(request, [], (
+                (a["url_citation"].get("url"), a["url_citation"].get("title"))
+                for a in choice.get("annotations") or []
+                if a.get("type") == "url_citation" and isinstance(a.get("url_citation"), dict)
+            )),
         )
 
     def list_models(self, *, timeout: int | None = None) -> list[ModelInfo]:

@@ -103,6 +103,39 @@ class TokenLogprob:
 
 
 @dataclass
+class WebSource:
+    """One web page an answer was grounded on, as found in ``Grounding.sources``.
+
+    Attributes:
+        url: The page's address as the provider reported it. On ``google`` this
+            is a redirect link through ``vertexaisearch.cloud.google.com`` that
+            leads to the page, not the page's own URL.
+        title: The page title, or on ``google`` the site's domain. ``None`` when
+            the provider gave none.
+    """
+    url: str
+    title: str | None = None
+
+
+@dataclass
+class Grounding:
+    """What a web-search call searched for and found, as in ``AiResponse.grounding``.
+
+    Attributes:
+        queries: The searches the model ran, in order. Empty when the provider
+            does not report them (``openai``) or the model chose not to search.
+        sources: The pages the answer drew on, deduplicated by URL in the order
+            they first appeared.
+        search_suggestions: On ``google``, the HTML snippet of search suggestions
+            that Google's terms require an application to display alongside a
+            grounded answer. ``None`` elsewhere.
+    """
+    queries: list[str] = field(default_factory=list)
+    sources: list[WebSource] = field(default_factory=list)
+    search_suggestions: str | None = None
+
+
+@dataclass
 class AiResponse:
     """Standardized response from any AI provider.
 
@@ -134,6 +167,9 @@ class AiResponse:
         logprobs: One entry per generated token when the call asked for
             ``logprobs``, ``None`` otherwise. An empty list means they were
             asked for and the provider returned none.
+        grounding: The searches and sources when the call asked for
+            ``web_search``, ``None`` otherwise. An empty ``Grounding`` means the
+            search was available and the model answered without it.
     """
     text: str
     input_tokens: int = 0
@@ -144,6 +180,7 @@ class AiResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     message: dict[str, Any] | None = None
     logprobs: list[TokenLogprob] | None = None
+    grounding: Grounding | None = None
 
 
 @dataclass(frozen=True)
@@ -251,6 +288,8 @@ class AiRequest:
         logprobs: ``None`` for no log probabilities, otherwise how many
             alternatives to return per token, from 0 to ``MAX_TOP_LOGPROBS``.
             Already validated by ``call_ai()``.
+        web_search: Whether the model may search the web and ground its answer
+            on what it finds. Already validated by ``call_ai()``.
     """
     provider: str
     model: str
@@ -270,6 +309,7 @@ class AiRequest:
     tool_results: list[ToolResult] | None = None
     extra_options: dict | None = None
     logprobs: int | None = None
+    web_search: bool = False
 
 
 @dataclass

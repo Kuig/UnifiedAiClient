@@ -19,6 +19,10 @@ class OpenAiProvider(OpenAiCompatProvider):
 
     Reasoning text is populated from the 'reasoning_content' field in the
     response message, available on o3/o4 class models.
+
+    Web search uses ``web_search_options``, which Chat Completions honours only
+    on the search models (``gpt-5-search-api``, ``gpt-4o-search-preview``);
+    the sources come back as ``url_citation`` annotations.
     """
 
     DEFAULT_URL: str = "https://api.openai.com"
@@ -34,6 +38,18 @@ class OpenAiProvider(OpenAiCompatProvider):
 
     # Shortens the vector on the text-embedding-3 models.
     EMBEDDING_DIMENSIONS_PARAM: str | None = "dimensions"
+
+    # Chat Completions searches only on the *-search-* models; any other model
+    # answers web_search_options with a 400.
+    SUPPORTS_WEB_SEARCH: bool = True
+
+    def _web_search_payload(self) -> dict[str, Any]:
+        """``web_search_options``, empty: the API's own defaults.
+
+        A ``web_search_options`` dict in ``extra_options`` (``user_location``,
+        ``search_context_size``) is merged into it, the caller's keys winning.
+        """
+        return {"web_search_options": {}}
 
     def _build_native_block(self, file_path: str, file_type: str) -> dict[str, Any]:
         """Add PDF blocks to the shared OpenAI-compatible set.

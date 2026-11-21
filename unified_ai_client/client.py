@@ -47,6 +47,7 @@ def call_ai(
     tools: list[ToolDefinition] | None = None,
     tool_results: list[ToolResult] | None = None,
     logprobs: int | None = None,
+    web_search: bool = False,
 ) -> AiResponse:
     """Main routing function for all unified AI text generation requests.
 
@@ -103,15 +104,20 @@ def call_ai(
             asks for the log probability of each generated token, and ``N`` up
             to 20 adds the ``N`` most likely alternatives at each position.
             They come back in ``AiResponse.logprobs``.
+        web_search: ``True`` lets the model search the web through the
+            provider's own search tool and ground its answer on the results.
+            The searches and sources come back in ``AiResponse.grounding``.
+            Searches are billed by the provider on top of tokens.
 
     Returns:
         ``AiResponse`` dataclass containing response text, token metrics,
         optional reasoning text, and any tool calls requested by the model.
 
     Raises:
-        ValueError: If ``logprobs`` is not an integer from 0 to 20.
-        UnsupportedOperationError: If ``logprobs`` is set and the provider
-            offers no log probabilities. Raised before anything is sent.
+        ValueError: If ``logprobs`` is not an integer from 0 to 20, or
+            ``web_search`` is not a bool.
+        UnsupportedOperationError: If ``logprobs`` or ``web_search`` is set and
+            the provider cannot honour it. Raised before anything is sent.
     """
     _register_cleanup()
 
@@ -122,6 +128,7 @@ def call_ai(
 
     prov = get_provider(provider)
     _check_logprobs(prov, logprobs)
+    _check_web_search(prov, web_search)
     # Recorded before the call, not after: a model that loaded and then timed
     # out is resident all the same, and still has to be released at exit.
     _record_loaded(provider, prov, model)
@@ -148,6 +155,7 @@ def call_ai(
         tools=tools,
         tool_results=tool_results,
         logprobs=logprobs,
+        web_search=web_search,
     )
 
     if file_path and tool_results:
@@ -191,6 +199,26 @@ def _check_logprobs(prov: Any, logprobs: int | None) -> None:
         raise UnsupportedOperationError(
             f"Provider '{prov.provider_name}' returns no token log probabilities. "
             "Leave logprobs unset, or use a provider that offers them."
+        )
+
+
+def _check_web_search(prov: Any, web_search: bool) -> None:
+    """Refuse a ``web_search`` request that cannot be honoured, before sending it.
+
+    Without a search tool the model would still answer, from its training data
+    alone, and nothing in the response would say the search never happened.
+
+    Raises:
+        ValueError: If ``web_search`` is not a bool.
+        UnsupportedOperationError: If the provider has no web search tool this
+            library can reach.
+    """
+    if not isinstance(web_search, bool):
+        raise ValueError(f"web_search takes True or False, not {web_search!r}.")
+    if web_search and not getattr(prov, "SUPPORTS_WEB_SEARCH", False):
+        raise UnsupportedOperationError(
+            f"Provider '{prov.provider_name}' offers no web search this library "
+            "can reach. Leave web_search unset, or use a provider that has one."
         )
 
 

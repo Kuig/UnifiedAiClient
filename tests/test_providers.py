@@ -1675,6 +1675,67 @@ class TestToolLoopLive(RequiresCredential, unittest.TestCase):
         self._loop("google", "gemini-3.5-flash", "google_api_key")
 
 
+class TestWebSearchLive(RequiresCredential, unittest.TestCase):
+    """web_search=True against the real search tools.
+
+    The question needs a fresh fact, so a model answering from training data
+    alone would not be enough to pass, and the sources must come back. A model
+    id the account cannot reach skips.
+    """
+
+    _PROMPT = (
+        "Search the web: what is the most recent stable release of Python, "
+        "and on what date was it published? Answer in one sentence."
+    )
+
+    def _search(self, provider: str, model: str, secrets_key: str, **kwargs):
+        from unified_ai_client import call_ai
+
+        self._require_credential(secrets_key)
+        try:
+            return call_ai(provider=provider, model=model, prompt=self._PROMPT,
+                           web_search=True, max_retries=0, timeout=180, **kwargs)
+        except Exception as exc:
+            if getattr(exc, "code", None) == 404:
+                self.skipTest(f"model '{model}' is not available: {exc}")
+            raise
+
+    def _assert_grounded(self, response) -> None:
+        self.assertGreater(len(response.text), 0)
+        self.assertIsNotNone(response.grounding)
+        self.assertGreater(len(response.grounding.sources), 0)
+        for source in response.grounding.sources:
+            self.assertTrue(source.url.startswith("http"), source.url)
+
+    def test_google(self) -> None:
+        response = self._search("google", "gemini-3.5-flash", "google_api_key")
+        self._assert_grounded(response)
+        self.assertGreater(len(response.grounding.queries), 0)
+        self.assertIsNotNone(response.grounding.search_suggestions)
+
+    def test_google_with_a_function_tool_on_gemini_3(self) -> None:
+        """Gemini 3 takes the search tool alongside function declarations."""
+        from unified_ai_client.models import ToolDefinition
+
+        unused = ToolDefinition(
+            name="get_weather", description="Current weather in a city.",
+            parameters={"type": "object", "properties": {"city": {"type": "string"}},
+                        "required": ["city"]},
+        )
+        response = self._search("google", "gemini-3.5-flash", "google_api_key",
+                                tools=[unused])
+        self._assert_grounded(response)
+
+    def test_anthropic(self) -> None:
+        response = self._search("anthropic", "claude-sonnet-5-5", "anthropic_api_key")
+        self._assert_grounded(response)
+        self.assertGreater(len(response.grounding.queries), 0)
+
+    def test_openai_search_model(self) -> None:
+        response = self._search("openai", "gpt-5-search-api", "openai_api_key")
+        self._assert_grounded(response)
+
+
 class TestGoogleLive(RequiresCredential, unittest.TestCase):
     """End-to-end calls against the Google AI API."""
 

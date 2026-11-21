@@ -20,6 +20,7 @@ for the same use case: calling LLM providers through a unified interface.
 | **Embeddings** | ✅ `get_embedding()`, `get_embeddings()`; images, audio and video on Ollama, llama.cpp and Google | ✅ | ❌ | ✅ |
 | **Tool / function calling** | ✅ all providers | ✅ | ✅ | ✅ |
 | **Thinking / reasoning** | ✅ Google, Anthropic, Ollama, OpenAI, Mistral, Groq, xAI, Cohere, llama.cpp | ✅ (transparent) | ❌ explicit | ❌ explicit |
+| **Web search grounding** | ✅ `web_search=True`: Google, Anthropic, OpenAI search models, script; sources in `AiResponse.grounding` | ✅ `web_search_options` | ❌ | ✅ (Responses API) |
 | **Ollama VRAM-aware preloading** | ✅ `preload_model()` | ❌ | ❌ | n/a |
 | **Local model residency control** | ✅ `keep_alive` plus `unload_model()`, released at exit | ❌ | ❌ | n/a |
 | **Provider warm-up (zero-token)** | ✅ `warm_up()`, all providers (one token on LM Studio and llama.cpp, which load lazily) | ❌ | ❌ | ❌ |

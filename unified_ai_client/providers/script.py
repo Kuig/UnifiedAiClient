@@ -13,6 +13,7 @@ from unified_ai_client.models import (
     AiRequest,
     AiResponse,
     EmbeddingRequest,
+    Grounding,
     ProviderConfig,
     ToolCall,
 )
@@ -127,6 +128,8 @@ class ScriptProvider(BaseProvider):
     SUPPORTS_UNLOAD: bool = True
     SUPPORTS_EMBEDDINGS: bool = True
     SUPPORTS_LOGPROBS: bool = True
+    # Passed through as a payload field: only the script knows whether it can search.
+    SUPPORTS_WEB_SEARCH: bool = True
 
     # Empty on purpose: the whole merged extra_options dict reaches the script,
     # library keys included, since only the script knows what it understands.
@@ -194,6 +197,7 @@ class ScriptProvider(BaseProvider):
                 for tr in request.tool_results
             ] if request.tool_results else None,
             "logprobs": request.logprobs,
+            "web_search": request.web_search,
         }
 
         data = _run_script(cmd, payload, request.timeout)
@@ -217,6 +221,35 @@ class ScriptProvider(BaseProvider):
             tool_calls=tool_calls,
             message=self._assistant_message(data["text"], tool_calls),
             logprobs=self._collect_logprobs(request, data.get("logprobs")),
+            grounding=self._script_grounding(request, data),
+        )
+
+    def _script_grounding(
+        self, request: AiRequest, data: dict[str, Any]
+    ) -> Grounding | None:
+        """Read the optional ``grounding`` object of a script's reply.
+
+        A script that leaves it out was asked to search and said nothing about
+        it, which is not the same as reporting an empty search: it gets an
+        empty ``Grounding`` and a warning, as a missing ``logprobs`` does.
+        """
+        if not request.web_search:
+            return None
+        raw = data.get("grounding")
+        if not isinstance(raw, dict):
+            _log.warning(
+                "Script '%s' was asked for web_search and returned no grounding",
+                request.model,
+            )
+            raw = {}
+        return self._build_grounding(
+            request,
+            [str(q) for q in raw.get("queries") or []],
+            (
+                (s.get("url"), s.get("title"))
+                for s in raw.get("sources") or [] if isinstance(s, dict)
+            ),
+            raw.get("search_suggestions"),
         )
 
     def preload_model(

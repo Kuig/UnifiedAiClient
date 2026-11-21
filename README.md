@@ -5,8 +5,7 @@ It routes all AI calls through a single `call_ai()` interface, hiding provider-s
 encoding, upload, retry, and error-handling details from consuming projects.
 
 The only runtime dependency is `google-genai`, and only the Google adapter imports it.
-Every other provider speaks HTTP through the standard library. See
-[COMPARISON.md](COMPARISON.md) for a feature-by-feature comparison with other libraries.
+Every other provider speaks HTTP through the standard library ([COMPARISON.md](COMPARISON.md)).
 
 Supported providers:
 
@@ -29,6 +28,7 @@ Supported providers:
 | [docs/reasoning.md](docs/reasoning.md) | The `thinking` parameter, what each provider does with it, and reading the trace back. |
 | [docs/tool-calling.md](docs/tool-calling.md) | Defining tools, the tool loop over any number of turns, provider compatibility. |
 | [docs/logprobs.md](docs/logprobs.md) | Token log probabilities: the `logprobs` parameter and which providers return them. |
+| [docs/web-search.md](docs/web-search.md) | Grounding answers on a web search: the `web_search` parameter, the sources, provider support. |
 | [docs/warm-up.md](docs/warm-up.md) | `warm_up()`, `preload_model()`, `unload_model()` and `cleanup()`: preparing a provider and releasing what it holds. |
 | [docs/script-protocol.md](docs/script-protocol.md) | The JSON stdin/stdout contract any script must satisfy to act as a provider. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Internal design: the codemap, the layer boundaries, and the invariants. |
@@ -88,8 +88,6 @@ Every credential key, every registrable setting and every built-in default is li
 [docs/configuration.md](docs/configuration.md).
 
 ## Usage
-
-All features are exported from the top-level package namespace.
 
 ### Basic Generation
 
@@ -176,7 +174,9 @@ The library provides transport-level tool calling: it passes your `ToolDefinitio
 the model and returns any `ToolCall` the model requests. The execution loop stays yours.
 All providers support it, over any number of turns: append `response.message` and each
 `ToolResult.to_message()` to `messages`. The loop is worked through in
-[docs/tool-calling.md](docs/tool-calling.md).
+[docs/tool-calling.md](docs/tool-calling.md). Web search is the one tool the provider runs
+itself: `web_search=True` grounds the answer and returns the sources in
+`response.grounding`, on the providers listed in [docs/web-search.md](docs/web-search.md).
 
 ### Discovering Providers and Models
 

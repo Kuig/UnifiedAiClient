@@ -16,6 +16,7 @@ from unified_ai_client.http import get_json, post_json
 from unified_ai_client.models import (
     AiRequest,
     AiResponse,
+    Grounding,
     ModelInfo,
     ProviderConfig,
     ToolCall,
@@ -54,6 +55,9 @@ class AnthropicProvider(BaseProvider):
 
     SUPPORTED_FILE_TYPES: frozenset[str] = frozenset({"image", "document"})
 
+    # The web_search server tool, run by Anthropic inside the same request.
+    SUPPORTS_WEB_SEARCH: bool = True
+
     # Mandatory on /v1/messages, so used when nobody set max_tokens. Also sizes
     # the thinking budget on models older than 4.6.
     DEFAULT_MAX_TOKENS: int = 8192
@@ -87,6 +91,18 @@ class AnthropicProvider(BaseProvider):
     # What thinking=False becomes on a model in _NO_DISABLE_SINCE: the lowest
     # effort the API offers, the closest it allows to "off".
     _MINIMAL_EFFORT: str = "low"
+
+    # The web search server tool. The dynamic-filtering version is taken only
+    # by the families and versions below; every other model, an unrecognised
+    # name included, gets the basic version, which current models accept too.
+    _WEB_SEARCH_TOOL: str = "web_search_20250305"
+    _DYNAMIC_WEB_SEARCH_TOOL: str = "web_search_20260209"
+    _DYNAMIC_WEB_SEARCH_SINCE: dict[str, tuple[int, int]] = {
+        "opus": (4, 6), "sonnet": (4, 6), "fable": (0, 0), "mythos": (0, 0),
+    }
+    # How many times a turn paused by the server-side tool loop is resumed
+    # before the call is given up on.
+    _MAX_PAUSE_CONTINUATIONS: int = 5
 
     def __init__(self, config: ProviderConfig, api_key: str = "") -> None:
         """Initialize the Anthropic provider.
@@ -539,7 +555,9 @@ class AnthropicProvider(BaseProvider):
             Standardized AiResponse.
 
         Raises:
-            NonRetryableError: If ``format_json`` is set without a schema.
+            NonRetryableError: If ``format_json`` is set without a schema, or a
+                turn paused by the server-side tool loop is still paused after
+                ``_MAX_PAUSE_CONTINUATIONS`` resumptions.
             ModelRefusalError: If the model declined on policy grounds.
         """
         opts = self._merge_options(request)
@@ -554,9 +572,54 @@ class AnthropicProvider(BaseProvider):
                 '"json_schema", "schema": {...}}}}.'
             )
 
-        payload = self._build_payload(request, opts, self._build_messages(request))
+        messages = self._build_messages(request)
+        payload = self._build_payload(request, opts, messages)
         resp = self._post(payload, request.timeout)
-        return self._parse_response(resp, request.model)
+        resp = self._resume_paused_turn(resp, payload, messages, request.timeout)
+        return self._parse_response(resp, request)
+
+    def _resume_paused_turn(
+        self,
+        resp: dict[str, Any],
+        payload: dict[str, Any],
+        messages: list[dict[str, Any]],
+        timeout: int | None,
+    ) -> dict[str, Any]:
+        """Resume a turn the server-side tool loop paused, until it finishes.
+
+        A server tool such as web search runs a loop on Anthropic's side, and
+        when that loop reaches its own iteration limit the response stops with
+        ``stop_reason: "pause_turn"``: the answer is not finished yet. The turn
+        so far is sent back as the assistant message, with no new user turn,
+        and the server carries on from it. The blocks of every leg are joined
+        and the usage summed, so the caller sees one turn.
+
+        Returns:
+            The finished response, as one ``/v1/messages`` reply.
+
+        Raises:
+            NonRetryableError: If the turn is still paused after
+                ``_MAX_PAUSE_CONTINUATIONS`` resumptions. Returning it would be
+                handing back an unfinished answer as a finished one.
+        """
+        if resp.get("stop_reason") != "pause_turn":
+            return resp
+        content: list[Any] = list(resp.get("content") or [])
+        usage = dict(resp.get("usage") or {})
+        for _ in range(self._MAX_PAUSE_CONTINUATIONS):
+            _log.info("Anthropic paused the turn in a server tool loop; resuming it")
+            follow_up = dict(payload)
+            follow_up["messages"] = messages + [{"role": "assistant", "content": content}]
+            resp = self._post(follow_up, timeout)
+            content.extend(resp.get("content") or [])
+            for key in ("input_tokens", "output_tokens"):
+                usage[key] = usage.get(key, 0) + (resp.get("usage") or {}).get(key, 0)
+            if resp.get("stop_reason") != "pause_turn":
+                return {**resp, "content": content, "usage": usage}
+        raise NonRetryableError(
+            f"Anthropic was still pausing the turn after {self._MAX_PAUSE_CONTINUATIONS} "
+            "resumptions of its server-side tool loop; the answer is unfinished."
+        )
 
     def _build_messages(self, request: AiRequest) -> list[dict[str, Any]]:
         """History, the current turn and any tool results, in order.
@@ -636,15 +699,24 @@ class AnthropicProvider(BaseProvider):
         if request.system_prompt:
             payload["system"] = request.system_prompt
 
-        if request.tools:
-            payload["tools"] = [
-                {
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": t.parameters,
-                }
-                for t in request.tools
-            ]
+        # Joined, not overwritten: a tools list from extra_options (a server
+        # tool with its own settings, say) travels alongside the function tools.
+        tools: list[Any] = [
+            {
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.parameters,
+            }
+            for t in request.tools or []
+        ]
+        tools.extend(payload.get("tools") or [])
+        if request.web_search and not any(
+            str(tool.get("type", "")).startswith("web_search_")
+            for tool in tools if isinstance(tool, dict)
+        ):
+            tools.append({"type": self._web_search_tool(request.model), "name": "web_search"})
+        if tools:
+            payload["tools"] = tools
 
         thinking_payload = self._build_thinking_payload(
             request.thinking, request.model, max_tokens
@@ -662,7 +734,55 @@ class AnthropicProvider(BaseProvider):
             payload["output_config"] = output_config
         return payload
 
-    def _parse_response(self, resp: dict[str, Any], model: str) -> AiResponse:
+    def _web_search_tool(self, model: str) -> str:
+        """The web search tool version this model takes.
+
+        Args:
+            model: Model identifier as passed to call_ai().
+
+        Returns:
+            The dynamic-filtering version on the models listed in
+            ``_DYNAMIC_WEB_SEARCH_SINCE``, the basic one everywhere else.
+        """
+        if self._matches(model, self._DYNAMIC_WEB_SEARCH_SINCE):
+            return self._DYNAMIC_WEB_SEARCH_TOOL
+        return self._WEB_SEARCH_TOOL
+
+    def _grounding(
+        self, blocks: list[dict[str, Any]], request: AiRequest
+    ) -> Grounding | None:
+        """Read the searches and sources out of the content blocks.
+
+        Queries come from the ``server_tool_use`` blocks of the web search tool,
+        sources from its ``web_search_tool_result`` blocks and from the
+        ``web_search_result_location`` citations on the text. A failed search
+        arrives as a 200 with an error object in place of the result list, so
+        it is logged rather than lost.
+        """
+        if not request.web_search:
+            return None
+        queries: list[str] = []
+        sources: list[tuple[str | None, str | None]] = []
+        for block in blocks:
+            kind = block.get("type")
+            if kind == "server_tool_use" and block.get("name") == "web_search":
+                queries.append(str((block.get("input") or {}).get("query") or ""))
+            elif kind == "web_search_tool_result":
+                results = block.get("content")
+                if isinstance(results, list):
+                    sources.extend((r.get("url"), r.get("title")) for r in results)
+                elif isinstance(results, dict):
+                    _log.warning(
+                        "Anthropic web search failed for model '%s': %s",
+                        request.model, results.get("error_code", results),
+                    )
+            elif kind == "text":
+                for citation in block.get("citations") or []:
+                    if citation.get("type") == "web_search_result_location":
+                        sources.append((citation.get("url"), citation.get("title")))
+        return self._build_grounding(request, queries, sources)
+
+    def _parse_response(self, resp: dict[str, Any], request: AiRequest) -> AiResponse:
         """Read text, thinking and tool calls out of the content blocks.
 
         Thinking blocks are read even when thinking was not requested.
@@ -675,6 +795,7 @@ class AnthropicProvider(BaseProvider):
             ModelRefusalError: On ``stop_reason: "refusal"``, which arrives as a
                 200 with content empty or cut off where a classifier stopped it.
         """
+        model = request.model
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_calls: list[ToolCall] = []
@@ -720,4 +841,5 @@ class AnthropicProvider(BaseProvider):
             reasoning_is_summary=bool(raw_reasoning) and summarised,
             tool_calls=tool_calls,
             message=self._assistant_message(response_text, tool_calls, native),
+            grounding=self._grounding(native, request),
         )
