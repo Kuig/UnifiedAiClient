@@ -29,6 +29,24 @@ not do what was asked. Ollama answers it for media sent to an embedding model
 without the encoder, and the next attempt gets the same answer.
 """
 
+def is_settled_status(code: int) -> bool:
+    """Whether an error status will come back identically on every attempt.
+
+    The one rule for what ``with_retry()`` must not retry, shared by this
+    module and the ``google`` adapter, whose SDK raises errors of its own.
+
+    Args:
+        code: The HTTP status of the error response.
+
+    Returns:
+        True for a 4xx outside ``_TRANSIENT_CLIENT_STATUSES`` and for a 5xx in
+        ``_SETTLED_SERVER_STATUSES``.
+    """
+    if 400 <= code < 500:
+        return code not in _TRANSIENT_CLIENT_STATUSES
+    return code in _SETTLED_SERVER_STATUSES
+
+
 _MAX_DETAIL_CHARS: int = 500
 """Cap on the message carried in the exception.
 
@@ -118,8 +136,7 @@ def _raise_for_http_error(exc: urllib.error.HTTPError, url: str) -> NoReturn:
             pass
 
     detail = _extract_detail(body) or (exc.reason or "")
-    settled_client = 400 <= exc.code < 500 and exc.code not in _TRANSIENT_CLIENT_STATUSES
-    if settled_client or exc.code in _SETTLED_SERVER_STATUSES:
+    if is_settled_status(exc.code):
         raise NonRetryableHttpError(url, exc.code, detail, exc.hdrs, body) from exc
     raise ProviderHttpError(url, exc.code, detail, exc.hdrs, body) from exc
 

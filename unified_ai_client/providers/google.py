@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
+from pathlib import Path
 from typing import Any
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
-from unified_ai_client.exceptions import NonRetryableError
-from unified_ai_client.file_utils import normalize_file_paths
+from unified_ai_client.exceptions import (
+    NonRetryableError,
+    UnsupportedFileError,
+    UnsupportedOperationError,
+)
+from unified_ai_client.file_utils import get_mime_type, normalize_file_paths
+from unified_ai_client.http import is_settled_status
 from unified_ai_client.models import (
     AiRequest,
     AiResponse,
@@ -71,10 +78,45 @@ named list instead of everything outside the library namespace.
 """
 
 _GENERATION_ONLY_KEYS: frozenset[str] = frozenset(
-    {"disable_safety", "temperature", "max_tokens", "max_output_tokens", "top_k", "top_p"}
+    {"disable_safety", "temperature", "max_tokens", "max_output_tokens", "top_k", "top_p",
+     "upload_poll_timeout"}
     | set(_FORWARDED_CONFIG_FIELDS)
 )
 """Keys ``call()`` reads that an embedding request has no use for."""
+
+
+class _SettledClientError(NonRetryableError, errors.ClientError):
+    """A 4xx from the SDK that will come back identically on every attempt.
+
+    Still a ``ClientError``, so a consumer catching the SDK's type keeps
+    catching it; the ``NonRetryableError`` half makes ``with_retry()`` give up
+    on the first attempt, as ``NonRetryableHttpError`` does for the HTTP
+    adapters. Defined here rather than in ``exceptions.py`` because this is the
+    only module allowed to import ``google.genai``.
+    """
+
+
+class _SettledServerError(NonRetryableError, errors.ServerError):
+    """A settled 5xx from the SDK (501), the server-side twin of the above."""
+
+
+def _settle(exc: BaseException) -> BaseException:
+    """The non-retryable form of a settled SDK error, or ``exc`` itself.
+
+    Until 0.9.2 every SDK error was retried, so a 400 that no attempt could
+    change cost four attempts and the whole backoff before reaching the caller.
+    The rule on status codes is ``http.is_settled_status()``, the one the HTTP
+    adapters follow.
+    """
+    if isinstance(exc, NonRetryableError) or not isinstance(exc, errors.APIError):
+        return exc
+    if not isinstance(exc.code, int) or not is_settled_status(exc.code):
+        return exc
+    if isinstance(exc, errors.ClientError):
+        return _SettledClientError(exc.code, exc.details, exc.response)
+    if isinstance(exc, errors.ServerError):
+        return _SettledServerError(exc.code, exc.details, exc.response)
+    return exc
 
 
 class GoogleProvider(BaseProvider):
@@ -111,8 +153,9 @@ class GoogleProvider(BaseProvider):
     # (seen live), with or without the declarations.
     TOOL_CHOICE_FIELD: bool = True
 
-    # gemini-embedding-2 takes them all; a text-only model such as
-    # gemini-embedding-001 refuses them with an error of its own.
+    # gemini-embedding-2 takes them all, inline only (embed() says why).
+    # gemini-embedding-001 would ignore them silently, so embed() refuses
+    # media on an embedding model older than 2.
     SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset({
         "image", "audio", "video", "document",
     })
@@ -191,7 +234,9 @@ class GoogleProvider(BaseProvider):
             The uploaded file reference from google.genai.
 
         Raises:
-            RuntimeError: On upload failure or polling timeout.
+            NonRetryableError: If the SDK answers with a settled status (a 4xx
+                other than 408, 409, 425 and 429), also the SDK's own error type.
+            RuntimeError: On any other upload failure or polling timeout.
         """
         abs_path = os.path.abspath(file_path)
         with _UPLOADED_FILES_LOCK:
@@ -204,7 +249,6 @@ class GoogleProvider(BaseProvider):
             return cached
 
         client = self._get_client()
-        from pathlib import Path
         try:
             _log.info("Uploading file '%s' to Google AI...", os.path.basename(file_path))
             file_ref = client.files.upload(file=Path(file_path))
@@ -232,6 +276,9 @@ class GoogleProvider(BaseProvider):
                 f"Google file upload polling timed out after {upload_poll_timeout}s"
             )
         except Exception as exc:
+            settled = _settle(exc)
+            if isinstance(settled, NonRetryableError):
+                raise settled from exc
             raise RuntimeError(f"Google file upload failed: {exc}") from exc
 
     def _build_safety_settings(
@@ -269,10 +316,11 @@ class GoogleProvider(BaseProvider):
     ) -> types.ThinkingConfig | None:
         """Build thinking configuration for the model.
 
-        Adapts to model architecture: Gemini 3.x uses thinking_level,
-        Gemini 2.5 uses thinking_budget, others use a small budget default.
-        When thinking is True, adds include_thoughts=True so the
-        SDK returns thought parts in the response candidates.
+        Adapts to model architecture: Gemini 3 and newer use thinking_level,
+        Gemini 2.5 uses thinking_budget, others (a name without a version
+        included) use a small budget default. When thinking is True, adds
+        include_thoughts=True so the SDK returns thought parts in the response
+        candidates.
 
         Args:
             thinking: True, False, or "default" as passed to call_ai().
@@ -281,14 +329,15 @@ class GoogleProvider(BaseProvider):
         Returns:
             ThinkingConfig instance, or None if thinking is disabled.
         """
-        model_lower = model_name.lower()
+        version = self._gemini_version(model_name)
+        uses_level = version is not None and version >= (3, 0)
         kwargs: dict[str, Any] = {}
 
         if thinking == "default":
             return types.ThinkingConfig(include_thoughts=True)
 
         if not thinking:
-            if "gemini-3" in model_lower:
+            if uses_level:
                 try:
                     kwargs["thinking_level"] = getattr(
                         types.ThinkingLevel, "MINIMAL", "MINIMAL"
@@ -298,20 +347,55 @@ class GoogleProvider(BaseProvider):
             else:
                 kwargs["thinking_budget"] = 0
         else:
-            if "gemini-3" in model_lower:
+            if uses_level:
                 try:
                     kwargs["thinking_level"] = getattr(
                         types.ThinkingLevel, "HIGH", "HIGH"
                     )
                 except AttributeError:
                     kwargs["thinking_level"] = "HIGH"
-            elif "gemini-2.5" in model_lower:
+            elif version == (2, 5):
                 kwargs["thinking_budget"] = 24576
             else:
                 kwargs["thinking_budget"] = 1024
 
         kwargs["include_thoughts"] = True
         return types.ThinkingConfig(**kwargs)
+
+    @staticmethod
+    def _gemini_version(model: str) -> tuple[int, int] | None:
+        """Extract the (major, minor) generation from a Gemini model name.
+
+        The one rule in this adapter for what a model generation can do, so the
+        thinking form and the search-with-tools check cannot drift apart.
+
+        Args:
+            model: Model identifier as passed to call_ai(), with or without
+                the ``models/`` prefix.
+
+        Returns:
+            ``(3, 5)`` for 'gemini-3.5-flash', ``(4, 0)`` for 'gemini-4-x', or
+            None for a name carrying no version ('gemini-flash-latest',
+            'gemini-embedding-2'), which each caller resolves on its own.
+        """
+        match = re.search(r"gemini-(\d+)(?:\.(\d+))?", model.lower())
+        if match is None:
+            return None
+        return int(match.group(1)), int(match.group(2) or 0)
+
+    @staticmethod
+    def _embedding_version(model: str) -> int | None:
+        """Extract the generation from a Gemini embedding model name.
+
+        Args:
+            model: Model identifier, with or without the ``models/`` prefix.
+
+        Returns:
+            ``1`` for 'gemini-embedding-001', ``2`` for 'gemini-embedding-2' and
+            its '-preview', or None for a name without one.
+        """
+        match = re.search(r"gemini-embedding-(\d+)", model.lower())
+        return int(match.group(1)) if match else None
 
     @staticmethod
     def _with_deadline(fn: Any, timeout: int | None) -> Any:
@@ -335,6 +419,8 @@ class GoogleProvider(BaseProvider):
 
         Raises:
             TimeoutError: If the deadline passes first.
+            NonRetryableError: If the SDK answers with a settled status, as the
+                SDK's own error type too (see ``_settle()``).
         """
         pool = ThreadPoolExecutor(max_workers=1)
         try:
@@ -343,6 +429,11 @@ class GoogleProvider(BaseProvider):
                 return future.result(timeout=timeout)
             except FutureTimeout:
                 raise TimeoutError(f"Google AI call timed out after {timeout}s")
+            except errors.APIError as exc:
+                settled = _settle(exc)
+                if settled is exc:
+                    raise
+                raise settled from exc
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
 
@@ -350,15 +441,15 @@ class GoogleProvider(BaseProvider):
         self,
         file_paths: list[str],
         upload_poll_timeout: int = _DEFAULT_UPLOAD_POLL_TIMEOUT,
-        supported: frozenset[str] | None = None,
     ) -> list[Any]:
         """Upload files and return a list of Part objects.
+
+        Generation only: ``embed_content`` refuses a Files API reference, so
+        ``embed()`` sends its media inline instead.
 
         Args:
             file_paths: List of local file paths to attach.
             upload_poll_timeout: Timeout in seconds for ACTIVE polling.
-            supported: The classes to accept. Defaults to
-                ``SUPPORTED_FILE_TYPES``; embeddings pass their own set.
 
         Returns:
             List of types.Part objects referencing the uploaded files.
@@ -372,7 +463,7 @@ class GoogleProvider(BaseProvider):
                 is not.
         """
         parts = []
-        for fp, _ in self._validate_files(file_paths, supported):
+        for fp, _ in self._validate_files(file_paths):
             ref = self._upload_file(fp, upload_poll_timeout)
             parts.append(
                 types.Part.from_uri(file_uri=ref.uri, mime_type=ref.mime_type)
@@ -392,8 +483,9 @@ class GoogleProvider(BaseProvider):
         opts = self._merge_options(request)
         upload_poll_timeout = opts.get("upload_poll_timeout", _DEFAULT_UPLOAD_POLL_TIMEOUT)
 
-        contents = self._build_contents(request, upload_poll_timeout)
+        # The config first: it can refuse the request, and the contents upload.
         gen_config = self._build_config(request, opts)
+        contents = self._build_contents(request, upload_poll_timeout)
         response = self._with_deadline(
             lambda: client.models.generate_content(
                 model=request.model,
@@ -524,7 +616,22 @@ class GoogleProvider(BaseProvider):
 
         A None value is dropped by the SDK's own serialisation, which leaves the
         model's default in charge.
+
+        Raises:
+            UnsupportedOperationError: If ``web_search`` and ``tools`` are both
+                set on a model older than Gemini 3.
         """
+        version = self._gemini_version(request.model)
+        if request.tools and request.web_search and version is not None and version < (3, 0):
+            # Verified live on gemini-2.5-flash, -flash-lite and -pro: "Built-in
+            # tools and Function Calling cannot be combined" without the
+            # server-side invocations, "Tool call context circulation is not
+            # enabled" with them. A name without a version is assumed recent.
+            raise UnsupportedOperationError(
+                f"Model '{request.model}' cannot combine web_search with function "
+                "tools; Gemini 3 and newer can. Drop one of the two, or use a "
+                "Gemini 3 model."
+            )
         config_kwargs: dict[str, Any] = {
             "temperature": self._prefer_request(request.temperature, opts, "temperature"),
             "system_instruction": request.system_prompt,
@@ -802,9 +909,13 @@ class GoogleProvider(BaseProvider):
         Google applies its own defaults. Note that ``gemini-embedding-2``
         rejects ``task_type``: the task goes into the text as a prefix instead.
 
-        Media are uploaded like any other attachment and sent as parts of one
-        ``Content`` together with the text, which Google embeds into a single
-        aggregated vector.
+        Media are sent inline, as parts of one ``Content`` together with the
+        text, which Google embeds into a single aggregated vector; a text file
+        is inlined into the text, as on every other adapter. Not uploaded:
+        ``embed_content`` answers 400 "Request contains an invalid argument"
+        to a Files API reference, for every medium (verified live on
+        gemini-embedding-2 with PNG, WAV, PDF and MP4, all accepted inline).
+        Until 0.9.2 they were uploaded, so a media embedding never worked here.
 
         Args:
             request: The embedding request.
@@ -831,14 +942,27 @@ class GoogleProvider(BaseProvider):
 
         contents: Any
         if request.file_path:
+            text, native = self._partition_attachments(
+                request.file_path, request.inputs[0], self.SUPPORTED_EMBEDDING_FILE_TYPES
+            )
+            version = self._embedding_version(request.model)
+            if native and version is not None and version < 2:
+                # Inline, gemini-embedding-001 takes an image without an error and
+                # returns the vector of the text alone (verified live): a wrong
+                # answer with nothing to say so. A name without a version is
+                # assumed recent, as _gemini_version() callers do.
+                raise UnsupportedFileError(
+                    f"Model '{request.model}' embeds text only and would ignore "
+                    f"'{native[0][0]}' without an error. Use gemini-embedding-2 or "
+                    "newer for images, audio, video and PDFs."
+                )
             parts: list[Any] = []
-            if request.inputs[0]:
-                parts.append(types.Part.from_text(text=request.inputs[0]))
-            parts.extend(self._build_parts_for_files(
-                request.file_path,
-                opts.get("upload_poll_timeout", _DEFAULT_UPLOAD_POLL_TIMEOUT),
-                self.SUPPORTED_EMBEDDING_FILE_TYPES,
-            ))
+            if text:
+                parts.append(types.Part.from_text(text=text))
+            for path, _ in native:
+                parts.append(types.Part.from_bytes(
+                    data=Path(path).read_bytes(), mime_type=get_mime_type(path)
+                ))
             contents = [types.Content(role="user", parts=parts)]
         elif len(request.inputs) == 1:
             contents = request.inputs[0]

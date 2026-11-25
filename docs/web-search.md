@@ -77,8 +77,11 @@ a given *model* supports it is the provider's answer to the request.
 - **Search with function calling.** With `tools` as well, Gemini 3 needs the server-side
   tool invocations returned, and the library asks for them. The search then arrives as
   parts of the turn: its queries on the turn that ran it, its sources on the turn that
-  writes the grounded answer, which in a tool loop may be a later one. Older models may
-  refuse the combination outright.
+  writes the grounded answer, which in a tool loop may be a later one. Gemini 2.5 cannot
+  combine the two at all (verified live on `gemini-2.5-flash`, `-flash-lite` and `-pro`),
+  so on a model named `gemini-2.x` the library raises `UnsupportedOperationError` before
+  sending. Either one alone works there. A name without a version, such as
+  `gemini-flash-latest`, is treated as a recent model.
 
 ### Anthropic
 

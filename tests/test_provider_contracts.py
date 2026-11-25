@@ -750,6 +750,81 @@ class TestGoogleEmbeddings(unittest.TestCase):
         self.assertEqual(config.task_type, "RETRIEVAL_QUERY")
         self.assertEqual(config.output_dimensionality, 256)
 
+    def test_media_are_sent_inline_and_text_files_inlined_into_the_text(self) -> None:
+        """Regression: media were uploaded and sent as Files API references.
+
+        ``embed_content`` answers 400 "Request contains an invalid argument" to
+        a ``file_data`` part for every medium (verified live on
+        gemini-embedding-2 with PNG, WAV, PDF and MP4) and accepts the same
+        bytes inline, so a Google media embedding had never worked.
+        """
+        from unified_ai_client.models import EmbeddingRequest
+
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        png_bytes = b"\x89PNG\r\n\x1a\nnot really"
+        png = os.path.join(folder, "pic.png")
+        txt = os.path.join(folder, "note.txt")
+        Path(png).write_bytes(png_bytes)
+        Path(txt).write_text("The word is PELICAN.", encoding="utf-8")
+
+        provider = self._provider()
+        fake_client = MagicMock()
+        fake_client.models.embed_content.return_value = MagicMock(
+            embeddings=[MagicMock(values=[0.5])]
+        )
+        request = EmbeddingRequest(
+            provider="google", model="gemini-embedding-2", inputs=["red"],
+            file_path=[png, txt],
+        )
+        with patch.object(provider, "_get_client", return_value=fake_client):
+            vectors = provider.embed(request)
+
+        self.assertEqual(vectors, [[0.5]])
+        fake_client.files.upload.assert_not_called()
+        contents = fake_client.models.embed_content.call_args.kwargs["contents"]
+        self.assertEqual(len(contents), 1)
+        text_part, image_part = contents[0].parts
+        self.assertIn("PELICAN", text_part.text)
+        self.assertTrue(text_part.text.endswith("red"))
+        self.assertIsNone(image_part.file_data)
+        self.assertEqual(image_part.inline_data.mime_type, "image/png")
+        self.assertEqual(image_part.inline_data.data, png_bytes)
+
+    def test_media_on_a_text_only_embedding_model_are_refused(self) -> None:
+        """gemini-embedding-001 takes an inline image without an error and
+        returns the vector of the text alone (verified live), so the call is
+        refused before sending. A text file is still fine, being text."""
+        from unified_ai_client.exceptions import UnsupportedFileError
+        from unified_ai_client.models import EmbeddingRequest
+        from unified_ai_client.providers.google import GoogleProvider
+
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        png = os.path.join(folder, "pic.png")
+        txt = os.path.join(folder, "note.txt")
+        Path(png).write_bytes(b"\x89PNG")
+        Path(txt).write_text("words", encoding="utf-8")
+
+        provider = self._provider()
+        fake_client = MagicMock()
+        fake_client.models.embed_content.return_value = MagicMock(
+            embeddings=[MagicMock(values=[0.5])]
+        )
+        with patch.object(provider, "_get_client", return_value=fake_client):
+            for model in ("gemini-embedding-001", "models/gemini-embedding-001"):
+                with self.subTest(model=model), self.assertRaises(UnsupportedFileError):
+                    provider.embed(EmbeddingRequest(
+                        provider="google", model=model, inputs=["x"], file_path=[png],
+                    ))
+            fake_client.models.embed_content.assert_not_called()
+            provider.embed(EmbeddingRequest(
+                provider="google", model="gemini-embedding-001", inputs=["x"],
+                file_path=[txt],
+            ))
+        self.assertEqual(GoogleProvider._embedding_version("gemini-embedding-2-preview"), 2)
+        self.assertIsNone(GoogleProvider._embedding_version("text-embedding-004"))
+
     def test_anthropic_still_declines_embeddings(self) -> None:
         """Anthropic offers no embeddings API of its own."""
         provider = _provider_class("anthropic", "AnthropicProvider")(
@@ -772,6 +847,35 @@ class TestGoogleEmbeddingsLive(RequiresCredential, unittest.TestCase):
         self.assertIsInstance(vector, list)
         self.assertGreater(len(vector), 0)
         self.assertTrue(all(isinstance(x, float) for x in vector))
+
+    def test_google_live_image_embedding(self) -> None:
+        """An image reaches gemini-embedding-2, inline (a Files API reference is a 400)."""
+        self._require_credential("google_api_key")
+        from unified_ai_client import get_embedding
+
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        import struct
+        import zlib
+
+        # A 16x16 red RGB PNG. The 1x1 transparent one used elsewhere is a 400
+        # "Provided image is not valid" on gemini-embedding-2 (seen live).
+        def chunk(kind: bytes, data: bytes) -> bytes:
+            crc = zlib.crc32(kind + data) & 0xFFFFFFFF
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", crc)
+
+        rows = b"".join(b"\x00" + b"\xff\x00\x00" * 16 for _ in range(16))
+        path = os.path.join(folder, "red.png")
+        Path(path).write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+        )
+        vector = get_embedding(
+            provider="google", model="gemini-embedding-2", text="a red square",
+            file_path=path, max_retries=0,
+        )
+        self.assertGreater(len(vector), 0)
 
 
 # ---------------------------------------------------------------------------
@@ -2460,6 +2564,209 @@ class TestGoogleApiVersion(unittest.TestCase):
             client = self._provider()._get_client()
         self.assertTrue(client.vertexai)
         self.assertEqual(client._api_client._http_options.api_version, "v1beta1")
+
+
+# ---------------------------------------------------------------------------
+# Google SDK errors and retries
+# ---------------------------------------------------------------------------
+
+class TestSettledStatus(unittest.TestCase):
+    """The one rule for which statuses are not retried, shared with google."""
+
+    def test_the_rule(self) -> None:
+        from unified_ai_client.http import is_settled_status
+
+        for code in (400, 401, 403, 404, 413, 422, 501):
+            with self.subTest(code=code):
+                self.assertTrue(is_settled_status(code))
+        for code in (408, 409, 425, 429, 500, 502, 503, 504):
+            with self.subTest(code=code):
+                self.assertFalse(is_settled_status(code))
+
+
+class TestGoogleSettledErrors(ProviderRegistryIsolation):
+    """A settled SDK error fails on the first attempt, still as the SDK's type.
+
+    Regression: every ``google.genai`` error was retried, so a 400 no attempt
+    could change (the v1 API refusing function calling, a text-only embedding
+    model given an image) cost four attempts and the whole backoff.
+    """
+
+    @staticmethod
+    def _error(cls_name: str, code: int) -> Exception:
+        from google.genai import errors
+
+        body = {"error": {"code": code, "message": "nope", "status": "X"}}
+        return getattr(errors, cls_name)(code, body)
+
+    def test_a_4xx_becomes_non_retryable_and_stays_a_client_error(self) -> None:
+        from google.genai import errors
+        from unified_ai_client.exceptions import NonRetryableError
+        from unified_ai_client.providers.google import GoogleProvider
+
+        original = self._error("ClientError", 400)
+        with self.assertRaises(NonRetryableError) as caught:
+            GoogleProvider._with_deadline(lambda: (_ for _ in ()).throw(original), 5)
+        self.assertIsInstance(caught.exception, errors.ClientError)
+        self.assertEqual(caught.exception.code, 400)
+        self.assertEqual(caught.exception.message, "nope")
+        self.assertIs(caught.exception.__cause__, original)
+
+    def test_transient_statuses_stay_retryable(self) -> None:
+        from unified_ai_client.exceptions import NonRetryableError
+        from unified_ai_client.providers.google import GoogleProvider
+
+        for cls_name, code in (("ClientError", 429), ("ServerError", 503)):
+            with self.subTest(code=code):
+                original = self._error(cls_name, code)
+                with self.assertRaises(type(original)) as caught:
+                    GoogleProvider._with_deadline(
+                        lambda: (_ for _ in ()).throw(original), 5
+                    )
+                self.assertIs(caught.exception, original)
+                self.assertNotIsInstance(caught.exception, NonRetryableError)
+
+    def test_a_501_is_settled_too(self) -> None:
+        from google.genai import errors
+        from unified_ai_client.exceptions import NonRetryableError
+        from unified_ai_client.providers.google import GoogleProvider
+
+        with self.assertRaises(NonRetryableError) as caught:
+            GoogleProvider._with_deadline(
+                lambda: (_ for _ in ()).throw(self._error("ServerError", 501)), 5
+            )
+        self.assertIsInstance(caught.exception, errors.ServerError)
+
+    def test_call_ai_gives_up_after_one_attempt(self) -> None:
+        from google.genai import errors
+        from unified_ai_client import call_ai
+        from unified_ai_client.providers.google import GoogleProvider
+
+        fake_client = MagicMock()
+        fake_client.models.generate_content.side_effect = self._error("ClientError", 400)
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client):
+            with self.assertRaises(errors.ClientError):
+                call_ai(provider="google", model="gemini-3.5-flash", prompt="hi",
+                        max_retries=3, retry_base_delay=0)
+        self.assertEqual(fake_client.models.generate_content.call_count, 1)
+
+    def test_a_settled_upload_error_is_not_wrapped_in_runtime_error(self) -> None:
+        from google.genai import errors
+        from unified_ai_client.exceptions import NonRetryableError
+        from unified_ai_client.providers.google import GoogleProvider
+
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        path = os.path.join(folder, "a.png")
+        Path(path).write_bytes(b"\x89PNG")
+        fake_client = MagicMock()
+        fake_client.files.upload.side_effect = self._error("ClientError", 400)
+        provider = GoogleProvider(ProviderConfig(), api_key="k")
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client):
+            with self.assertRaises(NonRetryableError) as caught:
+                provider._upload_file(path)
+        self.assertIsInstance(caught.exception, errors.ClientError)
+
+        # A transient one keeps the old wrapping, and its retries.
+        fake_client.files.upload.side_effect = self._error("ClientError", 429)
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client):
+            with self.assertRaises(RuntimeError):
+                provider._upload_file(path)
+
+
+# ---------------------------------------------------------------------------
+# Google model generation: thinking form, search beside function tools
+# ---------------------------------------------------------------------------
+
+class TestGeminiGeneration(unittest.TestCase):
+    """One rule, read from the model name, for what a Gemini generation does."""
+
+    @staticmethod
+    def _provider() -> Any:
+        from unified_ai_client.providers.google import GoogleProvider
+        return GoogleProvider(ProviderConfig(), api_key="k")
+
+    @staticmethod
+    def _tool() -> Any:
+        from unified_ai_client.models import ToolDefinition
+        return ToolDefinition(
+            name="lookup", description="Look something up.",
+            parameters={"type": "object", "properties": {}},
+        )
+
+    def test_the_version_is_read_from_the_name(self) -> None:
+        from unified_ai_client.providers.google import GoogleProvider
+
+        cases = {
+            "gemini-2.5-flash": (2, 5),
+            "models/gemini-3.5-flash": (3, 5),
+            "gemini-4-hydrogen": (4, 0),
+            "gemini-flash-latest": None,
+            "gemini-embedding-2": None,
+        }
+        for model, expected in cases.items():
+            with self.subTest(model=model):
+                self.assertEqual(GoogleProvider._gemini_version(model), expected)
+
+    def test_gemini_4_gets_a_thinking_level(self) -> None:
+        """Regression: a substring check for 'gemini-3' sent gemini-4 a budget."""
+        provider = self._provider()
+        self.assertIsNotNone(
+            provider._build_thinking_config(True, "gemini-4-hydrogen").thinking_level
+        )
+        self.assertIsNotNone(
+            provider._build_thinking_config(False, "gemini-4-hydrogen").thinking_level
+        )
+        self.assertEqual(
+            provider._build_thinking_config(True, "gemini-2.5-flash").thinking_budget, 24576
+        )
+        # A name without a version keeps the small default budget it had.
+        self.assertEqual(
+            provider._build_thinking_config(True, "gemini-flash-latest").thinking_budget, 1024
+        )
+
+    def test_search_beside_function_tools_is_refused_before_gemini_3(self) -> None:
+        """Gemini 2.5 refuses the pair with or without the server-side
+        invocations (verified live on 2.5-flash, -flash-lite and -pro)."""
+        from unified_ai_client.exceptions import UnsupportedOperationError
+
+        provider = self._provider()
+        for model in ("gemini-2.5-flash", "gemini-2.5-pro"):
+            with self.subTest(model=model):
+                request = AiRequest(provider="google", model=model, prompt="hi",
+                                    tools=[self._tool()], web_search=True)
+                with self.assertRaises(UnsupportedOperationError):
+                    provider._build_config(request, {})
+        for model in ("gemini-3.5-flash", "gemini-flash-latest"):
+            with self.subTest(model=model):
+                request = AiRequest(provider="google", model=model, prompt="hi",
+                                    tools=[self._tool()], web_search=True)
+                config = provider._build_config(request, {})
+                self.assertIs(config.tool_config.include_server_side_tool_invocations, True)
+        # Each one alone is still fine on 2.5.
+        for kwargs in ({"tools": [self._tool()]}, {"web_search": True}):
+            with self.subTest(**{k: True for k in kwargs}):
+                provider._build_config(
+                    AiRequest(provider="google", model="gemini-2.5-flash", prompt="hi",
+                              **kwargs), {}
+                )
+
+    def test_the_refusal_comes_before_any_upload(self) -> None:
+        from unified_ai_client.exceptions import UnsupportedOperationError
+        from unified_ai_client.providers.google import GoogleProvider
+
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        path = os.path.join(folder, "a.png")
+        Path(path).write_bytes(b"\x89PNG")
+        fake_client = MagicMock()
+        request = AiRequest(provider="google", model="gemini-2.5-flash", prompt="hi",
+                            file_path=path, tools=[self._tool()], web_search=True)
+        with patch.object(GoogleProvider, "_get_client", return_value=fake_client):
+            with self.assertRaises(UnsupportedOperationError):
+                self._provider().call(request)
+        fake_client.files.upload.assert_not_called()
+        fake_client.models.generate_content.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

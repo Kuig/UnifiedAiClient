@@ -18,6 +18,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays in charge. The dependency is unchanged, `google-genai>=1.62.0`, and a clean
   install receives 3.x.
 - `silence_sdks()` also quiets `httpx2`, the HTTP client `google-genai` uses from 3.0.
+- `google` no longer retries an error that no attempt can change. Every error of the SDK
+  was retried, so a 400 cost four attempts and the whole backoff before reaching the
+  caller. A 4xx other than 408, 409, 425 and 429, and a 501, now fail on the first
+  attempt, raised as a subclass of the SDK's own `ClientError` or `ServerError` that is
+  also a `NonRetryableError`. The rule on status codes is the one the HTTP adapters
+  already followed.
+- `google` media embeddings work. `get_embedding(file_path=...)` uploaded each file and
+  sent its Files API reference, which `embed_content` refuses with a 400 for every
+  medium, so no Google media embedding had ever succeeded. Media now travel inline, and
+  a text file is inlined into the text, as on the other adapters. Media on
+  `gemini-embedding-001`, which would ignore an inline image without an error and return
+  the vector of the text alone, raise `UnsupportedFileError` before sending.
+- `google` refuses `web_search=True` together with `tools` on Gemini 2.x with
+  `UnsupportedOperationError`, before anything is uploaded or sent. Gemini 2.5 cannot
+  combine the two, with or without the server-side tool invocations the adapter asks for,
+  and answered with a 400 that was then retried. A model name without a version is
+  treated as a recent model.
+- `google` sends a thinking level, not a thinking budget, to every model from Gemini 3
+  on. The check matched the substring `gemini-3`, so a `gemini-4` model would have
+  fallen back to the budget form.
 
 ## [0.9.1] - 2026-11-25
 

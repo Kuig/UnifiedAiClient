@@ -183,7 +183,11 @@ one vector. The rules are the same two, with a set of classes of its own per pro
 audio, video and PDFs, `script` receives the paths and decides, and the rest embed text
 only. Text files are inlined into the input.
 Whether a given model can read the medium is up to the model: a text-only tag answers with
-an error of its own, which is not retried. See
+an error of its own, which is not retried. `google` is the exception on both counts. It
+sends media inline rather than uploading them, because `embed_content` refuses a Files
+API reference. And since `gemini-embedding-001` would take an inline image without an
+error and return the vector of the text alone, media on an embedding model older than
+`gemini-embedding-2` raise `UnsupportedFileError` before sending. See
 [`get_embedding`](api.md#get_embedding) for the table.
 
 ## Ollama and audio

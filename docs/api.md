@@ -68,7 +68,10 @@ An HTTP error is treated differently, because most of them are already settled. 
 than 408, 409, 425 and 429 raises [`NonRetryableHttpError`](#nonretryablehttperror) and fails
 on the first attempt: a rejected credential, an unknown model or a malformed payload returns
 the same status however many times it is sent. Those four codes, every 5xx except 501 Not
-Implemented, and any connection failure stay retryable.
+Implemented, and any connection failure stay retryable. `google` follows the same rule on
+the errors of its SDK: a settled one is raised as a subclass of the SDK's own
+`google.genai.errors.ClientError` (or `ServerError` for a 501) that is also a
+[`NonRetryableError`](#nonretryableerror), so a handler for either type catches it.
 
 **Returns:** an [`AiResponse`](#airesponse) with the response text, token counts, any
 reasoning trace, and any tool calls the model requested.
@@ -127,7 +130,7 @@ def get_embedding(
 |---|---|---|---|
 | `ollama` | `/api/embed` | image, audio (one of each per input; the model must have the encoder) | ✅ |
 | `llamacpp` | `/v1/embeddings` | image, audio, video (needs `--mmproj`) | ❌ |
-| `google` | `embed_content` via the SDK | image, audio, video, PDF (`gemini-embedding-2`) | ✅ `output_dimensionality` |
+| `google` | `embed_content` via the SDK | image, audio, video, PDF, sent inline (`gemini-embedding-2`; refused on `gemini-embedding-001`) | ✅ `output_dimensionality` |
 | `openai` | `/v1/embeddings` | none | ✅ |
 | `mistral`, `cohere`, `lmstudio` | `/v1/embeddings` | none | ❌ |
 | `script` | `mode: "embed"` in the [script protocol](script-protocol.md) | passed as paths | passed on |

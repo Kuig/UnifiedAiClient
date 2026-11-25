@@ -146,7 +146,10 @@ providers.
 provider with remote resources to release. It pins the API version rather than
 inheriting the SDK's default, because that default changed under it once (`v1beta` to
 `v1` in `google-genai` 3.0) and turned off most of what the adapter sends on Gemini 2.5.
-`ollama` speaks the native `/api/chat`
+Embeddings are the one path that never uploads: `embed_content` does not read Files API
+references, so media travel inline. And since the SDK raises errors of its own rather
+than going through `http.py`, the adapter maps the settled ones onto subclasses that are
+also `NonRetryableError`, by the same status rule. `ollama` speaks the native `/api/chat`
 endpoint, which carries images in a single `images[]` field and maps `context_size` to
 `num_ctx` and `max_tokens` to `num_predict`. `anthropic` speaks `/v1/messages` over
 `urllib`.
