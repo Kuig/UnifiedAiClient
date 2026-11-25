@@ -17,3 +17,8 @@ class MetaProvider(OpenAiCompatProvider):
 
     # The Model API documents chat completions only.
     SUPPORTS_EMBEDDINGS: bool = False
+
+    # tool_choice "none" is a 400 here ("only "auto" is supported for
+    # tool_choice", dev.meta.ai/docs/tool-calling), so call_ai() honours it by
+    # leaving the definitions out instead.
+    TOOL_CHOICE_FIELD: bool = False

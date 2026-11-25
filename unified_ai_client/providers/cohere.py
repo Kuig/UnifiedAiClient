@@ -19,3 +19,8 @@ class CohereProvider(OpenAiCompatProvider):
     # the inherited mapping sends, and maps them onto Cohere's own thinking
     # switch.
     REASONING_PARAM: str | None = "reasoning_effort"
+
+    # tool_choice is in neither the supported nor the unsupported parameter
+    # list of the compatibility API, so call_ai() honours "none" by leaving
+    # the definitions out rather than sending a field of unknown effect.
+    TOOL_CHOICE_FIELD: bool = False

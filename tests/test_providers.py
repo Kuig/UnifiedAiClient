@@ -621,6 +621,41 @@ def _run_tool_loop(test: unittest.TestCase, call, max_rounds: int = 4):
     return response, rounds
 
 
+_CLOSING_PROMPT = "You cannot call more tools. Answer now in one sentence with what you have."
+
+
+def _closing_turn(test: unittest.TestCase, call):
+    """One tool round, then the text-only closing turn a capped loop ends with.
+
+    The closing call carries the whole history, calls and results included,
+    and the definitions, with ``tool_choice="none"``. The loop prompt asks for
+    a second tool, so the model still wants one; the closing prompt is what
+    turns that into an answer. Without it, seen live, gemini-2.5-flash replied
+    with nothing at all and gemini-3.5-flash with a function_call regardless.
+
+    Args:
+        test: The running test, for skipping.
+        call: ``call(**kwargs) -> AiResponse`` bound to one provider and model.
+
+    Returns:
+        The closing ``AiResponse``.
+    """
+    from unified_ai_client import ToolResult
+
+    tools = _loop_tools()
+    response = call(prompt=_LOOP_PROMPT, tools=tools)
+    if not response.tool_calls:
+        test.skipTest("the model answered without calling a tool")
+    results = [
+        ToolResult(call_id=tc.id, name=tc.name,
+                   content="22C and sunny" if tc.name == "get_weather" else "14:00")
+        for tc in response.tool_calls
+    ]
+    history = [{"role": "user", "content": _LOOP_PROMPT},
+               response.message, *(r.to_message() for r in results)]
+    return call(prompt=_CLOSING_PROMPT, messages=history, tools=tools, tool_choice="none")
+
+
 class TestOllamaLive(ProviderRegistryIsolation):
     """End-to-end calls against a local Ollama server.
 
@@ -746,6 +781,15 @@ class TestOllamaLive(ProviderRegistryIsolation):
         self.assertIsInstance(response.text, str)
         # reasoning_text may be empty if the model doesn't support thinking
         self.assertIsInstance(response.reasoning_text, str)
+
+    def test_ollama_live_closing_turn_after_a_tool_round(self) -> None:
+        """tool_choice="none" leaves the definitions out on Ollama, and the
+        server accepts a history with tool calls and results without them."""
+        model = self._require_model()
+        response = _closing_turn(
+            self, lambda **kw: self._live_call(model, max_tokens=256, **kw)
+        )
+        self.assertEqual(response.tool_calls, [])
 
     def test_ollama_live_embedding(self) -> None:
         if not _ollama_available():
@@ -1673,6 +1717,40 @@ class TestToolLoopLive(RequiresCredential, unittest.TestCase):
 
     def test_google_tool_loop_on_gemini_3(self) -> None:
         self._loop("google", "gemini-3.5-flash", "google_api_key")
+
+    def _closing(self, provider: str, model: str, secrets_key: str):
+        from unified_ai_client import call_ai
+
+        self._require_credential(secrets_key)
+
+        def call(**kwargs):
+            try:
+                return call_ai(provider=provider, model=model, max_retries=0,
+                               timeout=120, **kwargs)
+            except Exception as exc:
+                if getattr(exc, "code", None) == 404:
+                    self.skipTest(f"model '{model}' is not available: {exc}")
+                raise
+
+        return _closing_turn(self, call)
+
+    def test_anthropic_closing_turn_with_tool_choice_none(self) -> None:
+        response = self._closing("anthropic", "claude-sonnet-5-5", "anthropic_api_key")
+        self.assertEqual(response.tool_calls, [])
+        self.assertGreater(len(response.text), 0)
+
+    def test_google_closing_turn_with_tool_choice_none(self) -> None:
+        response = self._closing("google", "gemini-2.5-flash", "google_api_key")
+        self.assertEqual(response.tool_calls, [])
+        self.assertGreater(len(response.text), 0)
+
+    def test_gemini_3_accepts_the_closing_turn(self) -> None:
+        """Accepted, signatures and all. Not asserted to be call-free: after a
+        tool history gemini-3.5-flash may still return a function_call under
+        mode NONE (seen live with an empty closing prompt, and when the user
+        asks for another tool)."""
+        response = self._closing("google", "gemini-3.5-flash", "google_api_key")
+        self.assertTrue(response.text or response.tool_calls)
 
 
 class TestWebSearchLive(RequiresCredential, unittest.TestCase):

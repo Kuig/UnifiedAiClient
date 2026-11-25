@@ -76,6 +76,11 @@ class OpenAiCompatProvider(BaseProvider):
 
     SUPPORTS_EMBEDDINGS: bool = True
 
+    # tool_choice "none" is Chat Completions' own field, documented by OpenAI,
+    # Mistral, Groq, xAI and LM Studio and parsed by llama-server. A subclass
+    # whose endpoint lacks it (meta, cohere) sets False.
+    TOOL_CHOICE_FIELD: bool = True
+
     EMBEDDING_DIMENSIONS_PARAM: str | None = None
     """Request field that shortens an embedding vector, or None if there is none.
 
@@ -453,6 +458,9 @@ class OpenAiCompatProvider(BaseProvider):
                 }
                 for t in request.tools
             ]
+            if request.tool_choice == "none":
+                # Before the passthrough, so extra_options["tool_choice"] wins.
+                payload["tool_choice"] = "none"
 
         max_tokens = self._prefer_request(request.max_tokens, opts, "max_tokens")
         if max_tokens is not None and max_tokens > 0:

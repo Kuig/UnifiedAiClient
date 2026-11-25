@@ -3752,6 +3752,206 @@ class TestWebSearch(ProviderRegistryIsolation):
         self.assertEqual(response.grounding, Grounding())
 
 
+class TestToolChoiceSupportMatrix(unittest.TestCase):
+    """Which adapters translate tool_choice="none" themselves, against a table.
+
+    True where the endpoint has a control that forbids tool calls while the
+    definitions are still sent: Anthropic's {"type": "none"}, Gemini's
+    FunctionCallingConfig NONE, Chat Completions' "none" (documented by OpenAI,
+    Mistral, Groq, xAI and LM Studio, parsed by llama-server) and the script,
+    which receives the field. False where call_ai() leaves the definitions out
+    instead: Ollama's ChatRequest has no such field, Meta's API answers "none"
+    with a 400, and Cohere's compatibility API does not list the parameter.
+    """
+
+    _TOOL_CHOICE_FIELD = {
+        "anthropic": True, "google": True, "openai": True, "mistral": True,
+        "groq": True, "xai": True, "lmstudio": True, "llamacpp": True,
+        "script": True,
+        "meta": False, "cohere": False, "ollama": False,
+    }
+
+    def test_table_covers_every_registered_provider(self) -> None:
+        self.assertEqual(set(self._TOOL_CHOICE_FIELD), set(_PROVIDER_CLASSES))
+
+    def test_declared_support_matches_the_table(self) -> None:
+        for name, expected in self._TOOL_CHOICE_FIELD.items():
+            with self.subTest(provider=name):
+                self.assertIs(_provider_class_by_name(name).TOOL_CHOICE_FIELD, expected)
+
+
+class TestToolChoice(ProviderRegistryIsolation):
+    """call_ai(tool_choice=...) on the wire, per adapter.
+
+    The use it exists for is the closing turn of a tool loop: the history holds
+    earlier calls and results, the definitions travel, and the model must
+    answer in text.
+    """
+
+    _COMPAT_FIELD = ("openai", "mistral", "groq", "xai", "lmstudio", "llamacpp")
+    _OMITTED = ("meta", "cohere", "ollama")
+
+    _HISTORY = [
+        {"role": "user", "content": "Weather in Rome?"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_1", "name": "get_weather", "arguments": {"city": "Rome"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_1", "name": "get_weather", "content": "22C"},
+    ]
+
+    _REPLY = {
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {},
+        "message": {"content": "ok"},
+        "eval_count": 1,
+        "prompt_eval_count": 1,
+        "content": [{"type": "text", "text": "ok"}],
+    }
+
+    def setUp(self) -> None:
+        super().setUp()
+        from unified_ai_client.models import ToolDefinition
+
+        self._tools = [ToolDefinition(
+            name="get_weather", description="Weather for a city",
+            parameters={"type": "object", "properties": {"city": {"type": "string"}}},
+        )]
+
+    def _sent(self, name: str, **kwargs) -> dict:
+        """Run call_ai() against patched transport and return the payload sent.
+
+        Through call_ai() rather than provider.call(), because leaving the
+        definitions out happens there.
+        """
+        from unified_ai_client import call_ai
+
+        captured: dict = {}
+
+        def fake_post(*args):
+            # (endpoint, payload, timeout) everywhere except anthropic: (payload, timeout)
+            captured.update(args[-2])
+            return self._REPLY
+
+        kwargs.setdefault("prompt", "")
+        kwargs.setdefault("messages", self._HISTORY)
+        model = "claude-opus-5-5" if name == "anthropic" else "m"
+        with patch.object(_provider_class_by_name(name), "_post", side_effect=fake_post):
+            call_ai(provider=name, model=model, max_retries=0, **kwargs)
+        return captured
+
+    def _google_config(self, **kwargs):
+        from unified_ai_client.providers.google import GoogleProvider
+
+        request = AiRequest(provider="google", model="gemini-3.5-flash", prompt="",
+                            messages=self._HISTORY, **kwargs)
+        return GoogleProvider(ProviderConfig(), api_key="k")._build_config(request, {})
+
+    def _script_payload(self, **kwargs) -> dict:
+        from unified_ai_client import call_ai
+        from unified_ai_client.providers import script as script_module
+
+        with patch.object(script_module, "_run_script", return_value={"text": "ok"}) as run:
+            call_ai(provider="script", model="s.py", prompt="", messages=self._HISTORY,
+                    max_retries=0, **kwargs)
+        return run.call_args.args[1]
+
+    # -- "none" on the wire -------------------------------------------------
+
+    def test_anthropic_sends_type_none_beside_the_tools(self) -> None:
+        payload = self._sent("anthropic", tools=self._tools, tool_choice="none")
+        self.assertEqual(payload["tool_choice"], {"type": "none"})
+        self.assertEqual([t["name"] for t in payload["tools"]], ["get_weather"])
+
+    def test_anthropic_none_holds_under_every_thinking_mode(self) -> None:
+        for thinking in (True, False, "default"):
+            with self.subTest(thinking=thinking):
+                payload = self._sent("anthropic", tools=self._tools,
+                                     tool_choice="none", thinking=thinking)
+                self.assertEqual(payload["tool_choice"], {"type": "none"})
+
+    def test_compat_providers_send_the_none_field_beside_the_tools(self) -> None:
+        for name in self._COMPAT_FIELD:
+            with self.subTest(provider=name):
+                payload = self._sent(name, tools=self._tools, tool_choice="none")
+                self.assertEqual(payload["tool_choice"], "none")
+                self.assertEqual(len(payload["tools"]), 1)
+
+    def test_providers_without_the_field_leave_the_definitions_out(self) -> None:
+        for name in self._OMITTED:
+            with self.subTest(provider=name):
+                payload = self._sent(name, tools=self._tools, tool_choice="none")
+                self.assertNotIn("tools", payload)
+                self.assertNotIn("tool_choice", payload)
+
+    def test_the_history_still_travels_when_the_definitions_do_not(self) -> None:
+        messages = self._sent("ollama", tools=self._tools, tool_choice="none")["messages"]
+        self.assertEqual([m["role"] for m in messages], ["user", "assistant", "tool"])
+        self.assertEqual(messages[1]["tool_calls"][0]["function"]["name"], "get_weather")
+        self.assertEqual(messages[2]["tool_call_id"], "call_1")
+
+    def test_google_sets_function_calling_mode_none_beside_the_tools(self) -> None:
+        config = self._google_config(tools=self._tools, tool_choice="none")
+        self.assertEqual(config.tool_config.function_calling_config.mode, "NONE")
+        self.assertEqual(config.tools[0].function_declarations[0].name, "get_weather")
+
+    def test_script_receives_the_field_and_the_tools(self) -> None:
+        payload = self._script_payload(tools=self._tools, tool_choice="none")
+        self.assertEqual(payload["tool_choice"], "none")
+        self.assertEqual([t["name"] for t in payload["tools"]], ["get_weather"])
+        self.assertEqual(self._script_payload()["tool_choice"], "auto")
+
+    # -- nothing changes otherwise -------------------------------------------
+
+    def test_auto_adds_nothing(self) -> None:
+        for name in ("anthropic", *self._COMPAT_FIELD, *self._OMITTED):
+            with self.subTest(provider=name):
+                payload = self._sent(name, tools=self._tools)
+                self.assertNotIn("tool_choice", payload)
+                self.assertIn("tools", payload)
+        self.assertIsNone(self._google_config(tools=self._tools).tool_config)
+
+    def test_none_without_tools_adds_nothing(self) -> None:
+        for name in ("anthropic", *self._COMPAT_FIELD, *self._OMITTED):
+            with self.subTest(provider=name):
+                payload = self._sent(name, tool_choice="none")
+                self.assertNotIn("tool_choice", payload)
+                self.assertNotIn("tools", payload)
+        self.assertIsNone(self._google_config(tool_choice="none").tool_config)
+
+    def test_a_tool_choice_in_extra_options_wins(self) -> None:
+        payload = self._sent("anthropic", tools=self._tools, tool_choice="none",
+                             extra_options={"tool_choice": {"type": "auto"}})
+        self.assertEqual(payload["tool_choice"], {"type": "auto"})
+        payload = self._sent("openai", tools=self._tools, tool_choice="none",
+                             extra_options={"tool_choice": "auto"})
+        self.assertEqual(payload["tool_choice"], "auto")
+
+    # -- refusals -----------------------------------------------------------
+
+    def test_a_value_other_than_auto_or_none_is_refused_before_sending(self) -> None:
+        from unified_ai_client import call_ai
+        from unified_ai_client.providers.anthropic import AnthropicProvider
+
+        for value in ("required", "NONE", None, 1, True):
+            with self.subTest(tool_choice=value), \
+                    patch.object(AnthropicProvider, "_post") as post, \
+                    self.assertRaises(ValueError):
+                call_ai(provider="anthropic", model="claude-opus-5-5", prompt="hi",
+                        tools=self._tools, tool_choice=value, max_retries=0)
+            post.assert_not_called()
+
+    def test_none_beside_web_search_is_refused_before_sending(self) -> None:
+        from unified_ai_client import call_ai
+        from unified_ai_client.providers.anthropic import AnthropicProvider
+
+        with patch.object(AnthropicProvider, "_post") as post, \
+                self.assertRaises(ValueError):
+            call_ai(provider="anthropic", model="claude-opus-5-5", prompt="hi",
+                    tools=self._tools, tool_choice="none", web_search=True,
+                    max_retries=0)
+        post.assert_not_called()
+
+
 class TestAttachmentRefusalIsWordedOnce(FileFixtureCase):
     """A provider that promises a file class it cannot build says so one way.
 

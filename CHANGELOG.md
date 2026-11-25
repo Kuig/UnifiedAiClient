@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `call_ai(tool_choice="none")` forbids tool calls while the definitions and a history of
+  earlier calls and results still travel, for the text-only closing turn of a tool loop
+  that reached its round limit. The default `"auto"` changes nothing on the wire. Sent as
+  the provider's own control on `anthropic` (`{"type": "none"}`), `google`
+  (`FunctionCallingConfig(mode="NONE")`), `openai`, `mistral`, `groq`, `xai`, `lmstudio`
+  and `llamacpp` (`"none"`), and as a new `tool_choice` field of the `script` protocol.
+  On `ollama`, `meta` and `cohere`, which have no such control, the definitions are left
+  out instead. The new flag `BaseProvider.TOOL_CHOICE_FIELD` says which. Any other value,
+  and `"none"` together with `web_search=True`, raises `ValueError` before sending. After a
+  tool history `gemini-3.5-flash` may still return a function call under mode NONE (seen
+  live), so a loop must still check `tool_calls`.
+
 ## [0.9.0] - 2026-11-21
 
 ### Added

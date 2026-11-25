@@ -94,6 +94,12 @@ class GoogleProvider(BaseProvider):
     # Grounding with Google Search, the google_search tool of Gemini 2.0 on.
     SUPPORTS_WEB_SEARCH: bool = True
 
+    # FunctionCallingConfig(mode="NONE"). Honoured by gemini-2.5-flash, but
+    # after a tool history gemini-3.5-flash still returns a function_call when
+    # it wants another tool and the closing prompt does not tell it to answer
+    # (seen live), with or without the declarations.
+    TOOL_CHOICE_FIELD: bool = True
+
     # gemini-embedding-2 takes them all; a text-only model such as
     # gemini-embedding-001 refuses them with an error of its own.
     SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset({
@@ -538,6 +544,7 @@ class GoogleProvider(BaseProvider):
                 for t in request.tools
             ]
             tools.append(types.Tool(function_declarations=declarations))
+        tool_config: dict[str, Any] = {}
         if request.web_search:
             # A Tool of its own: one Tool carries one kind.
             tools.append(types.Tool(google_search=types.GoogleSearch()))
@@ -546,9 +553,13 @@ class GoogleProvider(BaseProvider):
                 # declarations unless the server-side invocations are returned
                 # too (verified live on gemini-3.5-flash). They come back as
                 # tool_call/tool_response Parts, kept in provider_state for replay.
-                config_kwargs["tool_config"] = types.ToolConfig(
-                    include_server_side_tool_invocations=True
-                )
+                tool_config["include_server_side_tool_invocations"] = True
+        if request.tools and request.tool_choice == "none":
+            tool_config["function_calling_config"] = types.FunctionCallingConfig(
+                mode="NONE"
+            )
+        if tool_config:
+            config_kwargs["tool_config"] = types.ToolConfig(**tool_config)
         if tools:
             config_kwargs["tools"] = tools
 

@@ -58,6 +58,9 @@ class AnthropicProvider(BaseProvider):
     # The web_search server tool, run by Anthropic inside the same request.
     SUPPORTS_WEB_SEARCH: bool = True
 
+    # tool_choice {"type": "none"}, documented on every current model.
+    TOOL_CHOICE_FIELD: bool = True
+
     # Mandatory on /v1/messages, so used when nobody set max_tokens. Also sizes
     # the thinking budget on models older than 4.6.
     DEFAULT_MAX_TOKENS: int = 8192
@@ -717,6 +720,11 @@ class AnthropicProvider(BaseProvider):
             tools.append({"type": self._web_search_tool(request.model), "name": "web_search"})
         if tools:
             payload["tools"] = tools
+            if request.tool_choice == "none":
+                # setdefault: a tool_choice from extra_options is the caller's
+                # own. "none" is accepted under every thinking mode; only the
+                # forced "any"/"tool" are refused there and on the 5.x models.
+                payload.setdefault("tool_choice", {"type": "none"})
 
         thinking_payload = self._build_thinking_payload(
             request.thinking, request.model, max_tokens

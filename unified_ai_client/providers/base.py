@@ -96,6 +96,19 @@ class BaseProvider(ABC):
     against a hand-written table.
     """
 
+    TOOL_CHOICE_FIELD: bool = False
+    """Whether this adapter translates ``call_ai(tool_choice="none")`` itself.
+
+    True means the endpoint has a control that forbids tool calls while the
+    definitions are still sent, and the adapter reads ``request.tool_choice``
+    to set it. False means ``call_ai()`` honours ``"none"`` by leaving the
+    definitions out of the request altogether, which needs nothing from the
+    adapter. False is the safe default, matching the other capability flags:
+    an adapter that declared True and then never read the value would let the
+    model call tools after the caller forbade it. Asserted against a
+    hand-written table.
+    """
+
     SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset()
     """File classes this provider can embed, alongside or instead of text.
 

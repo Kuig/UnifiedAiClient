@@ -149,6 +149,11 @@ class OllamaProvider(BaseProvider):
     # trace and its template markers included.
     SUPPORTS_LOGPROBS: bool = True
 
+    # ChatRequest has no tool_choice (api/types.go), so call_ai() honours
+    # "none" by leaving the definitions out; a history with tool calls and
+    # results and no tools is accepted (verified live on 0.40.18).
+    TOOL_CHOICE_FIELD: bool = False
+
     # /api/embed takes an input object with an image and an audio track; which
     # tags can read them is up to the model.
     SUPPORTED_EMBEDDING_FILE_TYPES: frozenset[str] = frozenset({"image", "audio"})

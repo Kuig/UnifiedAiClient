@@ -108,7 +108,10 @@ one-token completion rather than a free metadata GET. Set `SUPPORTS_EMBEDDINGS` 
 endpoint has been verified to take. Set `SUPPORTS_LOGPROBS` only when the documentation or a
 live test confirms the endpoint returns token log probabilities, and `SUPPORTS_WEB_SEARCH`
 only when the endpoint has a search tool a request can switch on, overriding
-`_web_search_payload()` on an OpenAI-compatible one. For a local server, set `PROBE_PATH` to a cheap GET path,
+`_web_search_payload()` on an OpenAI-compatible one. Set `TOOL_CHOICE_FIELD` to True only
+when the adapter sends the endpoint's own control for `tool_choice="none"`; it is inherited
+True on an OpenAI-compatible one, so set it False there if the endpoint lacks
+`tool_choice: "none"`, and `call_ai()` leaves the tool definitions out instead. For a local server, set `PROBE_PATH` to a cheap GET path,
 which is how `list_providers()` tells that it is running. Override `list_models()` if the
 endpoint can enumerate its models, setting a `ModelInfo` capability only when the endpoint
 reports it and leaving it `None` otherwise.
@@ -130,7 +133,8 @@ Then wire it in and document it:
   `TestUnloadSupportMatrix._SUPPORTS_UNLOAD`,
   `TestEmbeddingsSupportMatrix._SUPPORTS_EMBEDDINGS`,
   `TestLogprobsSupportMatrix._SUPPORTS_LOGPROBS`,
-  `TestWebSearchSupportMatrix._SUPPORTS_WEB_SEARCH` and
+  `TestWebSearchSupportMatrix._SUPPORTS_WEB_SEARCH`,
+  `TestToolChoiceSupportMatrix._TOOL_CHOICE_FIELD` and
   `TestEmbeddingFileSupportMatrix._SUPPORT` assert the declared capabilities against an
   explicit list, so a provider added without a row there fails the suite. `TestDispatch` and
   the import tests need no new entry: they loop over `_PROVIDER_CLASSES`, itself derived from

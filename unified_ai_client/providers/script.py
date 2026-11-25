@@ -131,6 +131,11 @@ class ScriptProvider(BaseProvider):
     # Passed through as a payload field: only the script knows whether it can search.
     SUPPORTS_WEB_SEARCH: bool = True
 
+    # tool_choice travels as a payload field with the tools still in place: a
+    # script relaying to an API that wants the definitions beside a tool
+    # history would break if they were left out.
+    TOOL_CHOICE_FIELD: bool = True
+
     # Empty on purpose: the whole merged extra_options dict reaches the script,
     # library keys included, since only the script knows what it understands.
     # The sampling levers are read out of it but never removed.
@@ -198,6 +203,7 @@ class ScriptProvider(BaseProvider):
             ] if request.tool_results else None,
             "logprobs": request.logprobs,
             "web_search": request.web_search,
+            "tool_choice": request.tool_choice,
         }
 
         data = _run_script(cmd, payload, request.timeout)

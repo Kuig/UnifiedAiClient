@@ -290,6 +290,11 @@ class AiRequest:
             Already validated by ``call_ai()``.
         web_search: Whether the model may search the web and ground its answer
             on what it finds. Already validated by ``call_ai()``.
+        tool_choice: ``"auto"`` lets the model decide whether to call one of
+            ``tools``; ``"none"`` forbids it. Already validated by
+            ``call_ai()``, which also leaves ``tools`` out for a provider
+            without ``TOOL_CHOICE_FIELD``, so an adapter only ever reads it
+            when it translates the value itself.
     """
     provider: str
     model: str
@@ -310,6 +315,7 @@ class AiRequest:
     extra_options: dict | None = None
     logprobs: int | None = None
     web_search: bool = False
+    tool_choice: str = "auto"
 
 
 @dataclass

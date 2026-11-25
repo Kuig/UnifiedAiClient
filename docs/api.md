@@ -55,6 +55,7 @@ def call_ai(
 | `extra_options` | `dict \| None` | `None` | Arbitrary provider-specific options merged into the payload last, overriding config-level values for the same key. |
 | `tools` | `list[ToolDefinition] \| None` | `None` | Tools the model may call. See [Tool Calling](tool-calling.md). |
 | `tool_results` | `list[ToolResult] \| None` | `None` | Results of previously requested tool calls, for the follow-up turn. When present, `prompt` is **not** re-appended to `messages`. |
+| `tool_choice` | `str` | `"auto"` | `"auto"` lets the model decide whether to call one of `tools`; `"none"` forbids it, for a text-only closing turn after a tool loop. Sent as the provider's own control where there is one, otherwise the definitions are left out. No effect without `tools`. `ValueError` for any other value, or for `"none"` with `web_search=True`. See [Tool Calling](tool-calling.md#forbidding-tool-calls-tool_choice). |
 | `logprobs` | `int \| None` | `None` | Token log probabilities: `0` for each generated token, `1` to `20` for that many alternatives as well. Refused before sending (`ValueError` out of range, `UnsupportedOperationError` on a provider without them). See [Token Log Probabilities](logprobs.md). |
 | `web_search` | `bool` | `False` | Lets the model search the web through the provider's own search tool; the searches and sources come back in `AiResponse.grounding`. Refused before sending (`ValueError` for a non-bool, `UnsupportedOperationError` on a provider without one). See [Web Search](web-search.md). |
 
@@ -719,7 +720,9 @@ class-level `SUPPORTED_FILE_TYPES` declares which file classes the adapter accep
 `SUPPORTED_EMBEDDING_FILE_TYPES` which ones it can embed, `SUPPORTED_EXTENSIONS` which
 extensions of a class its endpoint decodes (empty: all of them), `SUPPORTS_LOGPROBS` whether
 `call_ai(logprobs=...)` can be honoured, `SUPPORTS_WEB_SEARCH` whether
-`call_ai(web_search=True)` can be, `SUPPORTS_UNLOAD` whether it holds
+`call_ai(web_search=True)` can be, `TOOL_CHOICE_FIELD` whether it translates
+`call_ai(tool_choice="none")` into the endpoint's own control (when False, `call_ai()`
+leaves the tool definitions out instead), `SUPPORTS_UNLOAD` whether it holds
 a model resident at all, and `SUPPORTS_EMBEDDINGS` whether `embed()` is implemented.
 
 `call()` is the only abstract method. `preload_model()`, `warm_up()`, `unload_model()`,

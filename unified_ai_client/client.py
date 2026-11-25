@@ -48,6 +48,7 @@ def call_ai(
     tool_results: list[ToolResult] | None = None,
     logprobs: int | None = None,
     web_search: bool = False,
+    tool_choice: str = "auto",
 ) -> AiResponse:
     """Main routing function for all unified AI text generation requests.
 
@@ -108,14 +109,22 @@ def call_ai(
             provider's own search tool and ground its answer on the results.
             The searches and sources come back in ``AiResponse.grounding``.
             Searches are billed by the provider on top of tokens.
+        tool_choice: ``"auto"`` (the default) lets the model decide whether
+            to call one of ``tools``. ``"none"`` forbids tool calls while the
+            history keeps its earlier calls and results, for a final text-only
+            answer at the end of a tool loop. Where the provider has no such
+            control, the definitions are left out of the request instead. With
+            no ``tools`` it changes nothing.
 
     Returns:
         ``AiResponse`` dataclass containing response text, token metrics,
         optional reasoning text, and any tool calls requested by the model.
 
     Raises:
-        ValueError: If ``logprobs`` is not an integer from 0 to 20, or
-            ``web_search`` is not a bool.
+        ValueError: If ``logprobs`` is not an integer from 0 to 20,
+            ``web_search`` is not a bool, ``tool_choice`` is neither
+            ``"auto"`` nor ``"none"``, or ``tool_choice="none"`` is combined
+            with ``web_search=True``.
         UnsupportedOperationError: If ``logprobs`` or ``web_search`` is set and
             the provider cannot honour it. Raised before anything is sent.
     """
@@ -129,6 +138,16 @@ def call_ai(
     prov = get_provider(provider)
     _check_logprobs(prov, logprobs)
     _check_web_search(prov, web_search)
+    _check_tool_choice(tool_choice, web_search)
+    if tool_choice == "none" and tools and not getattr(prov, "TOOL_CHOICE_FIELD", False):
+        # Nothing to forbid on the wire, so nothing to call: the definitions
+        # are the one thing the model needs to make a call at all.
+        _log.debug(
+            "call_ai: tool_choice='none' on provider %s, which has no such "
+            "control; leaving the %d tool definition(s) out of the request.",
+            provider, len(tools),
+        )
+        tools = None
     # Recorded before the call, not after: a model that loaded and then timed
     # out is resident all the same, and still has to be released at exit.
     _record_loaded(provider, prov, model)
@@ -156,6 +175,7 @@ def call_ai(
         tool_results=tool_results,
         logprobs=logprobs,
         web_search=web_search,
+        tool_choice=tool_choice,
     )
 
     if file_path and tool_results:
@@ -219,6 +239,39 @@ def _check_web_search(prov: Any, web_search: bool) -> None:
         raise UnsupportedOperationError(
             f"Provider '{prov.provider_name}' offers no web search this library "
             "can reach. Leave web_search unset, or use a provider that has one."
+        )
+
+
+_TOOL_CHOICES: tuple[str, ...] = ("auto", "none")
+"""The ``tool_choice`` values every provider can honour.
+
+Forcing a call (``"required"``, or one named tool) is left out: Claude Opus 5.5,
+Sonnet 5.5 and Fable answer it with a 400, Meta's API takes ``"auto"`` only, and
+Mistral spells it ``"any"``.
+"""
+
+
+def _check_tool_choice(tool_choice: str, web_search: bool) -> None:
+    """Refuse a ``tool_choice`` that cannot be honoured, before sending it.
+
+    ``"none"`` beside ``web_search=True`` is refused on every provider, because
+    on Anthropic the same switch also blocks the server's search tool: the
+    search would silently never run, which is what ``web_search`` refuses
+    everywhere else.
+
+    Raises:
+        ValueError: If ``tool_choice`` is neither ``"auto"`` nor ``"none"``,
+            or is ``"none"`` with ``web_search=True``.
+    """
+    if not isinstance(tool_choice, str) or tool_choice not in _TOOL_CHOICES:
+        raise ValueError(
+            f"tool_choice takes 'auto' or 'none', not {tool_choice!r}. Forcing a "
+            "tool call is not offered, since several providers refuse it."
+        )
+    if tool_choice == "none" and web_search:
+        raise ValueError(
+            "tool_choice='none' cannot be combined with web_search=True: on some "
+            "providers it also blocks the search tool. Drop one of the two."
         )
 
 

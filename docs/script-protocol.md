@@ -123,6 +123,7 @@ The script reads **one JSON object** from stdin. The object contains the followi
 | `tool_results` | `array \| null` | ✅ Yes | List of tool execution results to inject into the conversation, or null. |
 | `logprobs` | `int \| null` | ✅ Yes | Null when no token log probabilities were asked for; otherwise how many alternatives to return per token, from 0 to 20. |
 | `web_search` | `bool` | ✅ Yes | Whether the caller let the model search the web. |
+| `tool_choice` | `string` | ✅ Yes | `"auto"`: the model may call any of `tools`. `"none"`: it must not call any, though `tools` is still sent and `messages` may hold earlier calls and results. Never `"none"` together with `web_search: true`. |
 
 All fields are always present. Fields that are not applicable to a given call are sent
 as `null` or their zero/empty value (never omitted). The script must handle `null`
@@ -590,6 +591,11 @@ The following fields are passed for completeness but many scripts will not use t
 - `web_search`: Scripts with no way to search may ignore it; the caller is told by an
   empty `AiResponse.grounding` and a warning. A script that can search should report
   what it searched for and found in `grounding`.
+- `tool_choice`: Scripts without tool calling may ignore it. A script that ignores it
+  behaves as `"auto"`, and any `tool_calls` it returns reach the caller as they are. A
+  script that relays to an API with its own control should translate `"none"` into it,
+  keeping `tools` in the request where that API needs the definitions beside a tool
+  history.
 - `format_json`: A hint that the caller wants JSON-formatted output in `text`. The
   script should produce valid JSON in the `text` field when this is `true`. If the
   script cannot guarantee JSON output, it may ignore this flag.
