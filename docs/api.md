@@ -121,7 +121,7 @@ def get_embedding(
 | `max_retries` | `int` | `3` | Retry attempts on transient failures, as in `call_ai()`. |
 | `retry_base_delay` | `float` | `5.0` | Initial backoff delay in seconds. |
 | `sleep_time` | `int \| None` | `None` | Seconds to sleep before the request, once. Falls back to the configured value. |
-| `extra_options` | `dict \| None` | `None` | Provider-specific options for this call, such as `{"task_type": "RETRIEVAL_QUERY"}` on `gemini-embedding-001` or `{"truncate": False}` on Ollama. On the OpenAI-compatible providers only these call-time options are forwarded, not the configured ones, which are written for chat. |
+| `extra_options` | `dict \| None` | `None` | Provider-specific options for this call, such as `{"task_type": "RETRIEVAL_QUERY"}` on `gemini-embedding-001` or `{"truncate": False}` on Ollama. On Ollama, model options such as `num_gpu` go into the request's `options` (`context_size` as `num_ctx`), and `keep_alive` and `truncate` into its body. On Ollama and the OpenAI-compatible providers only these call-time model options are sent, not the configured ones, which are written for chat. Elsewhere the rule of `call_ai()` applies: a key this library does not define is forwarded to the endpoint as it is, and one it defines for another provider (`keep_alive` on `openai`) is dropped with a `DEBUG` log. `google` reads only `task_type` and `output_dimensionality`; `script` receives the whole dict. |
 
 | Provider | Endpoint | Media | `dimensions` |
 |---|---|---|---|
@@ -142,14 +142,17 @@ a model documented as an embedding model, and a media-capable one for files. Not
 **Raises:** [`UnsupportedOperationError`](#unsupportedoperationerror) on a provider that
 serves no embeddings, or for `dimensions` where it cannot be honoured.
 [`UnsupportedFileError`](#unsupportedfileerror) for a file the provider cannot embed.
-[`EmptyResponseError`](#emptyresponseerror) if the provider returns no vector, typically
-because the model is not an embedding model. None of them is retried.
+[`ContextLengthError`](#contextlengtherror) for an input longer than the model's context
+when truncation is off. [`EmptyResponseError`](#emptyresponseerror) if the provider
+returns no vector, typically because the model is not an embedding model. None of them is
+retried.
 
 ### `get_embeddings`
 
 The batch counterpart of `get_embedding()`, for text only: one vector per text, in a
-single request where the endpoint takes a list. `script` runs the script once per text,
-its protocol carrying a single input.
+single request where the endpoint takes a list, or one per `batch_size` texts. `script`
+runs the script once per text, its protocol carrying a single input, and so does an
+adapter that implements only the older one-text `get_embedding(model, text)`.
 
 ```python
 def get_embeddings(
@@ -163,16 +166,39 @@ def get_embeddings(
     retry_base_delay: float = 5.0,
     sleep_time: int | None = None,
     extra_options: dict | None = None,
+    batch_size: int | None = None,
 ) -> list[list[float]]:
 ```
 
 The parameters are those of `get_embedding()`, with `texts` in place of `text` and
-`file_path`. An empty list returns `[]` without sending anything.
+`file_path`, plus one:
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `batch_size` | `int \| None` | `None` | Most texts per request. `None` sends them all in one. Each batch is its own request, with its own retries and its own `sleep_time`, so a transient failure resends only the batch it hit. A value that is not a positive integer raises `ValueError` before anything is sent. |
+
+An empty list returns `[]` without sending anything.
+
+An Ollama embedding model can run on the CPU, leaving the GPU to a chat model, with
+`num_gpu` set to `0` on every call. Registering it via `configure_provider()` instead would
+move the chat model to the CPU too. A short `keep_alive` frees the memory soon after, and
+`truncate: False` turns Ollama's silent truncation of an over-long input into an error:
+
+```python
+from unified_ai_client import ContextLengthError, get_embeddings
+
+cpu = {"num_gpu": 0, "keep_alive": "30s", "truncate": False}
+try:
+    vectors = get_embeddings("ollama", "bge-m3", chunks, batch_size=64, extra_options=cpu)
+except ContextLengthError as exc:
+    print("too long, one of:", [chunks[i] for i in exc.indices])
+```
 
 **Returns:** one vector per text, in the same order.
 
-**Raises:** as `get_embedding()`. `EmptyResponseError` also covers a response with fewer
-vectors than texts.
+**Raises:** as `get_embedding()`, and `ValueError` for an invalid `batch_size`.
+`EmptyResponseError` also covers a response with fewer vectors than texts.
+`ContextLengthError` names the positions in `texts` of the batch that failed.
 
 ### `warm_up`
 
@@ -797,6 +823,23 @@ Raised for every 4xx except 408, 409, 425 and 429, which are transient by defini
 retryable along with the 5xx range. The one 5xx raised as this class is 501 Not Implemented,
 which says the server does not do what was asked: Ollama answers it for media sent to an
 embedding model without the encoder.
+
+### `ContextLengthError`
+
+An input is longer than the model's context window and truncation is off: raised by
+`ollama` when `get_embedding()` or `get_embeddings()` passes `truncate: False`, which
+Ollama answers with a 400. Subclasses `NonRetryableHttpError`, so every handler for that
+class, `ProviderHttpError` or `urllib.error.HTTPError` still catches it, and it is never
+retried.
+
+Ollama embeds a batch in parallel and reports only the first failure, without saying
+which input it was, so the error names every input of the request that failed. Embedding
+those again with `batch_size=1` finds the one at fault.
+
+| Attribute | Holds |
+|---|---|
+| `indices` | Positions, in the list passed to `get_embeddings()`, of the inputs of the failing request, in order. `(0,)` for `get_embedding()`. |
+| `input_index` | The one position when the request held a single input, otherwise `None`. |
 
 ### `UnsupportedOperationError`
 

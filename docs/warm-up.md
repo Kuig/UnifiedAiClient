@@ -106,6 +106,19 @@ For providers that do not support preloading (Google, Anthropic, OpenAI, and the
 the warm-up part is a no-op, but any provided `context_size` / `extra_options` are still
 registered and will apply to `call_ai()` calls.
 
+An embedding-only model (`bge-m3`, EmbeddingGemma) is loaded through `/api/embed` instead,
+since `/api/chat` refuses it before loading anything; `warm_up()` does the same. Only the
+`context_size` and `extra_options` given here reach that load, as on an embedding call.
+Registering them still applies to every `ollama` call, though, so to keep an embedding
+model on the CPU beside a chat model on the GPU, preload it through the provider, which
+registers nothing, or skip the preload and let the first embedding call load it:
+
+```python
+from unified_ai_client import get_provider
+
+get_provider("ollama").preload_model("bge-m3", "30s", extra_options={"num_gpu": 0})
+```
+
 ## Releasing a model
 
 `unload_model()` is the counterpart to `preload_model()`. On Ollama it sends the request

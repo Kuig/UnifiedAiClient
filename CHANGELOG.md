@@ -20,6 +20,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `"none"` together with `web_search=True`, raises `ValueError` before sending. After a
   tool history `gemini-3.5-flash` may still return a function call under mode NONE (seen
   live), so a loop must still check `tool_calls`.
+- `get_embeddings(batch_size=N)` sends at most `N` texts per request, each batch with its
+  own retries and its own `sleep_time`, and returns the vectors in input order. The
+  default `None` sends one request, as before. A value that is not a positive integer
+  raises `ValueError` before sending.
+- `ContextLengthError`, a `NonRetryableHttpError`, raised by `ollama` when an embedding
+  input is longer than the model's context and `extra_options` sets `truncate: False`.
+  Ollama does not say which input it was, so `indices` gives the positions of the inputs
+  in the failing request, and `input_index` the one position when there was a single one.
+- The `embed` payload of the `script` protocol gains an optional `extra_options` field,
+  the configured and call-time options merged as in `generate`, present only when
+  non-empty.
+
+### Fixed
+
+- `ollama` embeddings drop model options no longer: the call-time `extra_options` of
+  `get_embedding()` and `get_embeddings()` reach the request's `options` (`num_gpu`,
+  `num_thread`, `context_size` as `num_ctx`), so an embedding model can run on the CPU
+  with `{"num_gpu": 0}` beside a chat model on the GPU. The options registered via
+  `configure_provider()` still do not reach `/api/embed`, since they are written for the
+  chat model.
+- `preload_model()` and `warm_up()` on `ollama` load an embedding-only model, which
+  `/api/chat` refuses with 400 "does not support chat", through `/api/embed` instead.
+  Until now the first raised and the second returned `False`.
 
 ## [0.9.0] - 2026-11-21
 

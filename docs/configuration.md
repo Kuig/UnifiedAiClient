@@ -129,7 +129,7 @@ forwarded to the API payload.
 |---|---|---|---|
 | `url` | `str` or `None` | `None` | Base URL of the endpoint. `None` means "use this provider's own default", listed below. An explicit value is always honoured as given. |
 | `timeout` | `int` | `300` | Seconds to wait for a response. Applies to generation, warm-up, preload and embeddings alike; a `timeout` passed to `call_ai()` or `get_embedding()` overrides it for that call. Two exceptions: Ollama's `unload_model()` waits 30 seconds of its own, and `google` ignores it for `warm_up()` and `list_models()`. |
-| `sleep_time` | `int` | `0` | Seconds to sleep before a request, for rate limiting. Applied once per `call_ai()`, `get_embedding()` or `get_embeddings()`, before the retry loop, so retries do not multiply it. |
+| `sleep_time` | `int` | `0` | Seconds to sleep before a request, for rate limiting. Applied once per `call_ai()` or `get_embedding()`, and once per batch of `get_embeddings()`, before the retry loop, so retries do not multiply it. |
 
 ### Default endpoint per provider
 
@@ -160,7 +160,7 @@ behaviour:
 | Option | Providers | Default | Description |
 |---|---|---|---|
 | `context_size` | `ollama`, `script` | unset | Context window in tokens, sent as `num_ctx` on Ollama and in the `preload` payload on `script`. Prefer setting it through `preload_model()`, so Ollama allocates VRAM once instead of reloading on the first call. |
-| `keep_alive` | `ollama`, `script` | unset | How long the model stays resident once idle. A number is seconds, `0` unloads it, `-1` keeps it resident indefinitely; a string is a Go duration such as `"15m"`. Set here on `ollama` it governs every call, warm-up, preload and embedding; on `script` it reaches the `warm_up` and `preload` modes, the only ones that carry the field. `warm_up()` and `preload_model()` also take it per call. Unset, nothing is sent and the server's own default applies (`OLLAMA_KEEP_ALIVE`, five minutes unless changed). |
+| `keep_alive` | `ollama`, `script` | unset | How long the model stays resident once idle. A number is seconds, `0` unloads it, `-1` keeps it resident indefinitely; a string is a Go duration such as `"15m"`. Set here on `ollama` it governs every call, warm-up, preload and embedding; on `script` it reaches the `warm_up` and `preload` modes, the only ones that carry the field. `warm_up()` and `preload_model()` also take it per call, and so does the `extra_options` of any call, `get_embedding()` and `get_embeddings()` included. Unset, nothing is sent and the server's own default applies (`OLLAMA_KEEP_ALIVE`, five minutes unless changed). |
 | `max_tokens` | all | unset | Response length cap, mapped per provider (`num_predict` on Ollama, `max_output_tokens` on Google). Also a per-call argument, which wins. Unset, nothing is sent, except on `anthropic`, whose API requires the field and so receives `8192`. |
 | `max_output_tokens` | `google` | unset | Google's own name for `max_tokens`, accepted as an alias. |
 | `use_generate` | `ollama` | `False` | Routes to `/api/generate` instead of `/api/chat`. That endpoint carries one prompt with its attachments, a system prompt and the `thinking` flag, and returns the trace separately as `/api/chat` does. It has no place for tools, tool results or message history: passing any of them together with `use_generate=True` raises `NonRetryableError` rather than dropping them silently. It is also the only way to send the completion-only fields below. |
@@ -197,6 +197,14 @@ A completion-only field (`raw`, `suffix`, `template`, `context`) on a chat reque
 `NonRetryableError`, since dropping a `suffix` would change the answer rather than degrade
 it. Embedding fields on a chat request, and the reverse, are not sent, and are named in a
 `DEBUG` log record.
+
+`/api/embed` takes model options too, but only from the call: the `extra_options` of
+`get_embedding()` or `get_embeddings()` reach its `options` (`context_size` as `num_ctx`),
+while those registered for `ollama` do not, because they are written for the chat model.
+That is what lets an embedding model run on the CPU beside a chat model on the GPU, with
+`extra_options={"num_gpu": 0}` on each embedding call; registering `num_gpu=0` would move
+the chat model to the CPU as well. The request-level fields of the table (`keep_alive`
+included) are read from both layers.
 
 The options above are the reverse case: the library owns their meaning, and the
 `Providers` column says which adapter reads each one. An adapter that does not own an

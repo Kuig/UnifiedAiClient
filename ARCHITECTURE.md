@@ -32,7 +32,7 @@ unified_ai_client/
 ├── registry.py           # get_provider(), configure_provider(), list_providers(), cleanup(), the four registries
 ├── models.py             # AiRequest, EmbeddingRequest, AiResponse, ProviderConfig dataclasses
 ├── file_utils.py         # classify_file, validate_files, encode_file_base64, ...
-├── exceptions.py         # NonRetryableError and its family, ProviderHttpError, ModelRefusalError
+├── exceptions.py         # NonRetryableError and its family, ProviderHttpError, ContextLengthError, ModelRefusalError
 ├── config.py             # load_secrets(), load_config() (utility)
 ├── http.py               # Shared urllib transport + HTTP error classification
 ├── retry.py              # Exponential backoff
@@ -226,8 +226,9 @@ These hold across every adapter. They are invisible in any single file, and they
 first thing an edit breaks.
 
 **Rate limiting lives in `client.py` and nowhere else**, in the one helper `call_ai()` and
-the embedding functions share. The sleep happens once, before the retry wrapper, and
-therefore not once per attempt. No provider sleeps on its own. Move
+the embedding functions share. The sleep happens once per request, before the retry
+wrapper, and therefore not once per attempt; a `get_embeddings()` split into batches sends
+one request per batch. No provider sleeps on its own. Move
 it inside the retry loop and a rate-limited provider silently triples its own latency.
 
 **A provider reads its configuration once.** Each HTTP adapter resolves its base URL in
@@ -286,6 +287,7 @@ and `ValueError`; `MissingFileError` pairs `NonRetryableError` with `FileNotFoun
 `NonRetryableHttpError` pairs it with `urllib`'s `HTTPError`; `UnsupportedOperationError`
 with `NotImplementedError`; `EmptyResponseError` with `RuntimeError`. The second base in
 each pair keeps handlers written against the old plain-exception behaviour working.
+`ContextLengthError`, an over-long embedding input, is a `NonRetryableHttpError` itself.
 `ModelRefusalError`, for a policy refusal that arrives as a successful response, has only
 the first. Any future deterministic failure belongs under the same base.
 

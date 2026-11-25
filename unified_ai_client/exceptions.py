@@ -169,3 +169,75 @@ class NonRetryableHttpError(NonRetryableError, ProviderHttpError):
     that is, 501 Not Implemented, says the server does not do what was asked,
     which no retry changes.
     """
+
+
+class ContextLengthError(NonRetryableHttpError):
+    """An input is longer than the model's context window, and truncation is off.
+
+    Ollama truncates an over-long embedding input silently unless the request
+    carries ``truncate: false``, and then answers 400 instead. That answer does
+    not say which input was too long: the server embeds a batch in parallel and
+    reports the first failure only. So ``indices`` names every input of the
+    request that failed, as positions in the list the caller passed, and
+    ``input_index`` is set only when that request held exactly one input.
+    ``get_embeddings(batch_size=1)`` on those indices finds the culprit.
+
+    Generic on purpose, like ``ModelRefusalError``, so another provider can
+    raise it too. Subclasses ``NonRetryableHttpError``, so a handler catching
+    that class or ``urllib.error.HTTPError`` keeps catching it.
+
+    Attributes:
+        indices: Positions, in the caller's input list, of the inputs in the
+            request that failed. Contiguous, in order.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        code: int,
+        detail: str,
+        hdrs: Any = None,
+        body: str = "",
+        indices: tuple[int, ...] = (),
+    ) -> None:
+        """Build the error.
+
+        Args:
+            url: The URL that was requested.
+            code: HTTP status code of the response.
+            detail: The provider's own error message.
+            hdrs: Response headers, as handed over by ``urllib``.
+            body: Raw response body as text.
+            indices: Positions of the inputs in the failing request.
+        """
+        super().__init__(url, code, detail, hdrs, body)
+        self.indices = tuple(indices)
+
+    @classmethod
+    def from_http_error(
+        cls, exc: ProviderHttpError, indices: range | tuple[int, ...]
+    ) -> ContextLengthError:
+        """Re-type an HTTP error already raised by the transport.
+
+        Args:
+            exc: The error the transport raised.
+            indices: Positions of the inputs in the failing request.
+
+        Returns:
+            The same failure, as this class.
+        """
+        return cls(exc.filename, exc.code, exc.detail, exc.hdrs, exc.body, tuple(indices))
+
+    @property
+    def input_index(self) -> int | None:
+        """The one input at fault, or None when the request held several."""
+        return self.indices[0] if len(self.indices) == 1 else None
+
+    def __str__(self) -> str:
+        if not self.indices:
+            return super().__str__()
+        if len(self.indices) == 1:
+            where = f"input {self.indices[0]}"
+        else:
+            where = f"one of inputs {self.indices[0]}-{self.indices[-1]}"
+        return f"{super().__str__()} ({where})"

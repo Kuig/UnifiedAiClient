@@ -559,7 +559,9 @@ def get_embedding(
         retry_base_delay: Initial exponential backoff delay in seconds.
         sleep_time: Rate limit delay in seconds before the request. Overrides
             the configured value for this call.
-        extra_options: Provider-specific options for this call.
+        extra_options: Provider-specific options for this call. On Ollama,
+            model options such as ``num_gpu`` go into the request's
+            ``options``, and ``keep_alive`` and ``truncate`` into its body.
 
     Returns:
         The embedding vector.
@@ -568,6 +570,8 @@ def get_embedding(
         UnsupportedOperationError: If the provider serves no embeddings, or
             cannot honour ``dimensions``.
         UnsupportedFileError: If a file cannot be embedded by this provider.
+        ContextLengthError: If the input is longer than the model's context
+            and truncation is off.
         EmptyResponseError: If the provider returned no vector.
     """
     from unified_ai_client.file_utils import normalize_file_paths
@@ -575,7 +579,7 @@ def get_embedding(
     files = normalize_file_paths(file_path)
     return _embed(
         provider, model, [text], files or None, dimensions, timeout,
-        max_retries, retry_base_delay, sleep_time, extra_options,
+        max_retries, retry_base_delay, sleep_time, extra_options, None,
     )[0]
 
 
@@ -590,38 +594,66 @@ def get_embeddings(
     retry_base_delay: float = 5.0,
     sleep_time: int | None = None,
     extra_options: dict | None = None,
+    batch_size: int | None = None,
 ) -> list[list[float]]:
     """Generate one embedding vector per text, in a single request where possible.
 
     The batch counterpart of ``get_embedding()``, for text only. A provider
-    whose endpoint takes a list sends one request; ``script`` runs the script
-    once per text, its protocol carrying a single input.
+    whose endpoint takes a list sends one request per batch; ``script`` runs
+    the script once per text, its protocol carrying a single input.
 
     Args:
         provider: Provider name.
         model: Embedding model name, or the script path for ``'script'``.
         texts: The texts to embed.
         dimensions: Requested vector size, as in ``get_embedding()``.
-        timeout: Seconds to wait. Defaults to the provider's configured timeout.
-        max_retries: Retry attempts on transient failure.
+        timeout: Seconds to wait for each request. Defaults to the provider's
+            configured timeout.
+        max_retries: Retry attempts on transient failure, per request.
         retry_base_delay: Initial exponential backoff delay in seconds.
-        sleep_time: Rate limit delay in seconds before the request.
-        extra_options: Provider-specific options for this call.
+        sleep_time: Rate limit delay in seconds before each request.
+        extra_options: Provider-specific options for this call, as in
+            ``get_embedding()``.
+        batch_size: Most texts per request. ``None`` sends them all in one.
+            Each batch is its own request, retried on its own, so a transient
+            failure does not resend the batches already embedded.
 
     Returns:
         One vector per text, in the same order.
 
     Raises:
+        ValueError: If ``batch_size`` is not a positive integer or None.
         UnsupportedOperationError: If the provider serves no embeddings, or
             cannot honour ``dimensions``.
+        ContextLengthError: If a text is longer than the model's context and
+            truncation is off. Its ``indices`` are the positions in ``texts``
+            of the batch that failed.
         EmptyResponseError: If the provider returned fewer vectors than texts.
     """
+    _check_batch_size(batch_size)
     if not texts:
         return []
     return _embed(
         provider, model, list(texts), None, dimensions, timeout,
-        max_retries, retry_base_delay, sleep_time, extra_options,
+        max_retries, retry_base_delay, sleep_time, extra_options, batch_size,
     )
+
+
+def _check_batch_size(batch_size: Any) -> None:
+    """Refuse a ``batch_size`` that cannot split a list, before anything is sent.
+
+    ``True`` is refused although it is the integer 1, as in
+    ``_check_logprobs()``: it is a flag passed by mistake, not a size.
+
+    Raises:
+        ValueError: If the value is neither None nor a positive integer.
+    """
+    if batch_size is None:
+        return
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError(
+            f"batch_size must be a positive integer or None, got {batch_size!r}."
+        )
 
 
 def _embed(
@@ -635,8 +667,13 @@ def _embed(
     retry_base_delay: float,
     sleep_time: int | None,
     extra_options: dict | None,
+    batch_size: int | None,
 ) -> list[list[float]]:
     """The body shared by get_embedding() and get_embeddings().
+
+    Splits ``inputs`` into consecutive batches of ``batch_size``, one request
+    each, all of it when None. Each request carries the position of its first
+    input, so a ``ContextLengthError`` names positions in ``inputs``.
 
     Returns:
         One vector per input.
@@ -645,28 +682,36 @@ def _embed(
     # registered for release the same way, and cleanup() has to be armed for it.
     _register_cleanup()
 
+    size = batch_size or len(inputs)
     _log.info(
-        "get_embedding start: provider=%s model=%s inputs=%d files=%d",
-        provider, model, len(inputs), len(files or []),
+        "get_embedding start: provider=%s model=%s inputs=%d batches=%d files=%d",
+        provider, model, len(inputs), -(-len(inputs) // size), len(files or []),
     )
 
     prov = get_provider(provider)
     _record_loaded(provider, prov, model)
+    effective_timeout = _resolve_timeout(prov, timeout)
 
-    _rate_limit(prov, sleep_time)
-    request = EmbeddingRequest(
-        provider=provider,
-        model=model,
-        inputs=inputs,
-        file_path=files,
-        dimensions=dimensions,
-        timeout=_resolve_timeout(prov, timeout),
-        extra_options=extra_options,
-    )
+    vectors: list[list[float]] = []
+    elapsed = 0.0
+    for start in range(0, len(inputs), size):
+        _rate_limit(prov, sleep_time)
+        request = EmbeddingRequest(
+            provider=provider,
+            model=model,
+            inputs=inputs[start:start + size],
+            file_path=files,
+            dimensions=dimensions,
+            timeout=effective_timeout,
+            extra_options=extra_options,
+            first_index=start,
+        )
+        batch, batch_elapsed = _invoke(
+            prov.embed, request, provider, model, max_retries, retry_base_delay
+        )
+        vectors.extend(batch)
+        elapsed += batch_elapsed
 
-    vectors, elapsed = _invoke(
-        prov.embed, request, provider, model, max_retries, retry_base_delay
-    )
     _log.info(
         "get_embedding success: provider=%s model=%s elapsed=%.2fs vectors=%d dims=%d",
         provider, model, elapsed, len(vectors), len(vectors[0]) if vectors else 0,

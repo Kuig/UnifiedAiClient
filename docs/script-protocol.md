@@ -389,8 +389,9 @@ intentionally minimal:
 | `text` | `string` | ✅ Yes | The text to embed. Empty only when `file_path` is present. |
 | `file_path` | `array[string]` | ❌ No | Files to embed together with `text` into one vector. Present only when the caller passed some. Paths are raw and unfiltered, as in `generate`. |
 | `dimensions` | `int` | ❌ No | The vector size the caller asked for. Present only when set. |
+| `extra_options` | `object` | ❌ No | The options registered via `configure_provider("script", ...)` merged with the call's `extra_options`, the call winning, as in `generate`. Present only when non-empty. |
 
-The two optional fields are absent, not null, when unused, so the payload of a plain text
+The optional fields are absent, not null, when unused, so the payload of a plain text
 request is exactly the two fields above. A script that cannot honour `file_path` or
 `dimensions` must exit non-zero rather than return a vector that ignores them: a text-only
 vector where a multimodal one was asked for, or a full-size one where a short one was, is

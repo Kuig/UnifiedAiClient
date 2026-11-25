@@ -388,10 +388,11 @@ class ScriptProvider(BaseProvider):
 
         One subprocess per input: the protocol's ``embed`` payload carries a
         single ``text``, and a batch field a script did not know about would be
-        ignored, returning one vector where several were expected. Files and a
-        vector size travel as the optional ``file_path`` and ``dimensions``
-        fields, sent only when set, so the payload of a plain text request is
-        exactly what it always was.
+        ignored, returning one vector where several were expected. Files, a
+        vector size and the merged ``extra_options`` (configured and call-time,
+        as in ``generate``) travel as the optional ``file_path``, ``dimensions``
+        and ``extra_options`` fields, sent only when set, so the payload of a
+        plain text request is exactly what it always was.
 
         Args:
             request: The embedding request. ``request.model`` is the script path.
@@ -409,6 +410,7 @@ class ScriptProvider(BaseProvider):
         """
         cmd = _resolve_interpreter(request.model)
         files = normalize_file_paths(request.file_path)
+        opts = self._merge_options(request)
         vectors: list[list[float]] = []
         for text in request.inputs:
             payload: dict[str, Any] = {"mode": "embed", "text": text}
@@ -416,6 +418,8 @@ class ScriptProvider(BaseProvider):
                 payload["file_path"] = files
             if request.dimensions is not None:
                 payload["dimensions"] = request.dimensions
+            if opts:
+                payload["extra_options"] = opts
             data = _run_script(cmd, payload, request.timeout)
             vectors.append([float(x) for x in data["embedding"]])
         return self._check_vector_count(vectors, request)

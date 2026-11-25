@@ -5,7 +5,12 @@ import logging
 from dataclasses import replace
 from typing import Any
 
-from unified_ai_client.exceptions import NonRetryableError, UnsupportedFileError
+from unified_ai_client.exceptions import (
+    ContextLengthError,
+    NonRetryableError,
+    NonRetryableHttpError,
+    UnsupportedFileError,
+)
 from unified_ai_client.file_utils import encode_file_base64, normalize_file_paths
 from unified_ai_client.http import get_json, post_json
 from unified_ai_client.models import (
@@ -44,6 +49,14 @@ _GENERATE_FIELDS: frozenset[str] = _CHAT_FIELDS | {"raw", "suffix", "template", 
 _EMBED_FIELDS: frozenset[str] = frozenset({"truncate", "dimensions"})
 _TOP_LEVEL_FIELDS: frozenset[str] = _GENERATE_FIELDS | _EMBED_FIELDS
 
+# Every over-long-input answer of /api/embed carries this phrase, whichever of
+# its three wordings applies (server/routes.go, EmbedHandler).
+_CONTEXT_LENGTH_MARKER: str = "context length"
+
+# /api/chat checks the completion capability before it loads anything, so an
+# embedding-only model is refused with `"<model>" does not support chat`.
+_NO_CHAT_MARKER: str = "does not support chat"
+
 _MESSAGE_FIELDS: tuple[str, ...] = (
     "role", "content", "thinking", "images", "tool_calls", "tool_name", "tool_call_id",
 )
@@ -77,16 +90,15 @@ def _fold_options(opts: dict[str, Any], options: dict[str, Any]) -> None:
         options: The Ollama ``options`` dict to update in place.
     """
     for k, v in opts.items():
-        if v is None:
-            continue
-        if k in _TRANSLATED_OPTIONS:
-            options[_TRANSLATED_OPTIONS[k]] = v
-        elif k in _MODEL_PARAM_OPTIONS:
-            options[k] = v
-        elif k in _TOP_LEVEL_FIELDS or k in BaseProvider._LIBRARY_OPTION_KEYS:
-            continue
-        else:
-            options[k] = v
+        if v is not None and _is_model_option(k):
+            options[_TRANSLATED_OPTIONS.get(k, k)] = v
+
+
+def _is_model_option(key: str) -> bool:
+    """Whether ``_fold_options()`` puts this key into the model ``options``."""
+    if key in _TRANSLATED_OPTIONS or key in _MODEL_PARAM_OPTIONS:
+        return True
+    return key not in _TOP_LEVEL_FIELDS and key not in BaseProvider._LIBRARY_OPTION_KEYS
 
 
 def _tool_link(name: str | None, call_id: str | None) -> dict[str, str]:
@@ -631,6 +643,13 @@ class OllamaProvider(BaseProvider):
         payload so Ollama allocates the model with the correct options
         (e.g. context window size) from the start.
 
+        An embedding-only model cannot be loaded through ``/api/chat``, which
+        refuses it as not supporting chat before loading anything. It is then
+        loaded through ``/api/embed`` with an empty input instead, under the
+        same rule as ``embed()``: only the call's own ``extra_options`` and
+        ``context_size`` reach its ``options``, since the registered ones are
+        written for the chat model.
+
         Args:
             model: Model identifier.
             keep_alive: How long to keep the model loaded. A number is seconds,
@@ -658,7 +677,37 @@ class OllamaProvider(BaseProvider):
         if options:
             payload["options"] = options
 
-        self._post("/api/chat", payload, self._resolve_timeout(timeout))
+        effective_timeout = self._resolve_timeout(timeout)
+        try:
+            self._post("/api/chat", payload, effective_timeout)
+        except NonRetryableHttpError as exc:
+            if exc.code != 400 or _NO_CHAT_MARKER not in exc.detail:
+                raise
+            _log.debug("Ollama: '%s' has no chat, loading it via /api/embed", model)
+            self._post(
+                "/api/embed",
+                self._embed_load_payload(model, effective_keep_alive, context_size, extra_options),
+                effective_timeout,
+            )
+
+    @staticmethod
+    def _embed_load_payload(
+        model: str,
+        keep_alive: str | int | None,
+        context_size: int | None,
+        extra_options: dict | None,
+    ) -> dict[str, Any]:
+        """The ``/api/embed`` request that loads a model and embeds nothing."""
+        options: dict[str, Any] = {}
+        _fold_options(extra_options or {}, options)
+        if context_size is not None:
+            options["num_ctx"] = context_size
+        payload: dict[str, Any] = {"model": model, "input": []}
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
+        if options:
+            payload["options"] = options
+        return payload
 
     def warm_up(
         self,
@@ -734,6 +783,13 @@ class OllamaProvider(BaseProvider):
         silently dropped. Whether the model can read the medium is up to the
         tag: a model without the encoder answers with an error of its own.
 
+        The call-time ``extra_options`` that are model options (``num_gpu``,
+        ``num_thread``, ``context_size`` as ``num_ctx``) travel in the request's
+        ``options``; the configured ones do not, because a provider
+        configuration is written for the chat model, as on the
+        OpenAI-compatible adapters. The body fields ``keep_alive``,
+        ``truncate`` and ``dimensions`` are read from both layers.
+
         Args:
             request: The embedding request.
 
@@ -743,6 +799,8 @@ class OllamaProvider(BaseProvider):
         Raises:
             UnsupportedFileError: If a file is neither text nor image or audio,
                 or a second file of the same class is attached.
+            ContextLengthError: If an input is longer than the context and
+                ``truncate`` is False. Ollama does not say which one.
             EmptyResponseError: If the server returns no vector for an input.
         """
         opts = self._merge_options(request)
@@ -769,14 +827,28 @@ class OllamaProvider(BaseProvider):
         keep_alive = opts.get("keep_alive")
         if keep_alive is not None:
             payload["keep_alive"] = keep_alive
+        options: dict[str, Any] = {}
+        _fold_options(request.extra_options or {}, options)
+        if options:
+            payload["options"] = options
         payload.update(_request_fields(opts, _EMBED_FIELDS))
+        call_options = {k for k in request.extra_options or {} if _is_model_option(k)}
         self._report_dropped_options(
-            set(opts) - _EMBED_FIELDS - {"keep_alive"},
-            "/api/embed takes no model options",
+            set(opts) - _EMBED_FIELDS - {"keep_alive"} - call_options,
+            "not an /api/embed field, and configured model options are written "
+            "for chat: pass them per call",
         )
         if request.dimensions is not None:
             payload["dimensions"] = request.dimensions
 
-        resp = self._post("/api/embed", payload, request.timeout)
+        try:
+            resp = self._post("/api/embed", payload, request.timeout)
+        except NonRetryableHttpError as exc:
+            if exc.code == 400 and _CONTEXT_LENGTH_MARKER in exc.detail:
+                first = request.first_index
+                raise ContextLengthError.from_http_error(
+                    exc, range(first, first + len(request.inputs))
+                ) from exc
+            raise
         vectors = [[float(x) for x in v] for v in resp.get("embeddings") or []]
         return self._check_vector_count(vectors, request)

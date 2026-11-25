@@ -339,6 +339,9 @@ class EmbeddingRequest:
             client.py, so a provider always receives a concrete number.
         extra_options: Call-time provider-specific options, merged over the
             configured ones by the adapter.
+        first_index: Position of ``inputs[0]`` in the list the caller passed,
+            non-zero when ``get_embeddings()`` split it into batches. Only
+            read to report which inputs a failure concerns.
     """
     provider: str
     model: str
@@ -347,6 +350,7 @@ class EmbeddingRequest:
     dimensions: int | None = None
     timeout: int | None = None
     extra_options: dict | None = None
+    first_index: int = 0
 
 
 @dataclass
