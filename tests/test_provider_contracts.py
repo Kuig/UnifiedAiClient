@@ -2391,6 +2391,78 @@ class TestGoogleCallTimeout(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Google API version
+# ---------------------------------------------------------------------------
+
+class TestGoogleApiVersion(unittest.TestCase):
+    """The Developer API client is built on v1beta, whatever the SDK's default.
+
+    Regression: google-genai 3.0 moved the default to v1, where every
+    gemini-2.5-flash request is a 400 (thinking, JSON mode, function calling and
+    search are not enabled there), while 2.x had v1beta hard-coded. The adapter
+    inherited the choice, so the installed SDK version decided whether Gemini
+    2.5 worked at all.
+    """
+
+    _ENV_KEYS = (
+        "GOOGLE_GENAI_API_VERSION", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_ENTERPRISE",
+    )
+
+    def _clean_env(self, **overrides: str) -> Any:
+        env = {k: v for k, v in os.environ.items() if k not in self._ENV_KEYS}
+        env.update(overrides)
+        return patch.dict(os.environ, env, clear=True)
+
+    @staticmethod
+    def _provider() -> Any:
+        from unified_ai_client.providers.google import GoogleProvider
+        return GoogleProvider(ProviderConfig(), api_key="fake-key")
+
+    def test_the_client_is_built_on_v1beta(self) -> None:
+        with self._clean_env(), \
+                patch("unified_ai_client.providers.google.genai.Client") as client_cls:
+            client_cls.return_value.vertexai = False
+            self._provider()._get_client()
+        client_cls.assert_called_once()
+        self.assertEqual(client_cls.call_args.kwargs["http_options"].api_version, "v1beta")
+
+    def test_the_real_sdk_resolves_v1beta(self) -> None:
+        """Against the installed SDK, not a mock: the version it actually sends.
+
+        ``_api_client._http_options`` is private, but it is the only place the
+        resolved version can be read, and a mock cannot tell whether the SDK
+        honours the option.
+        """
+        with self._clean_env():
+            client = self._provider()._get_client()
+        self.assertFalse(client.vertexai)
+        self.assertEqual(client._api_client._http_options.api_version, "v1beta")
+
+    def test_an_explicit_environment_version_wins(self) -> None:
+        with self._clean_env(GOOGLE_GENAI_API_VERSION="v1"), \
+                patch("unified_ai_client.providers.google.genai.Client") as client_cls:
+            self._provider()._get_client()
+        client_cls.assert_called_once_with(api_key="fake-key")
+
+    def test_vertex_keeps_its_own_version(self) -> None:
+        """v1beta does not exist on Vertex, whose default is v1beta1."""
+        first, second = MagicMock(vertexai=True), MagicMock(vertexai=True)
+        with self._clean_env(), \
+                patch("unified_ai_client.providers.google.genai.Client",
+                      side_effect=[first, second]) as client_cls:
+            client = self._provider()._get_client()
+        self.assertIs(client, second)
+        first.close.assert_called_once()
+        self.assertEqual(client_cls.call_args_list[1].kwargs, {"api_key": "fake-key"})
+
+    def test_the_real_sdk_on_vertex_resolves_v1beta1(self) -> None:
+        with self._clean_env(GOOGLE_GENAI_USE_VERTEXAI="true"):
+            client = self._provider()._get_client()
+        self.assertTrue(client.vertexai)
+        self.assertEqual(client._api_client._http_options.api_version, "v1beta1")
+
+
+# ---------------------------------------------------------------------------
 # Google blocked response
 # ---------------------------------------------------------------------------
 

@@ -143,7 +143,10 @@ providers.
 **The bespoke adapters** are the three whose APIs are not OpenAI-shaped. `google` uses the
 `google-genai` SDK, uploads attachments through the Files API and polls them to the
 `ACTIVE` state, keeps an upload cache so the same file is not sent twice, and is the only
-provider with remote resources to release. `ollama` speaks the native `/api/chat`
+provider with remote resources to release. It pins the API version rather than
+inheriting the SDK's default, because that default changed under it once (`v1beta` to
+`v1` in `google-genai` 3.0) and turned off most of what the adapter sends on Gemini 2.5.
+`ollama` speaks the native `/api/chat`
 endpoint, which carries images in a single `images[]` field and maps `context_size` to
 `num_ctx` and `max_tokens` to `num_predict`. `anthropic` speaks `/v1/messages` over
 `urllib`.

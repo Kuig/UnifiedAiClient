@@ -50,6 +50,17 @@ holding a lock across tens of seconds of network I/O.
 _DEFAULT_UPLOAD_POLL_TIMEOUT = 15
 """Seconds to wait for an upload to turn ACTIVE when ``upload_poll_timeout`` is unset."""
 
+_DEVELOPER_API_VERSION = "v1beta"
+"""API version of the Gemini Developer API client, pinned rather than inherited.
+
+google-genai 3.0 moved the SDK default from ``v1beta`` to ``v1``. There, verified
+live on gemini-2.5-flash, thinking, JSON mode, function calling and search are each
+a 400 asking for ``v1beta``, and since every request carries a ``ThinkingConfig``
+no call got through at all; the ``-latest`` aliases and some preview models do not
+exist on ``v1`` either. Not applied on Vertex, whose version is ``v1beta1``, nor
+when ``GOOGLE_GENAI_API_VERSION`` is set, which is the caller's own choice.
+"""
+
 _FORWARDED_CONFIG_FIELDS: tuple[str, ...] = (
     "response_schema", "stop_sequences", "presence_penalty", "frequency_penalty", "seed",
 )
@@ -134,8 +145,31 @@ class GoogleProvider(BaseProvider):
                         raise ValueError(
                             "Missing Google AI API key. Add 'google_api_key' to secrets.json."
                         )
-                    self._client = genai.Client(api_key=self.api_key)
+                    self._client = self._build_client()
         return self._client
+
+    def _build_client(self) -> genai.Client:
+        """Build the client on ``_DEVELOPER_API_VERSION`` unless told otherwise.
+
+        Vertex is detected through the client's own ``vertexai`` property
+        rather than by reading the environment here, since the SDK decides it
+        from more than one variable (``GOOGLE_GENAI_USE_VERTEXAI``,
+        ``GOOGLE_GENAI_USE_ENTERPRISE``). Building a client opens no
+        connection, so the rebuild costs nothing on the network.
+
+        Returns:
+            A new genai.Client.
+        """
+        if os.environ.get("GOOGLE_GENAI_API_VERSION"):
+            return genai.Client(api_key=self.api_key)
+        client = genai.Client(
+            api_key=self.api_key,
+            http_options=types.HttpOptions(api_version=_DEVELOPER_API_VERSION),
+        )
+        if client.vertexai:
+            client.close()
+            client = genai.Client(api_key=self.api_key)
+        return client
 
     def _upload_file(
         self, file_path: str, upload_poll_timeout: int = _DEFAULT_UPLOAD_POLL_TIMEOUT

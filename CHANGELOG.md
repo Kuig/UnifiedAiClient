@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `google` works with `google-genai` 3.x. The SDK's 3.0 release moved the default API
+  version of the Gemini Developer API from `v1beta` to `v1`, where every request to a
+  Gemini 2.5 model failed with a 400 (thinking, JSON mode, function calling and search
+  are not enabled there), and the `-latest` aliases and some preview models are not
+  served. The adapter now builds its client on `v1beta` explicitly, unless
+  `GOOGLE_GENAI_API_VERSION` is set or the client runs on Vertex AI, whose own default
+  stays in charge. The dependency is unchanged, `google-genai>=1.62.0`, and a clean
+  install receives 3.x.
+- `silence_sdks()` also quiets `httpx2`, the HTTP client `google-genai` uses from 3.0.
+
 ## [0.9.1] - 2026-11-25
 
 ### Added

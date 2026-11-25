@@ -219,6 +219,13 @@ named list: `response_schema`, `stop_sequences`, `presence_penalty`, `frequency_
 and `seed`. An option outside that list and outside the table above does not reach Gemini,
 and is named in a `WARNING` log record on every call.
 
+`google` also pins the API version of the Gemini Developer API to `v1beta`, whatever the
+installed `google-genai` defaults to. From `google-genai` 3.0 the SDK's own default is
+`v1`, where Gemini 2.5 models accept no thinking configuration, JSON mode, function
+calling or search, and the `-latest` aliases are not served. To choose another version,
+set `GOOGLE_GENAI_API_VERSION` in the environment, which the library then leaves to the
+SDK. Vertex AI, selected through `GOOGLE_GENAI_USE_VERTEXAI`, keeps its own default.
+
 ## Sharing the library between projects
 
 Provider configuration, cached provider instances, the list of loaded models and Google's

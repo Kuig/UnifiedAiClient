@@ -12,6 +12,7 @@ def silence_sdks() -> None:
         "google_genai",
         "google.genai",
         "httpx",
+        "httpx2",
         "httpcore",
         "urllib3",
         "openai",

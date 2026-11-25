@@ -415,7 +415,8 @@ for m in list_models("ollama"):
 ### `silence_sdks`
 
 Suppresses verbose debug and info messages from downstream provider SDKs such as
-`google_genai`, `httpx` and `httpcore`, without touching the root logger.
+`google_genai`, `httpx`, `httpx2` (the HTTP client of `google-genai` 3.x) and `httpcore`,
+without touching the root logger.
 
 ```python
 def silence_sdks() -> None:
